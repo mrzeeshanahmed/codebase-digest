@@ -1,0 +1,30 @@
+name: Build & Bundle Size
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ '*' ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+      - name: Install dependencies
+        run: |
+          npm ci
+      - name: Build extension
+        run: |
+          npm run compile
+      - name: Check bundle size
+        env:
+          # Default threshold can be overridden by repository secrets or workflow inputs
+          BUNDLE_SIZE_THRESHOLD: ${{ secrets.BUNDLE_SIZE_THRESHOLD || 409600 }}
+        run: |
+          node ./scripts/checkBundleSize.js
+        continue-on-error: false

@@ -1,0 +1,293 @@
+import * as vscode from 'vscode';
+import * as path from 'path';
+import * as fs from 'fs';
+import * as os from 'os';
+// Track created temp dirs for session-scoped cleanup
+const _createdTmpDirs: string[] = [];
+import { exec } from 'child_process';
+import { RateLimitError, GitAuthError } from '../utils/errors';
+import { showUserError } from '../utils/userMessages';
+import { spawnGitPromise, safeFetch } from '../utils/procRedact';
+import { scrubTokens } from '../utils/redaction';
+
+export interface RemoteRepoMeta {
+    ownerRepo: string;
+    resolved: {
+        sha: string;
+        branch?: string;
+        tag?: string;
+        commit?: string;
+    };
+    subpath?: string;
+}
+
+// Build remote summary block for display
+export function buildRemoteSummary(meta: RemoteRepoMeta): string {
+    return `# Remote Source\nRepository: ${meta.ownerRepo}\nRef: ${meta.resolved.branch || meta.resolved.tag || meta.resolved.commit || '(default)'} => ${meta.resolved.sha}\nSubpath: ${meta.subpath || '-'}\n`;
+}
+
+export async function runSubmoduleUpdate(repoPath: string): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+        const proc = require('child_process').spawn('git', ['submodule', 'update', '--init', '--recursive'], { cwd: repoPath, env: process.env });
+        proc.on('error', reject);
+        proc.on('exit', (code: number) => code === 0 ? resolve() : reject(new Error(`git submodule update failed with code ${code}`)));
+    });
+}
+
+export async function authenticate(): Promise<string> {
+    const session = await vscode.authentication.getSession('github', ['repo'], { createIfNone: true });
+    if (!session || !session.accessToken) {
+        throw new GitAuthError('github.com', 'GitHub authentication failed');
+    }
+    return session.accessToken;
+}
+
+async function githubApiRequest(endpoint: string, token: string): Promise<any> {
+    const res = await safeFetch(`https://api.github.com${endpoint}`, {
+        headers: { Authorization: `Bearer ${token}` }
+    });
+    if (!res.ok) {
+        const isRateLimit = res.status === 429 || (res.status === 403 && res.headers.get('x-ratelimit-remaining') === '0');
+        if (isRateLimit) {
+            throw new RateLimitError('GitHub', `GitHub API rate limit exceeded (${res.status}).`);
+        }
+        if (res.status === 404) {
+            throw new Error('Repository or reference not found. Check owner/repo and ref.');
+        }
+        if (res.status === 401 || (res.status === 403 && !isRateLimit)) {
+            throw new GitAuthError('github.com', `Authentication failed or insufficient permissions (${res.status}).`);
+        }
+        throw new Error(`GitHub API error: ${res.status} ${res.statusText}`);
+    }
+    return await res.json();
+}
+
+export async function resolveRefToSha(ownerRepo: string, ref?: { tag?: string; branch?: string; commit?: string }, token?: string): Promise<string> {
+    if (ref?.commit) { return ref.commit; }
+    const [owner, repo] = ownerRepo.split('/');
+    // Try API if token is present
+    if (token) {
+        let attempts = 0;
+        let currentToken = token;
+        while (attempts < 2) {
+            try {
+                if (ref?.tag) {
+                    const tags = await githubApiRequest(`/repos/${owner}/${repo}/tags`, currentToken);
+                    const tagObj = tags.find((t: any) => t.name === ref.tag);
+                    if (!tagObj) { throw new Error(scrubTokens(`Tag not found: ${ref.tag}`)); }
+                    return tagObj.commit.sha;
+                }
+                if (ref?.branch) {
+                    const branch = await githubApiRequest(`/repos/${owner}/${repo}/branches/${ref.branch}`, currentToken);
+                    return branch.commit.sha;
+                }
+                // Default: HEAD of default branch
+                const repoInfo = await githubApiRequest(`/repos/${owner}/${repo}`, currentToken);
+                const branch = await githubApiRequest(`/repos/${owner}/${repo}/branches/${repoInfo.default_branch}`, currentToken);
+                return branch.commit.sha;
+            } catch (apiErr: any) {
+                attempts += 1;
+                if (apiErr instanceof GitAuthError) {
+                    // Ask user if they want to re-auth
+                    const resp = await showUserError(apiErr, scrubTokens('Authentication required to access GitHub repository'));
+                    if (resp && (resp as any).action === 'signIn') {
+                        try {
+                            currentToken = await authenticate();
+                            continue; // retry with new token
+                        } catch (aErr) {
+                            throw apiErr;
+                        }
+                    }
+                    throw apiErr;
+                }
+                if (apiErr instanceof RateLimitError) {
+                    await showUserError(apiErr, scrubTokens('GitHub API rate limit reached'));
+                    throw apiErr;
+                }
+                // Other API errors: break and fall back to ls-remote
+                if (attempts >= 1) { break; }
+            }
+        }
+    }
+    // Fallback: git ls-remote
+    const remoteUrl = `https://github.com/${owner}/${repo}.git`;
+    const refName = ref?.tag ? `refs/tags/${ref.tag}` : ref?.branch ? `refs/heads/${ref.branch}` : 'HEAD';
+    return await spawnGitPromise(['ls-remote', remoteUrl, refName]).then(r => {
+        const match = r.stdout.match(/^([a-f0-9]+)\s+/m);
+        if (match) { return match[1]; }
+        throw new Error(scrubTokens(`Could not resolve ref: ${refName}`));
+    });
+}
+
+export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?: string, tmpDir?: string, opts?: { skipSparse?: boolean, skipFilter?: boolean }): Promise<string> {
+    const [owner, repo] = ownerRepo.split('/');
+    const token = await authenticate();
+    const url = `https://${token}:x-oauth-basic@github.com/${owner}/${repo}.git`;
+    // Use a session-unique prefix to reduce collisions and make tmp dir scoping obvious
+    const sessionPrefix = `${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2,8)}-`;
+    const dir = tmpDir || fs.mkdtempSync(path.join(os.tmpdir(), `${sessionPrefix}${repo}-`));
+    if (!tmpDir) { _createdTmpDirs.push(dir); }
+    const env = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+    // Wrap clone+sparse logic so we can cleanup the temp dir on failure if we created it
+    const createdHere = !tmpDir;
+    try {
+        // Step 1: git clone
+        // Pick clone args; allow opts.skipFilter to disable the blob filter if requested
+        const baseCloneArgs = opts && opts.skipFilter ? ['clone','--no-checkout','--depth','1','--single-branch',url,dir] : ['clone','--no-checkout','--depth','1','--filter=blob:none','--single-branch',url,dir];
+        await spawnGitPromise(baseCloneArgs, { env }).then(() => {}).catch((e) => { throw e; });
+        // Step 2: sparse-checkout if subpath and not explicitly skipped
+        if (subpath && !(opts && opts.skipSparse)) {
+            try {
+                await spawnGitPromise(['sparse-checkout','init','--cone'], { cwd: dir, env }).then(() => {});
+                await spawnGitPromise(['sparse-checkout','set', subpath], { cwd: dir, env }).then(() => {});
+            } catch (sparseErr: any) {
+                // Scrub error and present retry choices to the user to try less strict clone options.
+                const safeMsg = scrubTokens(String(sparseErr && sparseErr.message ? sparseErr.message : sparseErr));
+                try {
+                    const choice = await vscode.window.showQuickPick([
+                        { label: 'Retry: full clone (no sparse, may be larger)', id: 'full' },
+                        { label: 'Retry: clone without --filter (try sparse again)', id: 'nofilter' },
+                        { label: 'Cancel', id: 'cancel' }
+                    ], { placeHolder: `Sparse checkout failed: ${safeMsg}`, ignoreFocusOut: true });
+                    if (!choice || choice.id === 'cancel') {
+                        throw new Error(scrubTokens('Sparse checkout failed and user canceled retry.'));
+                    }
+                    // Remove possibly-partially-created dir before retrying
+                    if (fs.existsSync(dir)) { fs.rmSync(dir, { recursive: true, force: true }); }
+                    // Re-create dir for retry
+                    fs.mkdirSync(dir, { recursive: true });
+                    if (choice.id === 'nofilter') {
+                        // Retry clone without blob filter and attempt sparse again
+                        await spawnGitPromise(['clone','--no-checkout','--depth','1','--single-branch',url,dir], { env });
+                        // attempt sparse again
+                        await spawnGitPromise(['sparse-checkout','init','--cone'], { cwd: dir, env }).then(() => {});
+                        await spawnGitPromise(['sparse-checkout','set', subpath], { cwd: dir, env }).then(() => {});
+                    } else if (choice.id === 'full') {
+                        // Full shallow clone (no --no-checkout necessary)
+                        await spawnGitPromise(['clone','--depth','1','--single-branch',url,dir], { env });
+                        // No sparse needed; subpath will be present in working tree after checkout
+                    }
+                } catch (retryErr: any) {
+                    // Propagate a scrubbed retry error so caller can handle cleanup
+                    if (retryErr && retryErr.message) { retryErr.message = scrubTokens(String(retryErr.message)); }
+                    throw retryErr;
+                }
+            }
+        }
+    } catch (err) {
+        // On any failure, if we created the dir here, attempt best-effort cleanup before propagating
+        try {
+            if (createdHere && fs.existsSync(dir)) { await cleanup(dir); }
+        } catch (ce) {
+            // swallow cleanup errors; caller will see original error
+        }
+        throw err;
+    }
+    // Step 3: git checkout
+    await spawnGitPromise(['checkout', shaOrRef], { cwd: dir, env }).then(() => {});
+    return dir;
+}
+
+export async function cleanup(tmpDir: string): Promise<void> {
+    if (fs.existsSync(tmpDir)) {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+}
+
+// Cleanup any lingering tmp dirs created during this session (best-effort)
+export function cleanupSessionTmpDirs(): void {
+    for (const d of _createdTmpDirs.slice()) {
+        try {
+            if (fs.existsSync(d)) {
+                fs.rmSync(d, { recursive: true, force: true });
+            }
+        } catch (e) {
+            // swallow
+        }
+    }
+}
+
+export async function ingestRemoteRepo(urlOrSlug: string, options?: { ref?: { tag?: string; branch?: string; commit?: string }, subpath?: string, includeSubmodules?: boolean }): Promise<{ localPath: string; meta: RemoteRepoMeta }> {
+    let tmpDir: string | undefined;
+    let localPath: string | undefined;
+    try {
+        let ownerRepo = urlOrSlug;
+        let refType = '';
+        let refValue = '';
+        if (urlOrSlug.startsWith('https://')) {
+            const m = urlOrSlug.match(/github.com\/([^\/]+\/[^\/]+)(?:\/|$)/);
+            if (!m) {
+                await showUserError(new Error(scrubTokens('Invalid GitHub URL')), scrubTokens(urlOrSlug));
+                throw new Error(scrubTokens('Invalid GitHub URL'));
+            }
+            ownerRepo = m[1];
+        }
+        const token = await authenticate();
+        let resolved: { sha: string; branch?: string; tag?: string; commit?: string } = { sha: '' };
+        if (options?.ref) {
+            if (options.ref.branch) { refType = 'branch'; refValue = options.ref.branch; }
+            if (options.ref.tag) { refType = 'tag'; refValue = options.ref.tag; }
+            if (options.ref.commit) { refType = 'commit'; refValue = options.ref.commit; }
+        }
+        let sha: string;
+        try {
+            sha = await resolveRefToSha(ownerRepo, options?.ref, token);
+        } catch (err: any) {
+            // Ensure message is scrubbed before user display
+            if (err && err.message) { err.message = scrubTokens(String(err.message)); }
+            if (err instanceof RateLimitError || err instanceof GitAuthError) {
+                await showUserError(err, scrubTokens(String(err.message)));
+            } else {
+                await showUserError(new Error(scrubTokens('Remote repo ingest failed.')), scrubTokens(String(err)));
+            }
+            throw err;
+        }
+        resolved.sha = sha;
+        resolved.branch = options?.ref?.branch;
+        resolved.tag = options?.ref?.tag;
+        resolved.commit = options?.ref?.commit;
+        tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `${ownerRepo.replace('/', '-')}-`));
+        try {
+            localPath = await partialClone(ownerRepo, sha, options?.subpath, tmpDir);
+        } catch (err: any) {
+            if (err && err.message) { err.message = scrubTokens(String(err.message)); }
+            await showUserError(new Error(scrubTokens('Git clone or checkout failed.')), scrubTokens(String(err)));
+            throw err;
+        }
+        // If includeSubmodules, run git submodule update --init --recursive
+        if (options?.includeSubmodules) {
+            try {
+                await new Promise<void>((resolve, reject) => {
+                    const proc = require('child_process').spawn('git', ['submodule', 'update', '--init', '--recursive'], { cwd: localPath!, env: process.env });
+                    proc.on('error', reject);
+                    proc.on('exit', (code: number) => code === 0 ? resolve() : reject(new Error(`git submodule update failed with code ${code}`)));
+                });
+            } catch (err: any) {
+                if (err && err.message) { err.message = scrubTokens(String(err.message)); }
+                await showUserError(new Error(scrubTokens('Git submodule update failed.')), scrubTokens(String(err)));
+                throw err;
+            }
+        }
+        return {
+            localPath: localPath!,
+            meta: {
+                ownerRepo,
+                resolved,
+                subpath: options?.subpath
+            }
+        };
+    } catch (err) {
+        throw err;
+    } finally {
+        // Ensure temporary directory is cleaned up on any failure path if it exists and wasn't returned
+        try {
+            if (tmpDir && (!localPath || !localPath.startsWith(tmpDir))) {
+                await cleanup(tmpDir);
+            }
+        } catch (cleanupErr) {
+            const ch = vscode.window.createOutputChannel('Codebase Digest Errors');
+            ch.appendLine(`Failed to cleanup temporary dir ${tmpDir}: ${String(cleanupErr)}`);
+            ch.show(true);
+        }
+    }
+}

@@ -1,0 +1,18 @@
+{
+  "timers": {
+    "scanTime": 28,
+    "readTime": 102,
+    "assembleTime": 0,
+    "tokenTime": 0,
+    "totalElapsed": 130
+  },
+  "counters": {
+    "filesProcessed": 225,
+    "filesSkippedBySize": 0,
+    "filesSkippedByIgnore": 0,
+    "filesSkippedByDepth": 0,
+    "filesSkippedByMaxFiles": 0,
+    "filesSkippedByTotalLimit": 0,
+    "bytesRead": 2277376
+  }
+}

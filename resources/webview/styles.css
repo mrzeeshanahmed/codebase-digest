@@ -1,0 +1,210 @@
+:root{
+	--bg:#0f1115;
+	--panel:#121318;
+	--muted:#9aa0a6;
+	--text:#e6e9ee;
+	--accent:#7dd3fc; /* subtle cyan */
+	--accent-2:#8b5cf6; /* violet for highlights */
+	--surface:#17181b;
+	--border:rgba(255,255,255,0.04);
+	--selected:#1f2430;
+	--success:#10b981;
+}
+
+html,body{
+	height:100%;
+	margin:0;
+	padding:0;
+	font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+	background:linear-gradient(180deg,var(--bg),#0b0c0f);
+	color:var(--text);
+	-webkit-font-smoothing:antialiased;
+	-moz-osx-font-smoothing:grayscale;
+}
+
+/* Slightly increased outer padding for better breathing room on narrow viewports */
+#dashboard{margin:24px auto;max-width:1200px;padding:18px}
+
+/* Typographic scale */
+/* Typographic scale — nudged up for improved readability after wrapping */
+#dashboard h1, h1{font-size:1.5rem;margin:0 0 1rem;color:var(--text);font-weight:600;line-height:1.2}
+#dashboard h3, h3{font-size:1.125rem;margin:0 0 .75rem;color:var(--muted);font-weight:600;line-height:1.25}
+
+#toolbar{display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:1rem;align-items:center}
+
+#toolbar .segmented{display:flex;flex-wrap:wrap;gap:.4rem;row-gap:.5rem;background:transparent;border-radius:8px;overflow:hidden;border:1px solid transparent;align-items:center}
+#toolbar .segmented button{display:inline-flex;align-items:center;gap:.5rem;padding:.5rem .7rem;border:0;background:transparent;color:var(--muted);cursor:pointer;font-size:.95rem;flex:0 1 auto;min-width:80px}
+#toolbar .segmented button .icon{width:18px;height:18px;flex:0 0 18px}
+#toolbar .segmented button:hover{background:rgba(255,255,255,0.02);color:var(--text)}
+#toolbar .segmented button[aria-pressed="true"],
+#toolbar .segmented button.active{background:linear-gradient(180deg,rgba(255,255,255,0.02),transparent);color:var(--text);box-shadow:0 6px 18px rgba(2,6,23,0.45) inset;border-right:1px solid rgba(255,255,255,0.02)}
+#toolbar .segmented button:active{transform:translateY(1px)}
+
+/* Ensure keyboard focus is visible and consistent */
+#toolbar .segmented button:focus-visible{outline:3px solid rgba(125,211,252,0.14);outline-offset:3px;border-radius:6px}
+
+#main{display:flex;gap:16px}
+#left{flex:1;min-width:320px}
+#right{width:360px}
+
+#ascii-tree{font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, "Roboto Mono", "Segoe UI Mono";white-space:pre;background:var(--surface);color:var(--muted);padding:14px;border-radius:10px;border:1px solid var(--border);box-shadow:0 8px 30px rgba(2,6,23,0.6) inset}
+
+#file-list{margin-top:10px}
+.virtual-viewport{background:linear-gradient(180deg,transparent,rgba(255,255,255,0.01));border-radius:8px;border:1px solid var(--border);overflow:auto;box-shadow:0 6px 20px rgba(2,6,23,0.6)}
+.file-row{display:flex;align-items:center;gap:.75rem;padding:.6rem .75rem;border-bottom:1px solid rgba(255,255,255,0.02);cursor:pointer;color:var(--text);min-height:44px}
+.file-row:hover{background:rgba(255,255,255,0.03);transform:translateY(-1px)}
+.file-row.selected{background:linear-gradient(180deg,rgba(31,36,48,0.6),var(--selected));box-shadow:inset 0 0 0 1px rgba(125,211,252,0.06), 0 8px 18px rgba(2,6,23,0.45)}
+.file-row[role="treeitem"]:focus{outline:none}
+
+/* Focus-visible outlines for keyboard users (accessible and high-contrast) */
+.file-row:focus-visible{outline:3px solid rgba(125,211,252,0.18);outline-offset:3px;border-radius:8px;background:linear-gradient(90deg,var(--selected),rgba(125,211,252,0.02))}
+
+/* Ensure rows that can receive keyboard focus have tabindex styling consistent with tree semantics */
+.file-row[tabindex]{cursor:pointer}
+.file-row[tabindex="0"]{box-shadow:none}
+
+.file-row .name{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.file-row .meta{color:var(--muted);font-size:.85rem;min-width:80px;text-align:right}
+
+/* subtle motion for interactive states (respects prefers-reduced-motion) */
+.file-row,.file-row .meta{transition:background-color 200ms cubic-bezier(.2,.9,.3,1), color 160ms ease, transform 160ms ease}
+
+/* Settings panel */
+#settings{background:var(--panel);padding:14px;border-radius:10px;border:1px solid var(--border);margin-top:14px;box-shadow:0 6px 22px rgba(2,6,23,0.5)}
+#settings label{display:block;color:var(--muted);margin-bottom:.5rem}
+#settings input[type="text"],#settings select,#settings input[type="number"]{width:100%;padding:.6rem .6rem;border-radius:8px;border:1px solid rgba(255,255,255,0.03);background:transparent;color:var(--text)}
+#settings button{margin-right:.5rem}
+
+/* Safety / Redaction form styles */
+.safety-group{border:1px dashed rgba(255,255,255,0.03);padding:10px;border-radius:8px;margin-bottom:8px}
+.safety-group legend{font-weight:600;color:var(--muted);margin-bottom:8px}
+.safety-group textarea{width:100%;padding:.6rem;border-radius:8px;border:1px solid rgba(255,255,255,0.03);background:transparent;color:var(--text);resize:vertical}
+.safety-group input[type="checkbox"]{margin-right:8px}
+
+/* Chart table */
+.chart-table{border-collapse:collapse;margin:1em 0;width:100%;max-width:700px;background:var(--panel);color:var(--text);box-shadow:0 6px 18px rgba(2,6,23,0.5);border-radius:10px;overflow:hidden}
+.chart-table caption{text-align:left;font-weight:700;padding:.9rem 1rem;color:var(--text);background:linear-gradient(180deg,rgba(255,255,255,0.01),transparent)}
+.chart-table td{padding:.6rem .8rem;border-top:1px solid rgba(255,255,255,0.02);vertical-align:middle}
+.chart-table tr:nth-child(even) td{background:rgba(255,255,255,0.01)}
+.chart-table td:first-child{width:70%;color:var(--muted)}
+.chart-table td:last-child{width:30%;text-align:right;font-variant-numeric:tabular-nums}
+
+@media (max-width:600px){
+	#main{flex-direction:column}
+	#right{width:100%}
+}
+
+/* Accessibility: reduce motion */
+@media (prefers-reduced-motion: reduce){
+	.file-row,.file-row .meta{transition:none;animation:none}
+}
+
+/* Icon styles */
+.icon { width:18px;height:18px;flex:0 0 18px;display:inline-flex;align-items:center;justify-content:center;color:var(--muted) }
+.file-row.selected .icon { color: var(--accent) }
+.file-row.ignored { opacity: .45 }
+.file-row.filtered { background: rgba(139,92,246,0.04); }
+
+/* Virtual group bar */
+.group-bar{display:flex;gap:.4rem;margin-bottom:.4rem;flex-wrap:wrap;align-items:center}
+.group-pill{background:transparent;border:1px solid rgba(255,255,255,0.03);color:var(--muted);padding:.15rem .45rem;border-radius:999px;cursor:pointer;font-size:.88rem}
+.group-pill:hover{background:rgba(255,255,255,0.02);color:var(--text);border-color:var(--border)}
+.group-pill:active{transform:translateY(1px)}
+
+/* Progress bar */
+/* Progress + inline stats */
+.progress-wrapper{display:flex;align-items:center;gap:.6rem;margin-bottom:.75rem}
+#progress-container{flex:1;height:8px;background:linear-gradient(180deg,rgba(255,255,255,0.01),transparent);border-radius:999px;overflow:hidden}
+#progress-bar{height:8px;width:0%;background:linear-gradient(90deg,var(--accent),var(--accent-2));border-radius:999px;transition:width 260ms linear}
+#progress-container.indeterminate #progress-bar{width:40%;animation:indeterminate 1.4s linear infinite}
+.progress-stats{min-width:110px;color:var(--muted);font-size:.85rem;text-align:right}
+@keyframes indeterminate{0%{transform:translateX(-100%)}100%{transform:translateX(300%)}}
+
+/* Status chip row */
+.chip-row {
+	display: flex;
+	gap: 8px;
+	padding: 8px 12px;
+	align-items: center;
+}
+.status-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	padding: 6px 10px;
+	border-radius: 999px;
+	background: var(--vscode-panel-background);
+	color: var(--vscode-foreground);
+	font-size: 12px;
+	box-shadow: var(--vscode-widget-shadow, none);
+	border: 1px solid rgba(0,0,0,0.06);
+}
+.status-chip .label {
+	color: var(--vscode-foreground);
+	opacity: 0.8;
+}
+.status-chip .value {
+	font-weight: 600;
+	color: var(--vscode-foreground);
+}
+.status-chip.over-limit {
+	border-color: var(--vscode-inputValidation-errorBorder);
+	background: linear-gradient(180deg, rgba(255,235,238,0.03), rgba(255,235,238,0.01));
+}
+
+/* Persistent over-limit banner that appears above the status chips when tokenEstimate > contextLimit */
+.over-limit-banner {
+	display: block;
+	padding: 8px 12px;
+	margin-bottom: 8px;
+	border-radius: 8px;
+	background: linear-gradient(90deg, rgba(255, 244, 244, 0.02), rgba(255, 230, 230, 0.03));
+	border: 1px solid rgba(255, 99, 72, 0.12);
+	color: var(--text);
+	font-size: 0.95rem;
+}
+.over-limit-banner .over-limit-text { font-weight: 600; color: var(--vscode-foreground); }
+
+.header-actions { display:flex; gap:8px; align-items:center; flex-wrap:wrap; row-gap:6px; }
+#preset-btn { padding:6px 10px; border-radius:6px; background:transparent; border:1px solid rgba(0,0,0,0.06); }
+#preset-menu { position: absolute; top:56px; left:16px; background:var(--vscode-editor-background); border:1px solid rgba(0,0,0,0.08); box-shadow: var(--vscode-widget-shadow, 0 6px 20px rgba(0,0,0,0.12)); border-radius:6px; padding:6px; display:flex; flex-direction:column; gap:4px; z-index:40; }
+#preset-menu[hidden] { display:none; }
+#preset-menu button { background:transparent; border:none; padding:8px 12px; text-align:left; border-radius:4px; }
+#preset-menu button:hover { background:rgba(0,0,0,0.04); }
+
+/* Toasts */
+#toast-root{position:fixed;right:18px;bottom:18px;z-index:1000;display:flex;flex-direction:column;gap:.6rem}
+.toast{background:linear-gradient(180deg,var(--panel),rgba(255,255,255,0.01));color:var(--text);padding:.75rem .9rem;border-radius:10px;border:1px solid var(--border);box-shadow:0 12px 40px rgba(2,6,23,0.6);min-width:220px}
+.toast.success{border-color:rgba(16,185,129,0.14)}
+.toast.warn{border-color:rgba(250,204,21,0.14)}
+.toast.info{border-color:rgba(125,211,252,0.08)}
+.toast .msg{font-size:1rem;color:var(--text)}
+.toast .sub{font-size:.85rem;color:var(--muted);margin-top:.25rem}
+
+/* High-contrast support */
+@media (forced-colors: active) {
+	.file-row { border-color: WindowText; }
+	.file-row.selected { background: Highlight; color: HighlightText }
+}
+
+/* Utility: subtle elevation for panels */
+.elevated {box-shadow:0 10px 30px rgba(2,6,23,0.6);}
+/* Header strip & workspace info */
+#header-strip{display:flex;align-items:center;justify-content:space-between;padding:12px;border-radius:8px;margin-bottom:14px;background:linear-gradient(180deg,rgba(255,255,255,0.01),transparent)}
+#workspace-info{display:flex;align-items:center;gap:12px}
+#workspace-info h1{margin:0;font-size:1.2rem;color:var(--text);font-weight:600;line-height:1.2}
+#workspace-slug{color:var(--muted);font-size:.95rem}
+
+/* Primary action button (header) */
+.primary{display:inline-flex;align-items:center;gap:.5rem;padding:.5rem .8rem;border-radius:8px;background:linear-gradient(90deg,var(--accent),var(--accent-2));color:#071021;border:0;cursor:pointer}
+.primary .icon{filter:drop-shadow(0 2px 6px rgba(0,0,0,0.4))}
+
+/* small status area and ascii preview */
+#stats{margin-bottom:.5rem;font-size:.9rem;color:var(--muted)}
+#ascii-tree{font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, "Roboto Mono", "Segoe UI Mono";white-space:pre;background:var(--surface);color:var(--muted);padding:10px;border-radius:10px;border:1px solid var(--border);box-shadow:0 8px 30px rgba(2,6,23,0.6) inset;margin-bottom:1rem;max-height:112px;overflow:auto;font-size:.9rem;line-height:1.2}
+
+/* ingest preview in modal */
+#ingest-preview{margin-top:8px;font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, "Roboto Mono", "Segoe UI Mono";white-space:pre-wrap;max-height:200px;overflow:auto;background:#111;color:var(--text);padding:8px;border-radius:4px}
+
+/* small layout helpers */
+.modal .modal-content{padding:12px}

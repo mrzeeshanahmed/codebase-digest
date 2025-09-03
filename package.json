@@ -1,0 +1,487 @@
+ {
+  "name": "codebase-digest",
+  "displayName": "Codebase Digest",
+  "description": "Generate LLM-ready codebase digests",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.103.0"
+  },
+  "activationEvents": [
+    "onView:codebaseDigestDashboard",
+    "onCommand:codebaseDigest.openDashboardPanel",
+    "onCommand:codebaseDigest.generateDigest",
+    "onCommand:codebaseDigest.focusView"
+  ],
+  "categories": [
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "codebase-digest",
+          "title": "Codebase Digest",
+          "icon": "resources/icons/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "codebase-digest": [
+        {
+          "id": "codebaseDigestDashboard",
+          "name": "Codebase Digest",
+          "type": "webview"
+        }
+      ]
+    },
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "codebaseDigest.openDashboardPanel",
+          "when": "true"
+        }
+      ]
+    },
+  "commands": [
+    {
+      "command": "codebaseDigest.tokenCount",
+      "title": "Show Token Count"
+    },
+    {
+      "command": "codebaseDigest.expandAll",
+      "title": "Expand All Folders"
+    },
+    {
+      "command": "codebaseDigest.collapseAll",
+      "title": "Collapse All Folders"
+    },
+    {
+      "command": "codebaseDigest.generateDigest",
+      "title": "Generate Digest"
+    },
+    {
+      "command": "codebaseDigest.selectAll",
+      "title": "Select All Files"
+    },
+    {
+      "command": "codebaseDigest.clearSelection",
+      "title": "Clear Selection"
+    },
+    {
+      "command": "codebaseDigest.refreshTree",
+      "title": "Refresh Tree"
+    },
+    {
+      "command": "codebaseDigest.toggleSelection",
+      "title": "Toggle Selection"
+    },
+    {
+      "command": "codebaseDigest.ingestRemoteRepo",
+      "title": "Ingest Remote Repo and Generate Digest"
+    },
+    {
+      "command": "codebaseDigest.choosePreset",
+      "title": "Choose Filter Preset"
+    },
+    {
+      "command": "codebaseDigest.editPatterns",
+      "title": "Edit Include/Exclude Patterns"
+    },
+    {
+      "command": "codebaseDigest.toggleGitignoreRespect",
+      "title": "Toggle .gitignore Respect"
+    },
+    {
+      "command": "codebaseDigest.invalidateCache",
+      "title": "Clear Cache",
+      "category": "Codebase Digest",
+      "icon": "trash"
+    },
+    {
+      "command": "codebaseDigest.clearCache",
+      "title": "Clear Cache (Alias)",
+      "category": "Codebase Digest",
+      "icon": "trash"
+    },
+    {
+      "command": "codebaseDigest.openDashboard",
+      "title": "Open Dashboard"
+    },
+    {
+      "command": "codebaseDigest.openDashboardPanel",
+      "title": "Codebase Digest: Open as Panel"
+    },
+    {
+      "command": "codebaseDigest.focusView",
+      "title": "Focus Codebase Digest"
+    },
+    {
+      "command": "codebaseDigest.disableRedactionForNextRun",
+      "title": "Disable redaction for next Generate"
+    },
+    {
+      "command": "codebaseDigest.estimateTokens",
+      "title": "Estimate Tokens",
+      "category": "Codebase Digest"
+    }
+  ],
+    "keybindings": [
+      {
+        "command": "codebaseDigest.generateDigest",
+        "key": "ctrl+alt+g",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "codebaseDigest.estimateTokens",
+        "key": "ctrl+alt+e",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "codebaseDigest.toggleGitignoreRespect",
+        "key": "ctrl+alt+i",
+        "when": "editorTextFocus"
+      }
+    ],
+    "configuration": {
+      "title": "Codebase Digest",
+      "properties": {
+        "codebaseDigest.notebookNonTextOutputMaxBytes": {
+          "type": "number",
+          "default": 200000,
+          "description": "Maximum bytes for non-text outputs; larger outputs are omitted with a placeholder."
+        },
+        "codebaseDigest.filterPresets": {
+          "type": "array",
+          "default": [],
+          "description": "Named filter presets for quick selection."
+        },
+        "codebaseDigest.includedFileTypes": {
+          "type": "array",
+          "default": ["*.js", "*.ts", "*.py", "*.java", "*.go", "*.cpp", "*.c", "*.cs", "*.rb", "*.php", "*.md", "*.rst", "*.ipynb", "*.test.js", "*.test.ts", "*.spec.js", "*.spec.ts"],
+          "description": "File types (globs/extensions) to include, complementing presets. Defaults cover codeOnly/docsOnly/testsOnly.",
+          "markdownDescription": "File types (globs/extensions) to include in the digest. Defaults match codeOnly/docsOnly/testsOnly presets."
+        },
+        "codebaseDigest.includePatterns": {
+          "type": "array",
+          "default": [],
+          "description": "Glob patterns to include files."
+        },
+        "codebaseDigest.excludePatterns": {
+          "type": "array",
+          "default": [
+            "node_modules/",
+            ".git/",
+            ".DS_Store",
+            "Thumbs.db",
+            "*.log",
+            "*.tmp",
+            "dist/",
+            "out/",
+            "build/",
+            "coverage/",
+            ".cache/",
+            "target/",
+            "bin/",
+            "obj/",
+            ".venv/",
+            "pycache/",
+            "*.pyc",
+            "*.pyo",
+            "*.class",
+            "*.jar",
+            "*.war",
+            "*.zip",
+            "*.tar",
+            "*.gz",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.svg"
+          ],
+          "description": "Glob patterns to exclude files."
+        },
+        "codebaseDigest.respectGitignore": {
+          "type": "boolean",
+          "default": true,
+          "description": "Respect .gitignore and custom ignore files."
+        },
+        "codebaseDigest.gitignoreFiles": {
+          "type": "array",
+          "default": [
+            ".gitignore",
+            ".gitingestignore"
+          ],
+          "description": "Additional ignore files to respect."
+        },
+    "codebaseDigest.enableSidebarDashboard": {
+      "type": "boolean",
+      "default": true,
+      "description": "Enable the new sidebar dashboard (WebviewView) in the Activity Bar. If false, only the legacy panel is available."
+    },
+        "codebaseDigest.openDashboardOnActivate": {
+          "type": "boolean",
+          "default": false,
+          "description": "Open the dashboard panel automatically when the extension activates. (Legacy panel behavior)"
+        },
+        "codebaseDigest.openSidebarOnActivate": {
+          "type": "boolean",
+          "default": true,
+          "description": "Focus the Codebase Digest view in the Primary Sidebar when the extension activates."
+        },
+        "codebaseDigest.outputHeaderTemplate": {
+          "type": "string",
+          "default": "==== <relPath> (<size>, <modified>) ====",
+          "description": "Template for per-file headers; tokens: <relPath>, <size>, <modified>."
+        },
+        "codebaseDigest.outputFormat": {
+          "type": "string",
+          "enum": [
+            "markdown",
+            "text",
+            "json"
+          ],
+          "default": "markdown",
+          "description": "Digest output format."
+        },
+        "codebaseDigest.outputPresetCompatible": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable cross-tool friendly output preset (tree first, then delimited content blocks)."
+        },
+        "codebaseDigest.includeSubmodules": {
+          "type": "boolean",
+          "default": false,
+          "description": "Include git submodules during remote ingestion."
+        },
+        "codebaseDigest.includeSummary": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include summary section in output."
+        },
+        "codebaseDigest.includeTree": {
+          "type": [
+            "boolean",
+            "string"
+          ],
+          "default": true,
+          "description": "Include file tree in output. Can be true, false, or 'minimal'."
+        },
+        "codebaseDigest.includeFileContents": {
+          "type": "boolean",
+          "default": false,
+          "description": "Include file contents in digest."
+        },
+        "codebaseDigest.includeMetadata": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include file metadata in output."
+        },
+        "codebaseDigest.outputSeparatorsHeader": {
+          "type": "string",
+          "default": "\n---\n",
+          "description": "Header separator between output sections."
+        },
+        "codebaseDigest.outputWriteLocation": {
+          "type": "string",
+          "enum": [
+            "editor",
+            "file",
+            "clipboard",
+            "prompt"
+          ],
+          "default": "prompt",
+          "description": "Where to write the digest output."
+        },
+        "codebaseDigest.binaryFilePolicy": {
+          "type": "string",
+          "enum": [
+            "skip",
+            "includeBase64",
+            "includePlaceholder"
+          ],
+          "default": "skip",
+          "description": "How to handle binary files."
+        },
+        "codebaseDigest.useStreamingRead": {
+          "type": "boolean",
+          "default": true,
+          "description": "Use streaming read for large files."
+        },
+        "codebaseDigest.streamingThresholdBytes": {
+          "type": "number",
+          "default": 1048576,
+          "description": "File size threshold (bytes) to switch to streaming read."
+        },
+        "codebaseDigest.maxFileSize": {
+          "type": "number",
+          "default": 10485760,
+          "description": "Maximum file size in bytes."
+        },
+        "codebaseDigest.maxFiles": {
+          "type": "number",
+          "default": 25000,
+          "description": "Maximum number of files to include."
+        },
+        "codebaseDigest.maxTotalSizeBytes": {
+          "type": "number",
+          "default": 536870912,
+          "description": "Maximum total size of all files in bytes."
+        },
+        "codebaseDigest.maxDirectoryDepth": {
+          "type": "number",
+          "default": 20,
+          "description": "Maximum directory depth to scan. Default is 20."
+        },
+        "codebaseDigest.notebookProcess": {
+          "type": "boolean",
+          "default": true,
+          "description": "Process Jupyter notebooks."
+        },
+        "codebaseDigest.notebookIncludeCodeCells": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include code cells from notebooks."
+        },
+        "codebaseDigest.notebookIncludeMarkdownCells": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include markdown cells from notebooks."
+        },
+        "codebaseDigest.contextLimit": {
+          "type": "number",
+          "default": 0,
+          "description": "Soft token/context limit used for preflight warnings. 0 means disabled."
+        },
+        "codebaseDigest.cacheEnabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable digest output caching."
+        },
+        "codebaseDigest.cacheDir": {
+          "type": "string",
+          "default": "",
+          "description": "Custom cache directory; falls back to .codebase-digest-cache if empty."
+        },
+        "codebaseDigest.notebookIncludeNonTextOutputs": {
+          "type": "boolean",
+          "default": false,
+          "description": "Include non-text outputs from notebook cells (e.g., images, plots, etc.)."
+        },
+        "codebaseDigest.notebookOutputMaxChars": {
+          "type": "number",
+          "default": 20000,
+          "description": "Maximum characters for notebook outputs."
+        },
+        "codebaseDigest.notebookCodeFenceLanguage": {
+          "type": "string",
+          "default": "python",
+          "description": "Default code fence language for notebook code cells."
+        },
+        "codebaseDigest.base64FenceLanguage": {
+          "type": "string",
+          "default": "base64",
+          "description": "Language for base64 fenced blocks in markdown output."
+        },
+        "codebaseDigest.tokenEstimate": {
+          "type": "boolean",
+          "default": true,
+          "description": "Estimate token count for files."
+        },
+        "codebaseDigest.tokenModel": {
+          "type": "string",
+          "default": "chars-approx",
+          "enum": [
+            "chars-approx",
+            "gpt-4o-mini",
+            "tiktoken"
+          ],
+          "description": "Model used for token estimation. 'tiktoken' uses the optional-tiktoken-adapter if installed."
+        },
+        "codebaseDigest.tokenDivisorOverrides": {
+          "type": "object",
+          "default": {},
+          "description": "Overrides for token divisor by file extension.",
+          "markdownDescription": "Overrides for token divisor by file extension. Example: { \".md\": 4, \".py\": 3 }\n\nQuick actions available in dashboard settings to toggle token estimate and model."
+        },
+        "codebaseDigest.tokenLimit": {
+          "type": "number",
+          "default": 16000,
+          "description": "Token limit for digest output.",
+          "markdownDescription": "Token/context limit for digest output. Used for preflight warnings and dashboard display.\n\nQuick actions available in dashboard settings to toggle token estimate and model."
+        },
+        "codebaseDigest.performanceLogLevel": {
+          "type": "string",
+          "enum": [
+            "info",
+            "debug",
+            "warn",
+            "error"
+          ],
+          "default": "info",
+          "description": "Log level for diagnostics."
+        },
+        "codebaseDigest.performanceCollectMetrics": {
+          "type": "boolean",
+          "default": true,
+          "description": "Collect performance metrics during scan."
+        },
+        "codebaseDigest.redactionPatterns": {
+          "type": "array",
+          "default": [],
+          "description": "Array of regex strings to redact from generated output. Patterns are applied globally. Use '/' delimiters to include flags, e.g. '/SECRET_[A-Z]+/g'."
+        },
+        "codebaseDigest.redactionPlaceholder": {
+          "type": "string",
+          "default": "[REDACTED]",
+          "description": "Placeholder to use when replacing redacted values."
+        },
+        "codebaseDigest.showRedacted": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, do not redact detected secrets in generated output (useful for debugging)."
+        },
+        "codebaseDigest.cache.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable digest caching for faster repeated runs."
+        },
+        "codebaseDigest.cache.dir": {
+          "type": "string",
+          "default": "${workspaceStorage}/codebase-digest-cache",
+          "description": "Directory for digest cache files. Default is inside workspace storage path."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package",
+    "compile": "webpack",
+    "watch": "webpack --watch",
+    "package": "webpack --mode production --devtool hidden-source-map",
+    "compile-tests": "tsc -p . --outDir out",
+    "watch-tests": "tsc -p . -w --outDir out",
+    "pretest": "npm run compile-tests && npm run compile && npm run lint",
+    "lint": "eslint src",
+    "test": "jest"
+  },
+  "dependencies": {
+    "minimatch": "^9.0.3"
+  },
+  "devDependencies": {
+  "simple-git": "^3.28.0",
+    "@types/jest": "^30.0.0",
+    "@types/node": "22.x",
+    "@types/vscode": "^1.103.0",
+    "@typescript-eslint/eslint-plugin": "^8.39.0",
+    "@typescript-eslint/parser": "^8.39.0",
+    "eslint": "^9.32.0",
+    "jest": "^30.0.5",
+    "ts-jest": "^29.4.1",
+    "ts-loader": "^9.5.2",
+    "typescript": "^5.9.2",
+    "webpack": "^5.101.0",
+    "webpack-cli": "^6.0.1"
+  }
+}
