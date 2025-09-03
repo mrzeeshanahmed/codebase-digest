@@ -1,7 +1,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { FileScanner } from '../services/fileScanner';
+import { FileScanner, flattenTree } from '../services/fileScanner';
 import { FilterService } from '../services/filterService';
 import { DigestGenerator } from '../services/digestGenerator';
 import { GitignoreService } from '../services/gitignoreService';
@@ -85,7 +85,8 @@ describe('Integration: codeOnly preset, ignore files, notebooks, binaries, symli
     };
     // Scan files with config and preset
     config.filterPresets = ['codeOnly'];
-    files = await fileScanner.scanRoot(fixtureRoot, config);
+  const filesHier = await fileScanner.scanRoot(fixtureRoot, config);
+  files = flattenTree(filesHier);
     // Select subset: prefer main.js and test.spec.js if present; otherwise pick first two files
     const jsFiles = files.filter(f => (f.relPath || f.name || '').endsWith('.js'));
     let selectedFiles = jsFiles.slice(0, 2);

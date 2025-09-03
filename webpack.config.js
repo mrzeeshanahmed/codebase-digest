@@ -34,6 +34,8 @@ const extensionConfig = {
   // These are used conditionally (dynamic require / try/catch) and are provided
   // as externals so the production bundle doesn't include heavy dev tooling.
   typescript: 'commonjs typescript'
+  ,
+  'optional-tiktoken-adapter': 'commonjs optional-tiktoken-adapter'
   // Note: If you add other optional adapters that must remain external, list
   // them here as 'moduleName': 'commonjs moduleName'. Modules marked external
   // will be required at runtime (if present) and should be installed by the

@@ -46,6 +46,10 @@ export async function generateDigest(
     }
     const config: DigestConfig = vscode.workspace.getConfiguration('codebaseDigest', workspaceFolder.uri) as any;
     // runtimeConfig merges saved workspace settings with transient overrides for this run only
+    // Note: overrides is intentionally transient (one-shot) and should not be persisted back
+    // to the user's WorkspaceConfiguration. This ensures the "Disable redaction for this run"
+    // toggle from the webview only affects the current generation and is cleared immediately
+    // by the webview after being used.
     const runtimeConfig = Object.assign({}, config, overrides || {});
     const diagnostics = services.diagnostics;
     const cacheService = services.cacheService || new CacheService();
@@ -203,7 +207,6 @@ export async function generateDigest(
         digest.redactionApplied = false as any;
     }
     // Emit a small diagnostic/info message for debug/verification purposes
-    diagnostics?.info && diagnostics.info && diagnostics.info && diagnostics.info;
     diagnostics?.info(`[redaction] showRedacted=${!!runtimeConfig.showRedacted}; patterns=${Array.isArray(runtimeConfig.redactionPatterns) ? runtimeConfig.redactionPatterns.length : (Array.isArray(config.redactionPatterns) ? config.redactionPatterns.length : 0)}; applied=${!!(redactionResult && redactionResult.applied)}`);
     await outputWriter.write(outContent, config);
     // Step 6: emit event

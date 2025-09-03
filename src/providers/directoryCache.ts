@@ -1,11 +1,11 @@
 import { FileNode } from '../types/interfaces';
-import { FileScanner } from '../services/fileScanner';
+import { ContentProcessor } from '../services/contentProcessor';
 
 export class DirectoryCache {
     private cache: Map<string, FileNode[]> = new Map();
-    private fileScanner: FileScanner;
+    private fileScanner: any;
 
-    constructor(fileScanner: FileScanner) {
+    constructor(fileScanner: any) {
         this.fileScanner = fileScanner;
     }
 
@@ -13,9 +13,10 @@ export class DirectoryCache {
     get(path: string): FileNode[] | undefined { return this.cache.get(path); }
     set(path: string, children: FileNode[]) { this.cache.set(path, children); }
 
-    async hydrateDirectory(path: string, config: any): Promise<FileNode[]> {
-        const children = await this.fileScanner.scanDirectory(path, config);
-        this.cache.set(path, children);
+    async hydrateDirectory(dirPath: string, config: any): Promise<FileNode[]> {
+        // Use ContentProcessor.scanDirectory to perform directory traversal for caching.
+        const children = await ContentProcessor.scanDirectory(dirPath, config as any, 0, dirPath);
+        this.cache.set(dirPath, children);
         return children;
     }
 }

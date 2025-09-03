@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { FileScanner } from '../services/fileScanner';
+import { FileScanner, flattenTree } from '../services/fileScanner';
 import { GitignoreService } from '../services/gitignoreService';
 import { Diagnostics } from '../utils/diagnostics';
 import { TokenAnalyzer } from '../services/tokenAnalyzer';
@@ -59,7 +59,8 @@ describe('Full pipeline integration (scan -> select -> generate)', () => {
       outputWriteLocation: 'editor'
     } as any;
 
-    const files = await scanner.scanRoot(fixture, config);
+  const filesHier = await scanner.scanRoot(fixture, config);
+  const files = flattenTree(filesHier);
     // Ensure gitignored file is not present
     expect(files.some(f => f.relPath === 'ignored.js')).toBe(false);
 
@@ -134,7 +135,8 @@ describe('Full pipeline integration (scan -> select -> generate)', () => {
       outputWriteLocation: 'editor'
     } as any;
 
-    const files = await scanner.scanRoot(fixture, config);
+  const filesHier = await scanner.scanRoot(fixture, config);
+  const files = flattenTree(filesHier);
     // huge.bin should have been skipped by size
     expect(files.some(f => f.relPath === 'huge.bin')).toBe(false);
     // lastStats should record skippedBySize and warning text
@@ -192,7 +194,8 @@ describe('Full pipeline integration (scan -> select -> generate)', () => {
       outputWriteLocation: 'editor'
     } as any;
 
-    const files = await scanner.scanRoot(fixture, config);
+  const filesHier = await scanner.scanRoot(fixture, config);
+  const files = flattenTree(filesHier);
     // Scanner should have stopped early due to maxFiles and recorded a warning
     const stats = scanner.lastStats!;
     expect(stats.skippedByMaxFiles).toBeGreaterThanOrEqual(0);

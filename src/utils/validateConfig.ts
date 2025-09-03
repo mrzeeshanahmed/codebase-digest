@@ -23,10 +23,6 @@ export function validateConfig(cfg: DigestConfig, diagnostics: Diagnostics): voi
         cfg.maxDirectoryDepth = 20;
     }
     // notebookIncludeNonTextOutputs: boolean
-    if (typeof cfg.notebookIncludeNonTextOutputs !== 'boolean') {
-        diagnostics.warn('notebookIncludeNonTextOutputs is not a boolean. Coercing to false.');
-        cfg.notebookIncludeNonTextOutputs = false;
-    }
     if (cfg.tokenLimit !== undefined && (typeof cfg.tokenLimit !== 'number' || cfg.tokenLimit < 0)) {
         diagnostics.warn('tokenLimit is invalid or negative. Coercing to 32000.');
         cfg.tokenLimit = 32000;

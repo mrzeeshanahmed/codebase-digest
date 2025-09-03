@@ -126,6 +126,16 @@ We now prefer the Primary Sidebar as the authoritative dashboard location. This 
 	- In the dashboard Settings UI you can toggle "Show redacted" and edit patterns/placeholder. Saving writes these to the workspace settings and subsequent generations will respect them.
 	- One-shot override: the dashboard toolbar includes a "Disable redaction for this run" toggle that temporarily shows raw values for the next generation only; it does not persist to your workspace settings.
 
+	#### One-shot "No Redact" override (safety note)
+
+	The dashboard toolbar exposes a transient "Disable redaction for this run" toggle. Behavior:
+
+	- It's transient: the toggle only affects the next single Generate action and is automatically cleared immediately after the generate command is sent from the webview.
+	- It does not persist to workspace settings and cannot be used to change `codebaseDigest.showRedacted` permanently.
+	- The webview sends a one-shot override payload { overrides: { showRedacted: true } } to the extension when the toggle is active. The extension treats this as a runtime-only override when constructing the effective configuration for that generation.
+
+	This design keeps redaction safe by requiring an explicit user action per run; no settings are mutated as a side-effect of generation.
+
 Notes:
 
 - The extension no longer auto-opens an editor tab on activation by default; the Primary Sidebar view is the recommended entry point. If you prefer the panel, use the explicit "Open as Panel" command.

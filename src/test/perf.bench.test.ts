@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { Metrics } from '../services/metrics';
-import { FileScanner } from '../services/fileScanner';
+import { FileScanner, flattenTree } from '../services/fileScanner';
 import { GitignoreService } from '../services/gitignoreService';
 import { Diagnostics } from '../utils/diagnostics';
 import { ContentProcessor } from '../services/contentProcessor';
@@ -67,7 +67,8 @@ describe('Micro-benchmarks: file scanning and content reading', () => {
     const scanner = new FileScanner(gitignore, diagnostics);
 
     metrics.startTimer('scanTime');
-    const files = await scanner.scanRoot(root, cfg);
+  const filesHier = await scanner.scanRoot(root, cfg);
+  const files = flattenTree(filesHier);
     metrics.stopTimer('scanTime');
     metrics.inc('filesProcessed', files.length);
 

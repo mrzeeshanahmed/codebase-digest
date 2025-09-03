@@ -30,57 +30,10 @@ export class CodebaseDigestPanel {
             localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, 'resources', 'webview'), this.extensionUri]
         });
         this.setHtml(this.panel.webview);
-        this.panel.webview.onDidReceiveMessage(msg => {
-            if (msg.type === 'getState') {
-                this.postPreviewState();
-            } else if (msg.type === 'configRequest') {
-                this.postConfig();
-            } else if (msg.type === 'config' && msg.action === 'set' && msg.changes) {
-                this.applyConfigChanges(msg.changes).then(() => this.postConfig());
-            } else if (msg.type === 'action') {
-                const commandMap: Record<string, string> = {
-                    refresh: 'codebaseDigest.refreshTree',
-                    selectAll: 'codebaseDigest.selectAll',
-                    clearSelection: 'codebaseDigest.clearSelection',
-                    expandAll: 'codebaseDigest.expandAll',
-                    collapseAll: 'codebaseDigest.collapseAll',
-                    generateDigest: 'codebaseDigest.generateDigest',
-                    tokenCount: 'codebaseDigest.estimateTokens'
-                };
-                // allow pause/resume to be invoked from the webview
-                // Resolve folder target: prefer an explicit folderPath from the message, else use the panel's folder
-                const targetFolder = (msg && (msg.folderPath || msg.folder)) || this.folderPath || '';
-                if (msg.actionType === 'pauseScan') {
-                    vscode.commands.executeCommand('codebaseDigest.pauseScan', targetFolder);
-                } else if (msg.actionType === 'resumeScan') {
-                    vscode.commands.executeCommand('codebaseDigest.resumeScan', targetFolder);
-                }
-                // ingestRemote action comes from the webview and includes repo/ref/subpath/includeSubmodules
-                if (msg.actionType === 'ingestRemote' && msg.repo) {
-                    const params = { repo: msg.repo, ref: msg.ref, subpath: msg.subpath, includeSubmodules: !!msg.includeSubmodules };
-                    // Use the programmatic command to perform ingest and return a small preview to the webview
-                    vscode.commands.executeCommand('codebaseDigest.ingestRemoteRepoProgrammatic', params).then((result: any) => {
-                        if (this.panel) { this.panel.webview.postMessage({ type: 'ingestPreview', payload: result }); }
-                    }, (err: any) => {
-                        if (this.panel) { this.panel.webview.postMessage({ type: 'ingestError', error: String(err) }); }
-                    });
-                }
-                if (msg.actionType === 'setSelection' && Array.isArray(msg.relPaths)) {
-                    this.treeProvider.setSelectionByRelPaths(msg.relPaths);
-                    this.postPreviewState();
-                } else if (msg.actionType === 'toggleExpand' && typeof msg.relPath === 'string') {
-                    // Route to an extension-level command so the correct provider instance handles it
-                    vscode.commands.executeCommand('codebaseDigest.toggleExpand', targetFolder, msg.relPath);
-                } else if (commandMap[msg.actionType]) {
-                    // Support passing transient overrides for generateDigest (one-shot overrides from webview)
-                    if (msg.actionType === 'generateDigest' && msg.overrides) {
-                        vscode.commands.executeCommand(commandMap[msg.actionType], targetFolder, msg.overrides);
-                    } else {
-                        vscode.commands.executeCommand(commandMap[msg.actionType], targetFolder);
-                    }
-                }
-            }
-        });
+        // Wire message routing via shared helper so panel and view remain consistent
+        wireWebviewMessages(this.panel.webview, this.treeProvider, this.folderPath, async (changes: Record<string, any>) => {
+            await this.applyConfigChanges(changes);
+        }, () => this.postPreviewState());
         this.panel.onDidDispose(() => {
             this.panel = undefined;
             panels.delete(this.folderPath);
@@ -202,83 +155,21 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
             // track active view so we can broadcast messages to it later
             try { activeViews.add(webviewView); } catch (e) {}
 
-            webviewView.webview.onDidReceiveMessage(msg => {
-                if (msg.type === 'getState') {
-                    const preview = treeProvider.getPreviewData();
-                    webviewView.webview.postMessage({ type: 'state', state: preview });
-                } else if (msg.type === 'configRequest') {
-                    const folder = treeProvider['workspaceRoot'] || '';
-                    const cfg = vscode.workspace.getConfiguration('codebaseDigest', vscode.Uri.file(folder));
-                    const thresholdsDefault = { maxFiles: 25000, maxTotalSizeBytes: 536870912, tokenLimit: 32000 };
-                    webviewView.webview.postMessage({ type: 'config', folderPath: folder, settings: {
-                        gitignore: cfg.get('gitignore', true),
-                        presets: cfg.get('presets', []),
-                        outputFormat: cfg.get('outputFormat', 'text'),
-                        tokenModel: cfg.get('tokenModel', 'gpt-4o'),
-                        binaryPolicy: cfg.get('binaryPolicy', 'skip'),
-                        thresholds: cfg.get('thresholds', thresholdsDefault),
-                        showRedacted: cfg.get('showRedacted', false),
-                        redactionPatterns: cfg.get('redactionPatterns', []),
-                        redactionPlaceholder: cfg.get('redactionPlaceholder', '[REDACTED]')
-                    }});
-                } else if (msg.type === 'config' && msg.action === 'set' && msg.changes) {
-                    // Allow the webview (sidebar) to persist settings; mirror applyConfigChanges used by the panel
-                    (async () => {
-                        const folder = treeProvider['workspaceRoot'] || '';
-                        const cfg = vscode.workspace.getConfiguration('codebaseDigest', vscode.Uri.file(folder));
-                        for (const [key, value] of Object.entries(msg.changes)) {
-                            try {
-                                await cfg.update(key, value, vscode.ConfigurationTarget.WorkspaceFolder);
-                            } catch (e) {
-                                await cfg.update(key, value, vscode.ConfigurationTarget.Workspace);
-                            }
-                        }
-                        // return updated config to the view so the form refreshes with persisted values
-                        const thresholdsDefault = { maxFiles: 25000, maxTotalSizeBytes: 536870912, tokenLimit: 32000 };
-                        const updated = {
-                            gitignore: cfg.get('gitignore', true),
-                            presets: cfg.get('presets', []),
-                            outputFormat: cfg.get('outputFormat', 'text'),
-                            tokenModel: cfg.get('tokenModel', 'gpt-4o'),
-                            binaryPolicy: cfg.get('binaryPolicy', 'skip'),
-                            thresholds: cfg.get('thresholds', thresholdsDefault),
-                            showRedacted: cfg.get('showRedacted', false),
-                            redactionPatterns: cfg.get('redactionPatterns', []),
-                            redactionPlaceholder: cfg.get('redactionPlaceholder', '[REDACTED]')
-                        };
-                        webviewView.webview.postMessage({ type: 'config', folderPath: folder, settings: updated });
-                    })();
-                } else if (msg.type === 'action') {
-                    // Route actions to commands as panel does
-                    const commandMap: Record<string, string> = {
-                        refresh: 'codebaseDigest.refreshTree',
-                        selectAll: 'codebaseDigest.selectAll',
-                        clearSelection: 'codebaseDigest.clearSelection',
-                        expandAll: 'codebaseDigest.expandAll',
-                        collapseAll: 'codebaseDigest.collapseAll',
-                        generateDigest: 'codebaseDigest.generateDigest',
-                        tokenCount: 'codebaseDigest.estimateTokens'
-                    };
-                    // Resolve folder target: prefer an explicit folderPath from the message, else use the provider's workspace root
-                    const targetFolder = (msg && (msg.folderPath || msg.folder)) || treeProvider['workspaceRoot'] || '';
-                    if (msg.actionType === 'ingestRemote' && msg.repo) {
-                        const params = { repo: msg.repo, ref: msg.ref, subpath: msg.subpath, includeSubmodules: !!msg.includeSubmodules };
-                        vscode.commands.executeCommand('codebaseDigest.ingestRemoteRepoProgrammatic', params).then((result: any) => {
-                            webviewView.webview.postMessage({ type: 'ingestPreview', payload: result });
-                        }, (err: any) => {
-                            webviewView.webview.postMessage({ type: 'ingestError', error: String(err) });
-                        });
-                    }
-                    if (msg.actionType === 'setSelection' && Array.isArray(msg.relPaths)) {
-                        treeProvider.setSelectionByRelPaths(msg.relPaths);
-                        const preview = treeProvider.getPreviewData();
-                        webviewView.webview.postMessage({ type: 'state', state: preview });
-                    } else if (msg.actionType === 'toggleExpand' && typeof msg.relPath === 'string') {
-                        vscode.commands.executeCommand('codebaseDigest.toggleExpand', targetFolder, msg.relPath);
-                    } else if (commandMap[msg.actionType]) {
-                        vscode.commands.executeCommand(commandMap[msg.actionType], targetFolder);
-                    }
+            // Use shared wiring helper for sidebar messages as well
+            wireWebviewMessages(webviewView.webview, treeProvider, treeProvider['workspaceRoot'] || '', async (changes: Record<string, any>) => {
+                // mirror panel behavior: persist config changes then push updated config
+                const folder = treeProvider['workspaceRoot'] || '';
+                const cfg = vscode.workspace.getConfiguration('codebaseDigest', vscode.Uri.file(folder));
+                for (const [key, value] of Object.entries(changes)) {
+                    try { await cfg.update(key, value, vscode.ConfigurationTarget.WorkspaceFolder); } catch (e) { await cfg.update(key, value, vscode.ConfigurationTarget.Workspace); }
                 }
+                const thresholdsDefault = { maxFiles: 25000, maxTotalSizeBytes: 536870912, tokenLimit: 32000 };
+                const updated = { gitignore: cfg.get('gitignore', true), presets: cfg.get('presets', []), outputFormat: cfg.get('outputFormat', 'text'), tokenModel: cfg.get('tokenModel', 'gpt-4o'), binaryPolicy: cfg.get('binaryPolicy', 'skip'), thresholds: cfg.get('thresholds', thresholdsDefault), showRedacted: cfg.get('showRedacted', false), redactionPatterns: cfg.get('redactionPatterns', []), redactionPlaceholder: cfg.get('redactionPlaceholder', '[REDACTED]') };
+                webviewView.webview.postMessage({ type: 'config', folderPath: folder, settings: updated });
+            }, () => {
+                // on getState, send current preview
+                const preview = treeProvider.getPreviewData();
+                webviewView.webview.postMessage({ type: 'state', state: preview });
             });
 
             // Forward progress events to the sidebar webview with light throttling to avoid UI jank
@@ -379,4 +270,82 @@ export function setWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri
     const cspMeta = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src ${webview.cspSource}; style-src ${webview.cspSource}; img-src ${webview.cspSource};">`;
     html = html.replace(/<head[^>]*>/i, (match: string) => `${match}${cspMeta}`);
     webview.html = html;
+}
+
+// Shared wiring for webview message routing to avoid duplication between panel and sidebar view
+function wireWebviewMessages(webview: vscode.Webview, treeProvider: CodebaseDigestTreeProvider, folderPath: string, onConfigSet: (changes: Record<string, any>) => Promise<void>, onGetState?: () => void) {
+    webview.onDidReceiveMessage((msg: any) => {
+        if (msg.type === 'getState') {
+            if (onGetState) { onGetState(); }
+            return;
+        }
+        if (msg.type === 'configRequest') {
+            const folder = folderPath || '';
+            const cfg = vscode.workspace.getConfiguration('codebaseDigest', vscode.Uri.file(folder));
+            const thresholdsDefault = { maxFiles: 25000, maxTotalSizeBytes: 536870912, tokenLimit: 32000 };
+            webview.postMessage({ type: 'config', folderPath: folder, settings: {
+                gitignore: cfg.get('gitignore', true),
+                presets: cfg.get('presets', []),
+                outputFormat: cfg.get('outputFormat', 'text'),
+                tokenModel: cfg.get('tokenModel', 'gpt-4o'),
+                binaryPolicy: cfg.get('binaryPolicy', 'skip'),
+                thresholds: cfg.get('thresholds', thresholdsDefault),
+                showRedacted: cfg.get('showRedacted', false),
+                redactionPatterns: cfg.get('redactionPatterns', []),
+                redactionPlaceholder: cfg.get('redactionPlaceholder', '[REDACTED]')
+            }});
+            return;
+        }
+        if (msg.type === 'config' && msg.action === 'set' && msg.changes) {
+            // delegate persistence to caller
+            (async () => { try { await onConfigSet(msg.changes); } catch (e) { /* swallow */ } })();
+            return;
+        }
+        if (msg.type === 'action') {
+            const commandMap: Record<string, string> = {
+                refresh: 'codebaseDigest.refreshTree',
+                selectAll: 'codebaseDigest.selectAll',
+                clearSelection: 'codebaseDigest.clearSelection',
+                expandAll: 'codebaseDigest.expandAll',
+                collapseAll: 'codebaseDigest.collapseAll',
+                generateDigest: 'codebaseDigest.generateDigest',
+                tokenCount: 'codebaseDigest.estimateTokens'
+            };
+            const targetFolder = (msg && (msg.folderPath || msg.folder)) || folderPath || treeProvider['workspaceRoot'] || '';
+
+            if (msg.actionType === 'pauseScan') {
+                vscode.commands.executeCommand('codebaseDigest.pauseScan', targetFolder);
+                return;
+            }
+            if (msg.actionType === 'resumeScan') {
+                vscode.commands.executeCommand('codebaseDigest.resumeScan', targetFolder);
+                return;
+            }
+            if (msg.actionType === 'ingestRemote' && msg.repo) {
+                const params = { repo: msg.repo, ref: msg.ref, subpath: msg.subpath, includeSubmodules: !!msg.includeSubmodules };
+                vscode.commands.executeCommand('codebaseDigest.ingestRemoteRepoProgrammatic', params).then((result: any) => {
+                    try { webview.postMessage({ type: 'ingestPreview', payload: result }); } catch (e) { /* swallow */ }
+                }, (err: any) => { try { webview.postMessage({ type: 'ingestError', error: String(err) }); } catch (e) { /* swallow */ } });
+                return;
+            }
+
+            if (msg.actionType === 'setSelection' && Array.isArray(msg.relPaths)) {
+                treeProvider.setSelectionByRelPaths(msg.relPaths);
+                try { const preview = treeProvider.getPreviewData(); webview.postMessage({ type: 'state', state: preview }); } catch (e) { /* swallow */ }
+                return;
+            }
+            if (msg.actionType === 'toggleExpand' && typeof msg.relPath === 'string') {
+                vscode.commands.executeCommand('codebaseDigest.toggleExpand', targetFolder, msg.relPath);
+                return;
+            }
+            if (commandMap[msg.actionType]) {
+                if (msg.actionType === 'generateDigest' && msg.overrides) {
+                    vscode.commands.executeCommand(commandMap[msg.actionType], targetFolder, msg.overrides);
+                } else {
+                    vscode.commands.executeCommand(commandMap[msg.actionType], targetFolder);
+                }
+                return;
+            }
+        }
+    });
 }

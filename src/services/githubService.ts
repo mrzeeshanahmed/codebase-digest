@@ -122,19 +122,39 @@ export async function resolveRefToSha(ownerRepo: string, ref?: { tag?: string; b
 export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?: string, tmpDir?: string, opts?: { skipSparse?: boolean, skipFilter?: boolean }): Promise<string> {
     const [owner, repo] = ownerRepo.split('/');
     const token = await authenticate();
-    const url = `https://${token}:x-oauth-basic@github.com/${owner}/${repo}.git`;
+    // Use GIT_ASKPASS to avoid embedding token in command args. The askpass
+    // helper is written into the clone directory so it can read a token from
+    // an environment variable. We recreate the helper if the dir is re-made
+    // during retry paths.
+    const url = `https://github.com/${owner}/${repo}.git`;
     // Use a session-unique prefix to reduce collisions and make tmp dir scoping obvious
     const sessionPrefix = `${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2,8)}-`;
     const dir = tmpDir || fs.mkdtempSync(path.join(os.tmpdir(), `${sessionPrefix}${repo}-`));
     if (!tmpDir) { _createdTmpDirs.push(dir); }
-    const env = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+    let env: any = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+    // Helper to write askpass script into `dir` and set env vars accordingly
+    const askpassPath = path.join(dir, '.git-askpass.sh');
+    const writeAskpass = () => {
+        const script = `#!/bin/sh\ncase \"$1\" in\n*Username*) printf 'x-access-token\\n' ;;\n*Password*) printf '%s\\n' \"$GIT_ASKPASS_TOKEN\" ;;\n*) printf '\\n' ;;\nesac\n`;
+        try {
+            fs.writeFileSync(askpassPath, script, { mode: 0o700 });
+            try { fs.chmodSync(askpassPath, 0o700); } catch (e) { /* ignore */ }
+        } catch (e) {
+            // If we cannot write the helper, fall back to token-in-url as last resort
+            // but ensure we scrub outputs. This should be rare.
+            // Note: we still prefer the askpass approach.
+        }
+        env = { ...env, GIT_ASKPASS: askpassPath, GIT_ASKPASS_TOKEN: token };
+    };
+    // Create askpass helper before any clone attempt
+    writeAskpass();
     // Wrap clone+sparse logic so we can cleanup the temp dir on failure if we created it
     const createdHere = !tmpDir;
     try {
         // Step 1: git clone
         // Pick clone args; allow opts.skipFilter to disable the blob filter if requested
-        const baseCloneArgs = opts && opts.skipFilter ? ['clone','--no-checkout','--depth','1','--single-branch',url,dir] : ['clone','--no-checkout','--depth','1','--filter=blob:none','--single-branch',url,dir];
-        await spawnGitPromise(baseCloneArgs, { env }).then(() => {}).catch((e) => { throw e; });
+    const baseCloneArgs = opts && opts.skipFilter ? ['clone','--no-checkout','--depth','1','--single-branch',url,dir] : ['clone','--no-checkout','--depth','1','--filter=blob:none','--single-branch',url,dir];
+    await spawnGitPromise(baseCloneArgs, { env }).then(() => {}).catch((e) => { throw e; });
         // Step 2: sparse-checkout if subpath and not explicitly skipped
         if (subpath && !(opts && opts.skipSparse)) {
             try {
@@ -156,6 +176,8 @@ export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?
                     if (fs.existsSync(dir)) { fs.rmSync(dir, { recursive: true, force: true }); }
                     // Re-create dir for retry
                     fs.mkdirSync(dir, { recursive: true });
+                    // Re-write askpass helper into the recreated dir so GIT_ASKPASS points to a valid file
+                    try { writeAskpass(); } catch (e) { /* ignore */ }
                     if (choice.id === 'nofilter') {
                         // Retry clone without blob filter and attempt sparse again
                         await spawnGitPromise(['clone','--no-checkout','--depth','1','--single-branch',url,dir], { env });

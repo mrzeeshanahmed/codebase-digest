@@ -23,12 +23,12 @@ window.addEventListener('message', event => {
         // Also populate the compact chips from the full state so the sidebar shows counts immediately
         try {
             const s = msg.state || {};
-            const delta = {
+                const delta = {
                 selectedCount: s.selectedCount || (Array.isArray(s.selectedFiles) ? s.selectedFiles.length : (s.selectedCount || 0)),
                 totalFiles: s.totalFiles || 0,
                 selectedSize: s.selectedSize || 0,
                 tokenEstimate: s.tokenEstimate || (s.stats && s.stats.tokenEstimate) || 0,
-                contextLimit: s.contextLimit || s.contextLimit || undefined
+                contextLimit: (s && typeof s.contextLimit !== 'undefined') ? s.contextLimit : undefined
             };
             renderPreviewDelta(delta);
         } catch (e) {}
@@ -539,16 +539,20 @@ window.onload = function() {
             }
             // default simple command
             // include transient override when generating
-            if (action === 'generateDigest') {
-                const payload = {};
-                if (overrideDisableRedaction) {
-                    payload.overrides = { showRedacted: true };
-                }
-                // reset one-shot override after using it
-                if (overrideDisableRedaction) { overrideDisableRedaction = false; const rb = document.getElementById('btn-disable-redaction'); if (rb) { rb.setAttribute('aria-pressed','false'); rb.classList.remove('active'); } }
-                postAction(action, payload);
-                return;
-            }
+                    if (action === 'generateDigest') {
+                        // If the user toggled the transient "Disable redaction for this run" button,
+                        // the webview includes a one-shot overrides object which signals the
+                        // extension to bypass redaction for this generation only. We then immediately
+                        // clear the transient flag so it cannot be reused accidentally.
+                        const payload = {};
+                        if (overrideDisableRedaction) {
+                            payload.overrides = { showRedacted: true };
+                        }
+                        // reset one-shot override after using it (UI reflects the transient nature)
+                        if (overrideDisableRedaction) { overrideDisableRedaction = false; const rb = document.getElementById('btn-disable-redaction'); if (rb) { rb.setAttribute('aria-pressed','false'); rb.classList.remove('active'); } }
+                        postAction(action, payload);
+                        return;
+                    }
             sendCmd(action);
         });
     }

@@ -1,4 +1,4 @@
-import { FileScanner } from '../services/fileScanner';
+import { FileScanner, flattenTree } from '../services/fileScanner';
 import { DigestConfig, TraversalStats, FileNode } from '../types/interfaces';
 import { GitignoreService } from '../services/gitignoreService';
 import { Diagnostics } from '../utils/diagnostics';
@@ -141,7 +141,8 @@ describe('FileScanner integration (moved)', () => {
       filterPresets: ['codeOnly'],
     } as any;
     const scanner = makeScanner();
-    const nodes = await scanner.scanRoot('/root', config);
+  const nodesHier = await scanner.scanRoot('/root', config);
+  const nodes = flattenTree(nodesHier);
   // Verify that scan returned at least one file node and that stats reflect skipped items
   expect(nodes.length).toBeGreaterThanOrEqual(1);
   // Symlink node may or may not be included depending on includePatterns; do not assert its presence

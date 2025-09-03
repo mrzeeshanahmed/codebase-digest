@@ -81,6 +81,13 @@ export interface DigestConfig {
     contextLimit?: number;
     cacheEnabled?: boolean;
     cacheDir?: string;
+    /**
+     * If true, when scan approaches configured size/file thresholds the scanner will
+     * show interactive prompts (QuickPick) to allow overriding once. When false
+     * (or omitted in test/CI contexts) the scanner will emit a warning and
+     * continue once without blocking for user input.
+     */
+    promptsOnThresholds?: boolean;
     filterPresets?: string[];
     // Redaction settings
     redactionPatterns?: string[];

@@ -1,4 +1,4 @@
-import { FileScanner } from '../services/fileScanner';
+import { FileScanner, flattenTree } from '../services/fileScanner';
 import { DigestConfig } from '../types/interfaces';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -34,8 +34,8 @@ describe('FileScanner.scanRoot', () => {
         const gitignoreService = new GitignoreService();
         const diagnostics = new Diagnostics('info');
         const scanner = new FileScanner(gitignoreService, diagnostics);
-        const filesArr = await scanner.scanRoot(testDir, cfg);
-        const files = filesArr.map(f => f.relPath).sort();
+    const filesArr = await scanner.scanRoot(testDir, cfg);
+    const files = flattenTree(filesArr).map(f => f.relPath).sort();
         expect(files).toContain('file1.txt');
         expect(files).toContain('subdirA/file2.txt');
         expect(files).not.toContain('subdirB/file3.txt');

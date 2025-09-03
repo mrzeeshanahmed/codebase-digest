@@ -67,6 +67,10 @@ Suggested checklist template to generate and fill in:
    - Add modules you want excluded from production bundle to `webpack.config.js` `externals` and add a comment explaining why.
    - Rebuild and run test suite (commands below) and validate the extension in a dev VS Code window.
 
+   Tooling note: Some tools cannot parse JSONC (comments in tsconfig.json). To accommodate them, this repository includes a pure-JSON `tsconfig.tools.json` that mirrors the compiler options used for builds. Point tooling or CI that complains about parsing to `tsconfig.tools.json` (for example via a `--project` flag) to avoid "invalidFiles" errors.
+
+   Example: `npx depcheck --project tsconfig.tools.json` or set an environment variable in CI to reference `tsconfig.tools.json`.
+
 Helpful commands
 ```
 # Inventory runtime top-level deps

@@ -282,9 +282,59 @@ export function activate(context: vscode.ExtensionContext) {
 				try {
 					const cfg = vscode.workspace.getConfiguration('codebaseDigest', folder.uri) as any;
 					try {
-						validateConfig(cfg, diagnostics);
-					} catch (vcErr) {
-						try { diagnostics.warn('Failed to validate config for ' + folder.uri.fsPath + ': ' + String(vcErr)); } catch (dErr) { /* swallow */ }
+						// Build a plain runtime snapshot from workspace configuration keys.
+						// This avoids mutating the WorkspaceConfiguration object directly. If
+						// callers want to persist intentional corrections, call `cfg.update(...)`
+						// selectively — do not mutate `cfg` fields in-place.
+						const runtimeCfg: any = {
+							// numeric limits and common fields with sensible defaults
+							maxFileSize: cfg.get('maxFileSize', 10485760),
+							maxFiles: cfg.get('maxFiles', 25000),
+							maxTotalSizeBytes: cfg.get('maxTotalSizeBytes', 536870912),
+							maxDirectoryDepth: cfg.get('maxDirectoryDepth', 20),
+							tokenLimit: cfg.get('tokenLimit', 32000),
+							// enums / policies
+							outputFormat: cfg.get('outputFormat', 'markdown'),
+							binaryFilePolicy: cfg.get('binaryFilePolicy', 'skip'),
+							// caching / limits
+							contextLimit: cfg.get('contextLimit', 0),
+							cacheEnabled: cfg.get('cacheEnabled', false),
+							cacheDir: cfg.get('cacheDir', ''),
+							// notebook handling
+							notebookIncludeNonTextOutputs: cfg.get('notebookIncludeNonTextOutputs', false),
+							notebookNonTextOutputMaxBytes: cfg.get('notebookNonTextOutputMaxBytes', 200000),
+							// redaction
+							showRedacted: cfg.get('showRedacted', false),
+							redactionPatterns: cfg.get('redactionPatterns', []),
+							redactionPlaceholder: cfg.get('redactionPlaceholder', '[REDACTED]'),
+							// pattern lists and ignore behavior
+							excludePatterns: cfg.get('excludePatterns', []),
+							includePatterns: cfg.get('includePatterns', []),
+							respectGitignore: cfg.get('respectGitignore', true),
+							gitignoreFiles: cfg.get('gitignoreFiles', ['.gitignore']),
+							// feature flags / outputs
+							includeMetadata: cfg.get('includeMetadata', true),
+							includeTree: cfg.get('includeTree', true),
+							includeSummary: cfg.get('includeSummary', true),
+							includeFileContents: cfg.get('includeFileContents', true),
+							useStreamingRead: cfg.get('useStreamingRead', true),
+							notebookProcess: cfg.get('notebookProcess', true),
+							tokenEstimate: cfg.get('tokenEstimate', true),
+							tokenModel: cfg.get('tokenModel', 'chars-approx'),
+							tokenDivisorOverrides: cfg.get('tokenDivisorOverrides', {}),
+							performanceLogLevel: cfg.get('performanceLogLevel', 'info'),
+							performanceCollectMetrics: cfg.get('performanceCollectMetrics', false),
+							outputSeparatorsHeader: cfg.get('outputSeparatorsHeader', ''),
+							outputWriteLocation: cfg.get('outputWriteLocation', 'editor'),
+							filterPresets: cfg.get('filterPresets', []),
+						};
+						try {
+							validateConfig(runtimeCfg, diagnostics);
+						} catch (vcErr) {
+							try { diagnostics.warn('Failed to validate config for ' + folder.uri.fsPath + ': ' + String(vcErr)); } catch (dErr) { /* swallow */ }
+						}
+					} catch (e) {
+						// Silently ignore per-folder config validation errors; do not block activation
 					}
 				} catch (e) {
 					// Silently ignore per-folder config validation errors; do not block activation

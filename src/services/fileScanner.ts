@@ -97,18 +97,6 @@ export class FileScanner {
         stats.durationMs = Date.now() - start;
     this.diagnostics.info('File scan complete', stats);
         this.lastStats = stats;
-        // Flatten nested children into a single list preserving relPath for tests that expect flat arrays
-        const flat: FileNode[] = [];
-        const walk = (nlist: FileNode[]) => {
-            for (const n of nlist) {
-                // push a shallow copy without children to keep structure simple
-                const copy: any = { ...n };
-                delete copy.children;
-                flat.push(copy);
-                if (n.children && n.children.length > 0) { walk(n.children); }
-            }
-        };
-        walk(nodes);
     // Post-scan: if any explicit negation in gitignore refers to a file present at root, ensure it's included
         try {
             const negs = this.gitignoreService.listExplicitNegations();
@@ -117,10 +105,26 @@ export class FileScanner {
                 try {
                     if (fs.existsSync(candidate)) {
                         const rel = path.relative(rootPath, candidate).replace(/\\/g, '/');
-                        if (!flat.some(f => f.relPath === rel)) {
-                            const st = await fsPromises.lstat(candidate);
-                            flat.push({ path: candidate, relPath: rel, name: path.basename(candidate), type: st.isDirectory() ? 'directory' : 'file', size: st.size, mtime: st.mtime, depth: 0, isSelected: false, isBinary: false } as any);
+                    // Ensure it exists in the hierarchical nodes; if absent, inject minimal node at correct place
+                    const inject = { path: candidate, relPath: rel, name: path.basename(candidate), type: (await fsPromises.lstat(candidate)).isDirectory() ? 'directory' : 'file', size: (await fsPromises.lstat(candidate)).size, mtime: (await fsPromises.lstat(candidate)).mtime, depth: 0, isSelected: false, isBinary: false } as any;
+                    const parts = rel.split('/');
+                    let parentList = nodes;
+                    for (let i = 0; i < parts.length - 1; i++) {
+                        const seg = parts[i];
+                        let dir = parentList.find(n => n.type === 'directory' && n.name === seg);
+                        if (!dir) {
+                            // create a new directory node
+                            const newDir: any = { type: 'directory', name: seg, relPath: parts.slice(0, i + 1).join('/'), path: path.join(rootPath, parts.slice(0, i + 1).join(path.sep)), size: 0, depth: i, isSelected: false, isBinary: false, children: [] };
+                            parentList.push(newDir as FileNode);
+                            dir = newDir as FileNode;
                         }
+                        // dir is now guaranteed
+                        dir.children = dir.children || [];
+                        parentList = dir.children;
+                    }
+                    if (!parentList.some(n => n.relPath === rel)) {
+                        parentList.push(inject);
+                    }
                     }
                 } catch (e) { }
             }
@@ -134,7 +138,7 @@ export class FileScanner {
         }
         // Replace stats.warnings with deduped list
         stats.warnings = deduped;
-        return flat;
+        return nodes;
     }
 
     /**
@@ -272,12 +276,15 @@ export class FileScanner {
                     const warned = (cfg as any)._warnedThresholds && (cfg as any)._warnedThresholds.size;
                     if (!warned) {
                         (cfg as any)._warnedThresholds = { ...(cfg as any)._warnedThresholds, size: true };
-                        // In tests or non-interactive mode, do not prompt
-                        if (process.env.JEST_WORKER_ID) {
-                            // Add a warning but do not block
+                        // If running under Jest or prompts are disabled, emit a warning and
+                        // set a one-shot override so scanning continues once without blocking.
+                        const promptsEnabled = !!(cfg as any).promptsOnThresholds;
+                        const isJest = !!process.env.JEST_WORKER_ID;
+                        if (isJest || !promptsEnabled) {
                             if (!stats.warnings.some(w => w.startsWith('Approaching total size limit'))) {
                                 stats.warnings.push(`Approaching total size limit: ${(sizePercent * 100).toFixed(0)}%`);
                             }
+                            (cfg as any)._overrides = { ...(cfg as any)._overrides, allowSizeOnce: true };
                         } else {
                             const pick = await vscode.window.showQuickPick([
                                 { label: 'Override once and continue', id: 'override' },
@@ -305,10 +312,13 @@ export class FileScanner {
                             const warned = (cfg as any)._warnedThresholds && (cfg as any)._warnedThresholds.files;
                             if (!warned) {
                                 (cfg as any)._warnedThresholds = { ...(cfg as any)._warnedThresholds, files: true };
-                                if (process.env.JEST_WORKER_ID) {
+                                const promptsEnabled = !!(cfg as any).promptsOnThresholds;
+                                const isJest = !!process.env.JEST_WORKER_ID;
+                                if (isJest || !promptsEnabled) {
                                     if (!stats.warnings.some(w => w.startsWith('Approaching file count'))) {
                                         stats.warnings.push(`Approaching file count limit: ${(filePercent * 100).toFixed(0)}%`);
                                     }
+                                    (cfg as any)._overrides = { ...(cfg as any)._overrides, allowFilesOnce: true };
                                 } else {
                                     const pick = await vscode.window.showQuickPick([
                                         { label: 'Override once and continue', id: 'override' },
@@ -392,4 +402,19 @@ export class FileScanner {
         }
         return results;
     }
+}
+
+// Optional: flat view for tests or tooling
+export function flattenTree(nodes: FileNode[]): FileNode[] {
+    const flat: FileNode[] = [];
+    const walk = (nlist: FileNode[]) => {
+        for (const n of nlist) {
+            const copy: any = { ...n };
+            delete copy.children;
+            flat.push(copy);
+            if (n.children && n.children.length > 0) { walk(n.children); }
+        }
+    };
+    walk(nodes);
+    return flat;
 }

@@ -3,7 +3,6 @@ import { NotebookProcessor } from './notebookProcessor';
 import { FSUtils } from '../utils/fsUtils';
 import { DigestConfig, FileNode } from '../types/interfaces';
 import { FileReadError } from '../utils/errors';
-import { showUserError } from '../utils/userMessages';
 
 export class ContentProcessor {
     /**
@@ -36,14 +35,13 @@ export class ContentProcessor {
 
             // Stat for size
             const stat = await FSUtils.safeStat(filePath);
-            // Validate readability before attempting to read
+            // Validate readability before attempting to read. If unreadable,
+            // throw a typed FileReadError so callers (DigestGenerator) can
+            // aggregate the error into per-file results instead of showing
+            // a popup for every unreadable file.
             const readable = await FSUtils.isReadable(filePath);
             if (!readable) {
-                // surface a warning via user-facing diagnostics and skip
-                try {
-                    await showUserError(new FileReadError(filePath, 'Permission denied or unreadable file'), 'Skipping unreadable file.');
-                } catch { /* ignore user dialog errors */ }
-                return { content: '', isBinary: false };
+                throw new FileReadError(filePath, 'Permission denied or unreadable file');
             }
             const size = stat?.size ?? 0;
 
@@ -81,12 +79,13 @@ export class ContentProcessor {
             }
             return { content, isBinary: false };
         } catch (e) {
-            // Provide user with actionable suggestion where appropriate
-            try {
-                if (e instanceof FileReadError) {
-                    await showUserError(e, 'Failed to read file. You can retry or skip this file.');
-                }
-            } catch { /* swallow user dialog errors */ }
+            // Propagate typed FileReadError to allow the digest generator to
+            // collect it in result.errors and surface a single aggregated
+            // error section. For other errors, return empty content to allow
+            // generation to continue silently.
+            if (e instanceof FileReadError) {
+                throw e;
+            }
             return { content: '', isBinary: false };
         }
     }
