@@ -1,0 +1,26 @@
+out
+dist
+node_modules
+.vscode-test/
+*.vsix
+
+# Local build and test artifacts
+/out/
+/node_modules/
+/.vscode-test/
+
+# Editor and OS
+.vscode/
+.DS_Store
+
+# Phase and instruction files (do not commit)
+PHASE10-TODO.md
+PHASE9-TODO.md
+PHASE8-TODO.md
+PHASE7-TODO.md
+PHASE6-TODO.md
+PHASE5-TODO.md
+PHASE4-TODO.md
+PHASE3-TODO.md
+Copilot-Todo.md
+COPILOT_INSTRUCTIONS.md
