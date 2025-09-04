@@ -166,13 +166,13 @@ describe('View registration and WebviewView HTML', () => {
     const thresholds = { maxFiles: 123, maxTotalSizeBytes: 9999, tokenLimit: 777 };
     const cfgMock = {
       get: jest.fn((k: string, d: any) => {
-        if (k === 'gitignore') return false;
-        if (k === 'respectGitignore') return false;
-        if (k === 'binaryPolicy') return 'includeBase64';
-        if (k === 'thresholds') return thresholds;
-        if (k === 'maxFiles') return thresholds.maxFiles;
-        if (k === 'maxTotalSizeBytes') return thresholds.maxTotalSizeBytes;
-        if (k === 'tokenLimit') return thresholds.tokenLimit;
+        if (k === 'gitignore') { return false; }
+        if (k === 'respectGitignore') { return false; }
+        if (k === 'binaryPolicy') { return 'includeBase64'; }
+        if (k === 'thresholds') { return thresholds; }
+        if (k === 'maxFiles') { return thresholds.maxFiles; }
+        if (k === 'maxTotalSizeBytes') { return thresholds.maxTotalSizeBytes; }
+        if (k === 'tokenLimit') { return thresholds.tokenLimit; }
         // default behavior: return provided default when key not explicitly mocked
         return d;
       }),
