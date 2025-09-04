@@ -10,6 +10,7 @@ import { runPool, CancellationToken } from '../utils/asyncPool';
 import { analyzeImports } from './dependencyAnalyzer';
 import * as vscode from 'vscode';
 import { emitProgress } from '../providers/eventBus';
+import { redactSecrets } from '../utils/redactSecrets';
 
 
 export class DigestGenerator {
@@ -255,6 +256,41 @@ export class DigestGenerator {
             metadata,
             errors: dedupedErrors
         };
+        // Apply redaction to the final assembled content and, for JSON mode, to per-file output objects
+        try {
+            const redactionCfg = {
+                redactionPatterns: (config as any).redactionPatterns,
+                redactionPlaceholder: (config as any).redactionPlaceholder,
+                showRedacted: (config as any).showRedacted
+            };
+            // Redact the full content string (this will be used for writing/caching)
+            const redactResult = redactSecrets(content, redactionCfg as any);
+            if (redactResult && redactResult.applied) {
+                result.content = redactResult.content;
+                (result as any).redactionApplied = true;
+            } else {
+                (result as any).redactionApplied = false;
+            }
+
+            // If outputObjects exist (JSON mode), produce a redacted copy so callers that inspect objects see redacted bodies
+            if (outputFormat === 'json' && Array.isArray(result.outputObjects) && result.outputObjects.length > 0) {
+                const redactedObjs = result.outputObjects.map(o => {
+                    try {
+                        const h = redactSecrets(o.header || '', redactionCfg as any).content;
+                        const b = redactSecrets(o.body || '', redactionCfg as any).content;
+                        return { header: h, body: b, imports: o.imports };
+                    } catch (e) {
+                        return o;
+                    }
+                });
+                result.outputObjects = redactedObjs;
+            }
+        } catch (e) {
+            // swallow redaction errors to avoid breaking generation
+            try { emitProgress({ op: 'generate', mode: 'end', determinate: false, message: 'Redaction failed' }); } catch (ex) { }
+            (result as any).redactionApplied = false;
+        }
+
         return result;
     }
 }

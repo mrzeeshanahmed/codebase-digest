@@ -7,7 +7,26 @@ export function computePreviewState(rootNodes: FileNode[], selectedFiles: FileNo
         ? require('../utils/formatters').Formatters.buildSelectedTreeLines(selectedFiles, maxLines)
         : [];
     const chartStats = fileScanner.aggregateStats(selectedFiles.length > 0 ? selectedFiles : rootNodes);
-    const tokenEstimate = config.tokenEstimate || 0;
+    // Compute a lightweight token estimate for preview/status.
+    // Old behavior used config.tokenEstimate as a boolean which produced 0/1 values.
+    // New behavior estimates tokens from selected files using a fast heuristic:
+    // - Prefer using file.size as proxy: ceil(size / 4)
+    // - If size missing, fallback to relPath length / 4
+    // This avoids heavy I/O while producing meaningful counts for the UI.
+    let tokenEstimate = 0;
+    if (selectedFiles.length === 0) {
+        tokenEstimate = 0;
+    } else {
+        for (const f of selectedFiles) {
+            if (typeof f.size === 'number' && f.size > 0) {
+                tokenEstimate += Math.ceil(f.size / 4);
+            } else if (f.relPath && f.relPath.length > 0) {
+                tokenEstimate += Math.ceil(f.relPath.length / 4);
+            } else if (f.path && f.path.length > 0) {
+                tokenEstimate += Math.ceil(f.path.length / 4);
+            }
+        }
+    }
     const warnings = fileScanner?.lastStats?.warnings || [];
     const presetNames = config.filterPresets || [];
     const contextLimit = config.contextLimit || config.tokenLimit || 0;

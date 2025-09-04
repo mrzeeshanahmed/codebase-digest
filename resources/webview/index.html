@@ -8,15 +8,21 @@
 </head>
 <body>
     <!-- Inline SVG sprite for icons -->
-    <svg aria-hidden="true" style="display:none">
-        <symbol id="icon-file" viewBox="0 0 24 24">
-            <path fill="currentColor" d="M6 2h7l5 5v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z"/>
+    <svg aria-hidden="true" class="visually-hidden-sprite">
+        <symbol id="icon-refresh" viewBox="0 0 24 24">
+            <path fill="currentColor" d="M17.65 6.35A7.95 7.95 0 0 0 12 4V1l-4 4 4 4V5c2.76 0 5.26 1.12 7.07 2.93L20 11h3V8l-5.35-1.65zM6.35 17.65A7.95 7.95 0 0 0 12 20v3l4-4-4-4v3c-2.76 0-5.26-1.12-7.07-2.93L4 13H1v3l5.35 1.65z"/>
+        </symbol>
+        <symbol id="icon-close" viewBox="0 0 24 24">
+            <path fill="currentColor" d="M18.3 5.71L12 12l6.3 6.29-1.41 1.42L10.59 13.41 4.29 19.71 2.88 18.3 9.18 12 2.88 5.71 4.29 4.29 10.59 10.59 16.88 4.29z"/>
+        </symbol>
+        <symbol id="icon-chevron-up" viewBox="0 0 24 24">
+            <path fill="currentColor" d="M7.41 15.41L12 10.83l4.59 4.58L18 14l-6-6-6 6z"/>
+        </symbol>
+        <symbol id="icon-chevron-down" viewBox="0 0 24 24">
+            <path fill="currentColor" d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/>
         </symbol>
         <symbol id="icon-folder" viewBox="0 0 24 24">
             <path fill="currentColor" d="M10 4H4a2 2 0 0 0-2 2v2h20V8a2 2 0 0 0-2-2h-8l-2-2zM2 10v8a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-8H2z"/>
-        </symbol>
-        <symbol id="icon-symlink" viewBox="0 0 24 24">
-            <path fill="currentColor" d="M10 17l5-5-5-5v3H3v4h7v3zM21 7v10h-8v-2h6V9h-6V7h8z"/>
         </symbol>
         <symbol id="icon-virtual" viewBox="0 0 24 24">
             <path fill="currentColor" d="M12 2L2 7v6c0 5 4 9 10 9s10-4 10-9V7l-10-5zM12 13a3 3 0 1 1 0-6 3 3 0 0 1 0 6z"/>
@@ -41,6 +47,10 @@
                 <button id="preset-btn" type="button" title="Presets" aria-label="Open presets menu" aria-haspopup="true" aria-expanded="false" class="secondary">
                     <span class="label">Presets</span>
                 </button>
+                <!-- Cancel write button (hidden by default; shown during long writes) -->
+                <button id="btn-cancel-write" type="button" title="Cancel write" aria-label="Cancel write" class="secondary" hidden aria-hidden="true">
+                    <span class="label">Cancel write</span>
+                </button>
             </div>
         </div>
     <!-- Compact status chips: selected / total / size / tokens / over-limit -->
@@ -63,7 +73,7 @@
     <div id="toolbar">
             <div class="segmented" role="toolbar" aria-label="Digest toolbar">
                 <button id="btn-refresh" type="button" data-action="refresh" title="Refresh" aria-label="Refresh">
-                    <svg class="icon" aria-hidden="true"><use href="#icon-file"></use></svg>
+                    <svg class="icon" aria-hidden="true"><use href="#icon-refresh"></use></svg>
                     <span class="label">Refresh</span>
                 </button>
                 <button id="btn-select-all" type="button" data-action="selectAll" title="Select all" aria-label="Select all">
@@ -71,15 +81,15 @@
                     <span class="label">Select</span>
                 </button>
                 <button id="btn-clear-selection" type="button" data-action="clearSelection" title="Clear selection" aria-label="Clear selection">
-                    <svg class="icon" aria-hidden="true"><use href="#icon-file"></use></svg>
+                    <svg class="icon" aria-hidden="true"><use href="#icon-close"></use></svg>
                     <span class="label">Clear</span>
                 </button>
                 <button id="btn-expand-all" type="button" data-action="expandAll" title="Expand all" aria-label="Expand all">
-                    <svg class="icon" aria-hidden="true"><use href="#icon-folder"></use></svg>
+                    <svg class="icon" aria-hidden="true"><use href="#icon-chevron-up"></use></svg>
                     <span class="label">Expand</span>
                 </button>
                 <button id="btn-collapse-all" type="button" data-action="collapseAll" title="Collapse all" aria-label="Collapse all">
-                    <svg class="icon" aria-hidden="true"><use href="#icon-folder"></use></svg>
+                    <svg class="icon" aria-hidden="true"><use href="#icon-chevron-down"></use></svg>
                     <span class="label">Collapse</span>
                 </button>
                 <button type="button" data-action="generateDigest" title="Generate digest" aria-label="Generate digest">

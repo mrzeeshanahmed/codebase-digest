@@ -432,6 +432,16 @@ export function activate(context: vscode.ExtensionContext) {
 			const tp = treeProviders.get(resolvedPath); if (tp) { tp.refresh(); }
 		}
 	}));
+
+	// Command: apply preset programmatically (used as a fallback from webview)
+	context.subscriptions.push(vscode.commands.registerCommand('codebaseDigest.applyPreset', async (folderPath?: string, preset?: string) => {
+		const resolvedPath = getFolderPath(folderPath);
+		if (!resolvedPath) { return; }
+		const allowed = ['default', 'codeOnly', 'docsOnly', 'testsOnly'];
+		if (!preset || !allowed.includes(preset)) { return; }
+		await vscode.workspace.getConfiguration('codebaseDigest', vscode.Uri.file(resolvedPath)).update('filterPresets', [preset], vscode.ConfigurationTarget.Workspace);
+		const tp = treeProviders.get(resolvedPath); if (tp) { tp.refresh(); }
+	}));
 	context.subscriptions.push(vscode.commands.registerCommand('codebaseDigest.editPatterns', async (folderPath?: string) => {
 		const resolvedPath = getFolderPath(folderPath);
 		if (!resolvedPath) { return; }
@@ -523,10 +533,63 @@ export function activate(context: vscode.ExtensionContext) {
 	updateCounts(folderPath);
 	}
 
-	// Listen for workspace folder changes and refresh tree
-	vscode.workspace.onDidChangeWorkspaceFolders(() => {
-		for (const [folderPath, treeProvider] of treeProviders.entries()) {
-			treeProvider.refresh();
+	// Listen for workspace folder changes and keep WorkspaceManager, treeProviders and registrations in sync
+	vscode.workspace.onDidChangeWorkspaceFolders((e) => {
+		// Handle added folders: create bundles, providers, register view and commands
+		if (e.added && e.added.length > 0) {
+			for (const folder of e.added) {
+				try {
+					// Ensure workspace manager creates a bundle for this folder
+					workspaceManager.addFolder(folder);
+					const services = workspaceManager.getBundleForFolder(folder);
+					if (!services) { continue; }
+					// Create and store a new tree provider
+					const treeProvider = new CodebaseDigestTreeProvider(folder, services);
+					treeProviders.set(folder.uri.fsPath, treeProvider);
+					// Initial scan
+					treeProvider.refresh();
+					// Register sidebar view for this provider
+					try {
+						const { registerCodebaseView } = require('./providers/codebasePanel');
+						if (typeof registerCodebaseView === 'function') {
+							registerCodebaseView(context, context.extensionUri, treeProvider);
+						}
+					} catch (err) { /* ignore */ }
+					// Register per-folder commands and toggles
+					registerToggles(context, treeProvider);
+					registerCommands(context, treeProvider, { workspaceManager });
+					registerSelectionCommands(context, treeProvider);
+					registerRefreshTree(context, treeProvider);
+				} catch (err) {
+					try { console.error('[codebase-digest] error adding workspace folder', folder.uri.fsPath, err); } catch (e) { /* ignore */ }
+				}
+			}
+		}
+		// Handle removed folders: dispose providers, remove bundles, and unregister per-folder resources
+		if (e.removed && e.removed.length > 0) {
+			for (const folder of e.removed) {
+				try {
+					const key = folder.uri.fsPath;
+					// Dispose and remove tree provider
+					const tp = treeProviders.get(key);
+					if (tp && typeof (tp as any).dispose === 'function') {
+						try { (tp as any).dispose(); } catch (dErr) { /* ignore */ }
+					}
+					treeProviders.delete(key);
+					// Remove bundle from workspace manager
+					try { workspaceManager.removeFolder(folder); } catch (wmErr) { /* ignore */ }
+					// Best-effort: attempt to dispose any panel/view registrations related to this folder
+					try {
+						// codebasePanel keeps active views internally; calling refresh on other providers will not reference removed folder
+						const { registeredDisposable } = require('./providers/codebasePanel');
+						if (registeredDisposable && typeof registeredDisposable.dispose === 'function') {
+							try { registeredDisposable.dispose(); } catch (e) { /* ignore */ }
+						}
+					} catch (e) { /* ignore */ }
+				} catch (err) {
+					try { console.error('[codebase-digest] error removing workspace folder', folder.uri.fsPath, err); } catch (e) { /* ignore */ }
+				}
+			}
 		}
 	});
 }

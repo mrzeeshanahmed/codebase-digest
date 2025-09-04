@@ -18,6 +18,20 @@ function postConfig(action, payload) {
 
 window.addEventListener('message', event => {
     const msg = event.data;
+    if (msg.type === 'restoredState') {
+        try {
+            const s = msg.state || {};
+            // If the extension has a persisted selection, apply it
+            if (Array.isArray(s.selectedFiles) && s.selectedFiles.length > 0) {
+                // Request the extension to set selection to persisted relPaths
+                postAction('setSelection', { relPaths: s.selectedFiles });
+            }
+            // Also accept persisted viewport/focus info if provided
+            if (s.focusIndex !== undefined && typeof s.focusIndex === 'number') {
+                focusedIndex = s.focusIndex;
+            }
+        } catch (e) { /* swallow */ }
+    }
     if (msg.type === 'state') {
         renderFileList(msg.state);
         // Also populate the compact chips from the full state so the sidebar shows counts immediately
@@ -211,6 +225,11 @@ function renderFileList(state) {
             newSelection.push(rel);
         }
     postAction('setSelection', { relPaths: newSelection });
+    // Persist a lightweight UI state to the extension so it can be restored
+    try {
+        const persist = { selectedFiles: newSelection, focusIndex: focusedIndex };
+        vscode.postMessage({ type: 'persistState', state: persist });
+    } catch (e) { /* ignore */ }
     };
 
     const handleKeydown = (e, index) => {
@@ -424,6 +443,13 @@ function handleProgress(e) {
             bar.removeAttribute('aria-valuenow');
         }
         showToast(e.message || (e.op + ' started'));
+        // If a write operation starts, reveal the Cancel write affordance
+        try {
+            if (e.op === 'write') {
+                const cw = document.getElementById('btn-cancel-write');
+                if (cw) { cw.hidden = false; cw.removeAttribute('aria-hidden'); }
+            }
+        } catch (ex) {}
     } else if (e.mode === 'progress') {
         container.classList.remove('indeterminate');
         bar.style.width = (e.percent || 0) + '%';
@@ -434,6 +460,8 @@ function handleProgress(e) {
         bar.setAttribute('aria-valuenow', '100');
         setTimeout(() => { bar.style.width = '0%'; }, 600);
         showToast(e.message || (e.op + ' finished'), 'success');
+    // hide cancel affordance when write ends
+    try { if (e.op === 'write') { const cw = document.getElementById('btn-cancel-write'); if (cw) { cw.hidden = true; cw.setAttribute('aria-hidden', 'true'); } } } catch (ex) {}
     }
 }
 
@@ -556,7 +584,78 @@ window.onload = function() {
             sendCmd(action);
         });
     }
-    // Preset menu/button removed: quick preset buttons are handled via toolbar data-action="applyPreset"
+    // Cancel write button wiring (posts cancelWrite action to extension)
+    const cancelWriteBtn = document.getElementById('btn-cancel-write');
+    if (cancelWriteBtn) {
+        cancelWriteBtn.addEventListener('click', (ev) => {
+            ev.preventDefault(); ev.stopPropagation();
+            // post a cancelWrite action which the extension translates to emitProgress({op:'write', mode:'cancel'})
+            postAction('cancelWrite');
+            // hide the button immediately to give immediate feedback
+            cancelWriteBtn.hidden = true; cancelWriteBtn.setAttribute('aria-hidden', 'true');
+            showToast('Canceling write...', 'info', 2000);
+        });
+    }
+    // Preset popup wiring: keep the popup markup but wire it to postAction('applyPreset', { preset })
+    // Toggle handlers for the preset menu button and menu items
+    const presetBtn = document.getElementById('preset-btn');
+    const presetMenu = document.getElementById('preset-menu');
+    function openPresetMenu() {
+        if (!presetBtn || !presetMenu) { return; }
+        presetBtn.setAttribute('aria-expanded', 'true');
+        presetMenu.removeAttribute('hidden');
+        presetMenu.setAttribute('aria-hidden', 'false');
+        // focus first menuitem for keyboard users
+        const first = presetMenu.querySelector('[role="menuitem"]');
+        if (first && typeof first.focus === 'function') { first.focus(); }
+        // capture outside clicks to close
+        setTimeout(() => { window.addEventListener('click', onWindowClickForPreset); }, 0);
+    }
+    function closePresetMenu() {
+        if (!presetBtn || !presetMenu) { return; }
+        presetBtn.setAttribute('aria-expanded', 'false');
+        presetMenu.setAttribute('aria-hidden', 'true');
+        presetMenu.setAttribute('hidden', '');
+        window.removeEventListener('click', onWindowClickForPreset);
+        // return focus to the button
+        if (typeof presetBtn.focus === 'function') { presetBtn.focus(); }
+    }
+    function togglePresetMenu() {
+        if (!presetBtn || !presetMenu) { return; }
+        const expanded = presetBtn.getAttribute('aria-expanded') === 'true';
+        if (expanded) { closePresetMenu(); } else { openPresetMenu(); }
+    }
+    function onWindowClickForPreset(ev) {
+        const tgt = ev.target;
+        if (!presetMenu || !presetBtn) { return; }
+        if (tgt === presetBtn || presetBtn.contains && presetBtn.contains(tgt)) { return; }
+        if (presetMenu.contains && presetMenu.contains(tgt)) { return; }
+        closePresetMenu();
+    }
+    if (presetBtn) {
+        presetBtn.addEventListener('click', (e) => { e.stopPropagation(); togglePresetMenu(); });
+        // close on Escape when the button has focus
+        presetBtn.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closePresetMenu(); } });
+    }
+    if (presetMenu) {
+        // Wire each menuitem to post an applyPreset action and then close the menu
+        const items = Array.from(presetMenu.querySelectorAll('[role="menuitem"][data-preset]'));
+        items.forEach(it => {
+            it.addEventListener('click', (ev) => {
+                ev.preventDefault(); ev.stopPropagation();
+                const preset = it.getAttribute('data-preset');
+                if (preset) {
+                    postAction('applyPreset', { preset });
+                }
+                closePresetMenu();
+            });
+            // allow keyboard activation
+            it.addEventListener('keydown', (ev) => {
+                if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); it.click(); }
+                if (ev.key === 'Escape') { closePresetMenu(); }
+            });
+        });
+    }
     document.getElementById('ingest-cancel')?.addEventListener('click', () => { const m = document.getElementById('ingestModal'); if (m) { m.hidden = true; } });
     document.getElementById('ingest-submit')?.addEventListener('click', () => {
         const repo = (document.getElementById('ingest-repo') || {}).value || '';
@@ -577,11 +676,13 @@ function populateSettings(settings) {
     const form = document.getElementById('settingsForm');
     if (!form) { return; }
     const getEl = (name) => form.querySelector(`[name="${name}"]`);
+    // Support both legacy and normalized keys
     const gitignoreEl = getEl('gitignore');
-    if (gitignoreEl) { gitignoreEl.checked = !!settings.gitignore; }
+    const respectGitignoreVal = (typeof settings.respectGitignore !== 'undefined') ? settings.respectGitignore : settings.gitignore;
+    if (gitignoreEl) { gitignoreEl.checked = !!respectGitignoreVal; }
     const outEl = getEl('outputFormat'); if (outEl) { outEl.value = settings.outputFormat || 'text'; }
-    const modelEl = getEl('tokenModel'); if (modelEl) { modelEl.value = settings.tokenModel || 'gpt-4o'; }
-    const binEl = getEl('binaryPolicy'); if (binEl) { binEl.value = settings.binaryPolicy || 'skip'; }
+    const modelEl = getEl('tokenModel'); if (modelEl) { modelEl.value = settings.tokenModel || 'chars-approx'; }
+    const binEl = getEl('binaryPolicy'); const binaryFilePolicyVal = (settings.binaryFilePolicy !== undefined) ? settings.binaryFilePolicy : settings.binaryPolicy; if (binEl) { binEl.value = binaryFilePolicyVal || 'skip'; }
     // New slider + number inputs for limits
     const maxFilesNumber = document.getElementById('maxFilesNumber');
     const maxFilesRange = document.getElementById('maxFilesRange');
@@ -590,10 +691,11 @@ function populateSettings(settings) {
     const tokenLimitNumber = document.getElementById('tokenLimitNumber');
     const tokenLimitRange = document.getElementById('tokenLimitRange');
     const defaults = { maxFiles: 25000, maxTotalSizeBytes: 536870912, tokenLimit: 32000 };
+    // thresholds may be provided normalized (flat) or as thresholds object
     const cfgThresholds = settings.thresholds || {};
-    const maxFilesVal = cfgThresholds.maxFiles || defaults.maxFiles;
-    const maxTotalSizeVal = cfgThresholds.maxTotalSizeBytes || defaults.maxTotalSizeBytes;
-    const tokenLimitVal = cfgThresholds.tokenLimit || defaults.tokenLimit;
+    const maxFilesVal = (typeof settings.maxFiles !== 'undefined') ? settings.maxFiles : (cfgThresholds.maxFiles || defaults.maxFiles);
+    const maxTotalSizeVal = (typeof settings.maxTotalSizeBytes !== 'undefined') ? settings.maxTotalSizeBytes : (cfgThresholds.maxTotalSizeBytes || defaults.maxTotalSizeBytes);
+    const tokenLimitVal = (typeof settings.tokenLimit !== 'undefined') ? settings.tokenLimit : (cfgThresholds.tokenLimit || defaults.tokenLimit);
     if (maxFilesNumber) { maxFilesNumber.value = String(maxFilesVal); }
     if (maxFilesRange) { maxFilesRange.value = String(Math.max(100, Math.min(50000, maxFilesVal))); }
     if (maxTotalSizeNumber) { maxTotalSizeNumber.value = String(maxTotalSizeVal); }
@@ -621,10 +723,11 @@ function populateSettings(settings) {
     if (save) {
         save.onclick = () => {
             const changes = {};
-            changes.gitignore = !!(getEl('gitignore') && getEl('gitignore').checked);
+            // Save normalized key names
+            changes.respectGitignore = !!(getEl('gitignore') && getEl('gitignore').checked);
             changes.outputFormat = (getEl('outputFormat') && getEl('outputFormat').value) || 'text';
-            changes.tokenModel = (getEl('tokenModel') && getEl('tokenModel').value) || 'gpt-4o';
-            changes.binaryPolicy = (getEl('binaryPolicy') && getEl('binaryPolicy').value) || 'skip';
+            changes.tokenModel = (getEl('tokenModel') && getEl('tokenModel').value) || 'chars-approx';
+            changes.binaryFilePolicy = (getEl('binaryPolicy') && getEl('binaryPolicy').value) || 'skip';
             // Redaction settings
             const showRedactedEl = getEl('showRedacted');
             const redactionPatternsEl = getEl('redactionPatterns');
@@ -641,11 +744,10 @@ function populateSettings(settings) {
             const maxFiles = Number((document.getElementById('maxFilesNumber') || {}).value) || defaults.maxFiles;
             const maxTotalSizeBytes = Number((document.getElementById('maxTotalSizeNumber') || {}).value) || defaults.maxTotalSizeBytes;
             const tokenLimit = Number((document.getElementById('tokenLimitNumber') || {}).value) || defaults.tokenLimit;
-            changes.thresholds = {
-                maxFiles,
-                maxTotalSizeBytes,
-                tokenLimit
-            };
+            // Persist flattened threshold keys for simpler runtime access
+            changes.maxFiles = maxFiles;
+            changes.maxTotalSizeBytes = maxTotalSizeBytes;
+            changes.tokenLimit = tokenLimit;
             const pv = (getEl('presets') && getEl('presets').value) || '';
             changes.presets = pv.trim() ? pv.split(',').map(s => s.trim()).filter(Boolean) : [];
             // include redaction keys at top-level settings

@@ -1,14 +1,30 @@
 :root{
-	--bg:#0f1115;
-	--panel:#121318;
-	--muted:#9aa0a6;
-	--text:#e6e9ee;
-	--accent:#7dd3fc; /* subtle cyan */
-	--accent-2:#8b5cf6; /* violet for highlights */
-	--surface:#17181b;
-	--border:rgba(255,255,255,0.04);
-	--selected:#1f2430;
-	--success:#10b981;
+	/* Color tokens */
+	--bg: #0f1115;
+	--panel: #121318;
+	--muted: #9aa0a6;
+	--text: #e6e9ee;
+	--accent: #7dd3fc; /* subtle cyan */
+	--accent-2: #8b5cf6; /* violet for highlights */
+	--surface: #17181b;
+	--border: rgba(255,255,255,0.04);
+	--selected: #1f2430;
+	--success: #10b981;
+
+	/* Spacing / radii */
+	--radius: 8px;
+	--spacing-xs: 6px;
+	--spacing-sm: 10px;
+	--spacing-md: 14px;
+	--spacing-lg: 24px;
+
+	/* Button tokens */
+	--btn-padding-vertical: 8px;
+	--btn-padding-horizontal: 12px;
+	--btn-font-size: 0.95rem;
+
+	/* Elevation */
+	--elevation-1: 0 6px 20px rgba(2,6,23,0.5);
 }
 
 html,body{
@@ -30,17 +46,55 @@ html,body{
 #dashboard h1, h1{font-size:1.5rem;margin:0 0 1rem;color:var(--text);font-weight:600;line-height:1.2}
 #dashboard h3, h3{font-size:1.125rem;margin:0 0 .75rem;color:var(--muted);font-weight:600;line-height:1.25}
 
-#toolbar{display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:1rem;align-items:center}
+#toolbar{display:flex;gap:var(--spacing-sm);flex-wrap:wrap;margin-bottom:var(--spacing-md);align-items:center}
 
-#toolbar .segmented{display:flex;flex-wrap:wrap;gap:.4rem;row-gap:.5rem;background:transparent;border-radius:8px;overflow:hidden;border:1px solid transparent;align-items:center}
-#toolbar .segmented button{display:inline-flex;align-items:center;gap:.5rem;padding:.5rem .7rem;border:0;background:transparent;color:var(--muted);cursor:pointer;font-size:.95rem;flex:0 1 auto;min-width:80px}
-#toolbar .segmented button .icon{width:18px;height:18px;flex:0 0 18px}
-#toolbar .segmented button:hover{background:rgba(255,255,255,0.02);color:var(--text)}
-#toolbar .segmented button[aria-pressed="true"],
-#toolbar .segmented button.active{background:linear-gradient(180deg,rgba(255,255,255,0.02),transparent);color:var(--text);box-shadow:0 6px 18px rgba(2,6,23,0.45) inset;border-right:1px solid rgba(255,255,255,0.02)}
-#toolbar .segmented button:active{transform:translateY(1px)}
+/* Base button styles (design system) */
+.btn{
+	display:inline-flex;
+	align-items:center;
+	gap:.5rem;
+	padding:var(--btn-padding-vertical) var(--btn-padding-horizontal);
+	border-radius:var(--radius);
+	border:1px solid transparent;
+	background:transparent;
+	color:var(--muted);
+	cursor:pointer;
+	font-size:var(--btn-font-size);
+	transition:background-color 160ms ease, color 160ms ease, transform 120ms ease;
+}
 
-/* Ensure keyboard focus is visible and consistent */
+.btn .icon{width:18px;height:18px;flex:0 0 18px;display:inline-flex;align-items:center;justify-content:center;color:var(--muted)}
+.btn:hover{background:rgba(255,255,255,0.02);color:var(--text)}
+.btn:active{transform:translateY(1px)}
+.btn:focus-visible{outline:3px solid rgba(125,211,252,0.14);outline-offset:3px}
+
+/* Primary & secondary variants */
+.btn.primary{background:linear-gradient(90deg,var(--accent),var(--accent-2));color:#071021;border:0}
+.btn.secondary{background:transparent;border:1px solid rgba(255,255,255,0.03);color:var(--muted)}
+
+/* Apply design system to toolbar segmented buttons */
+#toolbar .segmented{display:flex;flex-wrap:wrap;gap:.4rem;row-gap:.5rem;background:transparent;border-radius:var(--radius);overflow:hidden;align-items:center}
+#toolbar .segmented button{all:unset;cursor:pointer}
+#toolbar .segmented button{display:inline-flex}
+/* Apply base button tokens to segmented buttons unless explicitly opted out */
+#toolbar .segmented button:not(.no-style){
+	display:inline-flex;
+	align-items:center;
+	gap:.5rem;
+	padding:var(--btn-padding-vertical) var(--btn-padding-horizontal);
+	border-radius:var(--radius);
+	border:1px solid transparent;
+	background:transparent;
+	color:var(--muted);
+	cursor:pointer;
+	font-size:var(--btn-font-size);
+	transition:background-color 160ms ease, color 160ms ease, transform 120ms ease;
+	min-width:72px;
+}
+/* Fallback: ensure buttons inside segmented get base styles */
+#toolbar .segmented button{color:var(--muted)}
+
+/* Keep focus style consistent for keyboard users */
 #toolbar .segmented button:focus-visible{outline:3px solid rgba(125,211,252,0.14);outline-offset:3px;border-radius:6px}
 
 #main{display:flex;gap:16px}
@@ -208,3 +262,12 @@ html,body{
 
 /* small layout helpers */
 .modal .modal-content{padding:12px}
+
+/* Hide inline SVG sprite without using inline styles to satisfy CSP */
+.visually-hidden-sprite,
+svg[aria-hidden="true"] {
+	display: none !important;
+	width: 0;
+	height: 0;
+	overflow: hidden;
+}

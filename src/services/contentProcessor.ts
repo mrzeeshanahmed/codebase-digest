@@ -2,7 +2,7 @@ import * as path from 'path';
 import { NotebookProcessor } from './notebookProcessor';
 import { FSUtils } from '../utils/fsUtils';
 import { DigestConfig, FileNode } from '../types/interfaces';
-import { FileReadError } from '../utils/errors';
+import { internalErrors, interactiveMessages } from '../utils';
 
 export class ContentProcessor {
     /**
@@ -41,7 +41,7 @@ export class ContentProcessor {
             // a popup for every unreadable file.
             const readable = await FSUtils.isReadable(filePath);
             if (!readable) {
-                throw new FileReadError(filePath, 'Permission denied or unreadable file');
+                throw new internalErrors.FileReadError(filePath, 'Permission denied or unreadable file');
             }
             const size = stat?.size ?? 0;
 
@@ -75,7 +75,7 @@ export class ContentProcessor {
                 }
             } catch (readErr) {
                 // Wrap and surface to caller
-                throw new FileReadError(filePath, String(readErr));
+                    throw new internalErrors.FileReadError(filePath, String(readErr));
             }
             return { content, isBinary: false };
         } catch (e) {
@@ -83,8 +83,8 @@ export class ContentProcessor {
             // collect it in result.errors and surface a single aggregated
             // error section. For other errors, return empty content to allow
             // generation to continue silently.
-            if (e instanceof FileReadError) {
-                throw e;
+        if (e instanceof internalErrors.FileReadError) {
+            throw e;
             }
             return { content: '', isBinary: false };
         }

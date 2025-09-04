@@ -1,3 +1,19 @@
+/**
+ * NOTE: This file contains internal error classes and non-interactive helpers.
+ *
+ * Intended usage:
+ * - Import concrete Error classes (FileReadError, GitAuthError, etc.) for
+ *   programmatic error handling and flow control.
+ * - Use the helpers in this file (showUserError/showUserWarning) for
+ *   non-interactive reporting via the Output Channel and simple VS Code
+ *   notifications. These helpers are designed for logging and one-way
+ *   notifications rather than interactive control flows.
+ *
+ * If you need interactive prompts that return the user's choice, prefer
+ * importing from `src/utils/userMessages.ts` which exposes functions that
+ * return actions for caller logic.
+ */
+
 export class FileReadError extends Error {
     constructor(public filePath: string, message?: string) {
         super(message || `Failed to read file ${filePath}`);

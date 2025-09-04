@@ -62,7 +62,11 @@ export class Metrics {
     if (!this.enabled) { return; }
         // Unified log to output channel
         const details = `Counters: ${JSON.stringify(this.counters)}\nTimers: ${JSON.stringify(this.timers)}`;
-        require('../utils/errors').showUserWarning('Performance metrics logged.', details);
+        // Use interactiveMessages for explicit user-visible warnings via the utils barrel
+        const { interactiveMessages } = require('../utils');
+        if (interactiveMessages && typeof interactiveMessages.showUserWarning === 'function') {
+            interactiveMessages.showUserWarning('Performance metrics logged.', [details]);
+        }
     }
 
     getPerfSummary(): string {

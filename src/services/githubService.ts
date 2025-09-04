@@ -5,8 +5,7 @@ import * as os from 'os';
 // Track created temp dirs for session-scoped cleanup
 const _createdTmpDirs: string[] = [];
 import { exec } from 'child_process';
-import { RateLimitError, GitAuthError } from '../utils/errors';
-import { showUserError } from '../utils/userMessages';
+import { internalErrors, interactiveMessages } from '../utils';
 import { spawnGitPromise, safeFetch } from '../utils/procRedact';
 import { scrubTokens } from '../utils/redaction';
 
@@ -36,8 +35,8 @@ export async function runSubmoduleUpdate(repoPath: string): Promise<void> {
 
 export async function authenticate(): Promise<string> {
     const session = await vscode.authentication.getSession('github', ['repo'], { createIfNone: true });
-    if (!session || !session.accessToken) {
-        throw new GitAuthError('github.com', 'GitHub authentication failed');
+        if (!session || !session.accessToken) {
+        throw new internalErrors.GitAuthError('github.com', 'GitHub authentication failed');
     }
     return session.accessToken;
 }
@@ -49,13 +48,13 @@ async function githubApiRequest(endpoint: string, token: string): Promise<any> {
     if (!res.ok) {
         const isRateLimit = res.status === 429 || (res.status === 403 && res.headers.get('x-ratelimit-remaining') === '0');
         if (isRateLimit) {
-            throw new RateLimitError('GitHub', `GitHub API rate limit exceeded (${res.status}).`);
+            throw new internalErrors.RateLimitError('GitHub', `GitHub API rate limit exceeded (${res.status}).`);
         }
         if (res.status === 404) {
             throw new Error('Repository or reference not found. Check owner/repo and ref.');
         }
         if (res.status === 401 || (res.status === 403 && !isRateLimit)) {
-            throw new GitAuthError('github.com', `Authentication failed or insufficient permissions (${res.status}).`);
+            throw new internalErrors.GitAuthError('github.com', `Authentication failed or insufficient permissions (${res.status}).`);
         }
         throw new Error(`GitHub API error: ${res.status} ${res.statusText}`);
     }
@@ -87,9 +86,9 @@ export async function resolveRefToSha(ownerRepo: string, ref?: { tag?: string; b
                 return branch.commit.sha;
             } catch (apiErr: any) {
                 attempts += 1;
-                if (apiErr instanceof GitAuthError) {
+                if (apiErr instanceof internalErrors.GitAuthError) {
                     // Ask user if they want to re-auth
-                    const resp = await showUserError(apiErr, scrubTokens('Authentication required to access GitHub repository'));
+                    const resp = await interactiveMessages.showUserError(apiErr, scrubTokens('Authentication required to access GitHub repository'));
                     if (resp && (resp as any).action === 'signIn') {
                         try {
                             currentToken = await authenticate();
@@ -100,8 +99,8 @@ export async function resolveRefToSha(ownerRepo: string, ref?: { tag?: string; b
                     }
                     throw apiErr;
                 }
-                if (apiErr instanceof RateLimitError) {
-                    await showUserError(apiErr, scrubTokens('GitHub API rate limit reached'));
+                if (apiErr instanceof internalErrors.RateLimitError) {
+                    await interactiveMessages.showUserError(apiErr, scrubTokens('GitHub API rate limit reached'));
                     throw apiErr;
                 }
                 // Other API errors: break and fall back to ls-remote
@@ -239,7 +238,7 @@ export async function ingestRemoteRepo(urlOrSlug: string, options?: { ref?: { ta
         if (urlOrSlug.startsWith('https://')) {
             const m = urlOrSlug.match(/github.com\/([^\/]+\/[^\/]+)(?:\/|$)/);
             if (!m) {
-                await showUserError(new Error(scrubTokens('Invalid GitHub URL')), scrubTokens(urlOrSlug));
+                await interactiveMessages.showUserError(new Error(scrubTokens('Invalid GitHub URL')), scrubTokens(urlOrSlug));
                 throw new Error(scrubTokens('Invalid GitHub URL'));
             }
             ownerRepo = m[1];
@@ -257,10 +256,10 @@ export async function ingestRemoteRepo(urlOrSlug: string, options?: { ref?: { ta
         } catch (err: any) {
             // Ensure message is scrubbed before user display
             if (err && err.message) { err.message = scrubTokens(String(err.message)); }
-            if (err instanceof RateLimitError || err instanceof GitAuthError) {
-                await showUserError(err, scrubTokens(String(err.message)));
+            if (err instanceof internalErrors.RateLimitError || err instanceof internalErrors.GitAuthError) {
+                await interactiveMessages.showUserError(err, scrubTokens(String(err.message)));
             } else {
-                await showUserError(new Error(scrubTokens('Remote repo ingest failed.')), scrubTokens(String(err)));
+                await interactiveMessages.showUserError(new Error(scrubTokens('Remote repo ingest failed.')), scrubTokens(String(err)));
             }
             throw err;
         }
@@ -273,7 +272,7 @@ export async function ingestRemoteRepo(urlOrSlug: string, options?: { ref?: { ta
             localPath = await partialClone(ownerRepo, sha, options?.subpath, tmpDir);
         } catch (err: any) {
             if (err && err.message) { err.message = scrubTokens(String(err.message)); }
-            await showUserError(new Error(scrubTokens('Git clone or checkout failed.')), scrubTokens(String(err)));
+            await interactiveMessages.showUserError(new Error(scrubTokens('Git clone or checkout failed.')), scrubTokens(String(err)));
             throw err;
         }
         // If includeSubmodules, run git submodule update --init --recursive
@@ -286,7 +285,7 @@ export async function ingestRemoteRepo(urlOrSlug: string, options?: { ref?: { ta
                 });
             } catch (err: any) {
                 if (err && err.message) { err.message = scrubTokens(String(err.message)); }
-                await showUserError(new Error(scrubTokens('Git submodule update failed.')), scrubTokens(String(err)));
+                await interactiveMessages.showUserError(new Error(scrubTokens('Git submodule update failed.')), scrubTokens(String(err)));
                 throw err;
             }
         }

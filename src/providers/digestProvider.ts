@@ -23,6 +23,7 @@ import { redactSecrets } from '../utils/redactSecrets';
 import { showUserError } from '../utils/userMessages';
 import { emitProgress } from './eventBus';
 import { broadcastGenerationResult } from './codebasePanel';
+import { getMutex } from '../utils/asyncLock';
 
 /**
  * Generate a digest from selected files and config.
@@ -39,6 +40,12 @@ export async function generateDigest(
     treeProvider?: CodebaseDigestTreeProvider,
     overrides?: Record<string, any>
 ): Promise<DigestResult | undefined> {
+    // Acquire per-workspace mutex so multiple generateDigest invocations don't run
+    // concurrently (user may click generate repeatedly or webview may trigger twice).
+    const workspacePath = workspaceFolder.uri.fsPath;
+    const _mutex = getMutex(workspacePath);
+    const _release = await _mutex.lock();
+    try {
     const services = workspaceManager.getBundleForFolder(workspaceFolder);
     if (!services) {
         await showUserError(new Error('No services found for workspace folder.'), workspaceFolder.uri.fsPath);
@@ -189,25 +196,8 @@ export async function generateDigest(
     } catch (e) {
         diagnostics.warn('Failed to append performance metrics: ' + String(e));
     }
-    // Step 5: write output (apply redaction unless user asked to show redacted values)
-    let outContent = runtimeConfig.outputFormat === 'json'
-        ? JSON.stringify({ summary: digest.summary, tree: digest.tree, files: digest.outputObjects, warnings: digest.warnings }, null, 2)
-        : [digest.summary, digest.tree, ...(digest.chunks || [])].join(runtimeConfig.outputSeparatorsHeader || '\n---\n');
-    const redactionResult = redactSecrets(outContent, {
-        redactionPatterns: runtimeConfig.redactionPatterns || config.redactionPatterns,
-        redactionPlaceholder: runtimeConfig.redactionPlaceholder || config.redactionPlaceholder,
-        showRedacted: runtimeConfig.showRedacted
-    });
-    // Ensure digest.redactionApplied is always explicit (true if replacements happened)
-    if (redactionResult && redactionResult.applied) {
-        // note that redaction took place so UI can surface it
-        digest.redactionApplied = true as any;
-        outContent = redactionResult.content;
-    } else {
-        digest.redactionApplied = false as any;
-    }
-    // Emit a small diagnostic/info message for debug/verification purposes
-    diagnostics?.info(`[redaction] showRedacted=${!!runtimeConfig.showRedacted}; patterns=${Array.isArray(runtimeConfig.redactionPatterns) ? runtimeConfig.redactionPatterns.length : (Array.isArray(config.redactionPatterns) ? config.redactionPatterns.length : 0)}; applied=${!!(redactionResult && redactionResult.applied)}`);
+    // Step 5: write output - the DigestGenerator already applied redaction and set redactionApplied
+    const outContent = digest.content;
     await outputWriter.write(outContent, config);
     // Step 6: emit event
     // If you need to notify digest generation, use an event emitter or callback passed in
@@ -215,13 +205,13 @@ export async function generateDigest(
     if (config.cacheEnabled) {
         try {
             await fsp.mkdir(cacheDir, { recursive: true });
-        const cacheObj = {
-            summary: digest.summary,
-            tree: digest.tree,
-            files: digest.outputObjects,
-            warnings: digest.warnings,
-            metadata: {
-                redactionApplied: !!(redactionResult && redactionResult.applied),
+            const cacheObj = {
+                summary: digest.summary,
+                tree: digest.tree,
+                files: digest.outputObjects,
+                warnings: digest.warnings,
+                metadata: {
+                    redactionApplied: !!(digest as any).redactionApplied,
                 totalFiles: files.length,
                 totalSize: files.reduce((acc, f) => acc + (f.size || 0), 0),
                 generatedAt: new Date().toISOString(),
@@ -238,9 +228,7 @@ export async function generateDigest(
         } as any;
             await fsp.writeFile(cachePath, JSON.stringify(cacheObj, null, 2), 'utf8');
             // Cache the already-redacted output if redaction was applied, otherwise cache the original
-            const cacheOut = redactionResult && redactionResult.applied ? outContent : ((runtimeConfig.outputFormat || config.outputFormat) === 'json'
-                ? JSON.stringify({ summary: digest.summary, tree: digest.tree, files: digest.outputObjects, warnings: digest.warnings }, null, 2)
-                : [digest.summary, digest.tree, ...(digest.chunks || [])].join((runtimeConfig.outputSeparatorsHeader || config.outputSeparatorsHeader) || '\n---\n'));
+            const cacheOut = outContent;
             await fsp.writeFile(cacheOutPath, cacheOut, 'utf8');
         } catch (e) {
             diagnostics.warn('Cache write error: ' + String(e));
@@ -255,7 +243,7 @@ export async function generateDigest(
         // Return the actual output that was written (redacted or original)
         content: outContent,
         metadata: {
-            redactionApplied: !!(redactionResult && redactionResult.applied),
+            redactionApplied: !!(digest as any).redactionApplied,
             totalFiles: files.length,
             totalSize: files.reduce((acc, f) => acc + (f.size || 0), 0),
             generatedAt: new Date().toISOString(),
@@ -293,5 +281,8 @@ export async function generateDigest(
     }
 
     return finalResult;
+    } finally {
+        try { _release(); } catch (e) { }
+    }
 }
 

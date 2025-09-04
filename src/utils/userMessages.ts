@@ -1,3 +1,14 @@
+/**
+ * NOTE: This module exposes interactive user-facing helpers that present
+ * prompts and return the caller's chosen action. These functions are
+ * intended for interactive flows where the calling code needs to branch
+ * based on the user's selection (e.g., Retry, Ignore, Sign in).
+ *
+ * For non-interactive logging or simple notifications (no returned actions),
+ * prefer the helpers in `src/utils/errors.ts` which write to the Output
+ * Channel and show a lightweight message.
+ */
+
 import * as vscode from 'vscode';
 import { FileReadError, GitAuthError, RateLimitError, SizeLimitExceeded, DepthLimitExceeded } from './errors';
 

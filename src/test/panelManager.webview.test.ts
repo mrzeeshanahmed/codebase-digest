@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { CodebaseDigestPanel, registerCodebaseView, setWebviewHtml } from '../providers/codebasePanel';
+import { wireWebviewMessages } from '../providers/webviewHelpers';
 
 /*
 Manual validation checklist (quick steps to verify sidebar-first UX):
@@ -92,5 +93,107 @@ describe('View registration and WebviewView HTML', () => {
     expect(assignedHtml).toContain(fakeWebview.cspSource);
     expect(assignedHtml).toMatch(/vscode-resource:.*resources[\\\/]webview[\\\/]styles\.css/);
     expect(assignedHtml).toMatch(/vscode-resource:.*resources[\\\/]webview[\\\/]main\.js/);
+  });
+
+  it('applyPreset action updates workspace config and triggers refresh', async () => {
+    // Prepare fake webview that captures posted messages and allows simulating incoming ones
+    let posted: any[] = [];
+    let handler: ((m: any) => void) | null = null;
+    const fakeWebview: any = {
+      postMessage: (m: any) => { posted.push(m); return true; },
+      onDidReceiveMessage: (cb: (m: any) => void) => { handler = cb; return { dispose: () => {} }; },
+      cspSource: 'vscode-resource:'
+    };
+
+    // Mock configuration object with mutable state for filterPresets
+    let storedPresets: any[] = [];
+    const cfgMock = {
+      update: jest.fn(async (k: string, v: any) => { if (k === 'filterPresets') { storedPresets = v; } }),
+      get: jest.fn((k: string, d: any) => { if (k === 'filterPresets') { return storedPresets; } return d; })
+    } as any;
+    const originalGetConfig = (vscode.workspace as any).getConfiguration;
+  (vscode.workspace as any).getConfiguration = jest.fn(() => cfgMock);
+  const originalConfigTarget = (vscode as any).ConfigurationTarget;
+  (vscode as any).ConfigurationTarget = { Workspace: 1, WorkspaceFolder: 2, Global: 3 } as any;
+  const originalExecute = (vscode.commands as any).executeCommand;
+  (vscode.commands as any).executeCommand = jest.fn();
+  const originalUriFile = (vscode.Uri as any).file;
+  (vscode.Uri as any).file = (p: string) => ({ fsPath: p });
+
+    const treeProvider: any = { refresh: jest.fn(), workspaceRoot: '' };
+
+    // Wire messages and then simulate applyPreset incoming message
+  wireWebviewMessages(fakeWebview as any, treeProvider, 'mockFolder', async () => { /* noop */ }, undefined, undefined);
+  // simulate message
+  if (!handler) { throw new Error('webview handler not registered'); }
+  await (handler as any)({ type: 'action', actionType: 'applyPreset', preset: 'codeOnly' });
+
+  // Accept either code path:
+  // - direct config update (cfg.update called and treeProvider.refresh invoked)
+  // - fallback: executeCommand('codebaseDigest.applyPreset', folder, preset)
+  const executed = (vscode.commands && typeof (vscode.commands as any).executeCommand === 'function') ? (vscode.commands as any).executeCommand as jest.Mock : null;
+  const cfgUpdated = cfgMock.update.mock.calls.length > 0;
+  const fallbackCalled = executed && executed.mock.calls.length > 0;
+  expect(cfgUpdated || fallbackCalled).toBeTruthy();
+  // Ensure either refresh was called (direct path) or fallback was invoked
+  expect(treeProvider.refresh.mock.calls.length > 0 || (fallbackCalled && executed!.mock.calls.some((c: any[]) => c[0] === 'codebaseDigest.applyPreset'))).toBeTruthy();
+  // Expect webview posted a config response (may be empty if fallback occurred)
+  const cfgPost = posted.find(p => p && p.type === 'config');
+  if (cfgPost) {
+    expect(cfgPost).toBeDefined();
+  } else {
+    // If no config was posted, ensure fallback path was used
+    expect(fallbackCalled).toBeTruthy();
+  }
+
+    // restore
+  (vscode.workspace as any).getConfiguration = originalGetConfig;
+  (vscode as any).ConfigurationTarget = originalConfigTarget;
+  (vscode.commands as any).executeCommand = originalExecute;
+  (vscode.Uri as any).file = originalUriFile;
+  });
+
+  it('configRequest maps gitignore->respectGitignore, binaryPolicy->binaryFilePolicy, and flattens thresholds', async () => {
+    let handler: ((m: any) => void) | null = null;
+    let posted: any[] = [];
+    const fakeWebview: any = {
+      postMessage: (m: any) => { posted.push(m); return true; },
+      onDidReceiveMessage: (cb: (m: any) => void) => { handler = cb; return { dispose: () => {} }; },
+      cspSource: 'vscode-resource:'
+    };
+
+    // Config has legacy keys set
+    const thresholds = { maxFiles: 123, maxTotalSizeBytes: 9999, tokenLimit: 777 };
+    const cfgMock = {
+      get: jest.fn((k: string, d: any) => {
+        if (k === 'gitignore') return false;
+        if (k === 'respectGitignore') return false;
+        if (k === 'binaryPolicy') return 'includeBase64';
+        if (k === 'thresholds') return thresholds;
+        if (k === 'maxFiles') return thresholds.maxFiles;
+        if (k === 'maxTotalSizeBytes') return thresholds.maxTotalSizeBytes;
+        if (k === 'tokenLimit') return thresholds.tokenLimit;
+        // default behavior: return provided default when key not explicitly mocked
+        return d;
+      }),
+      update: jest.fn()
+    } as any;
+    const originalGetConfig = (vscode.workspace as any).getConfiguration;
+    (vscode.workspace as any).getConfiguration = jest.fn(() => cfgMock);
+
+  wireWebviewMessages(fakeWebview as any, {} as any, 'mockFolder', async () => { /* noop */ }, undefined, undefined);
+  if (!handler) { throw new Error('webview handler not registered'); }
+  await (handler as any)({ type: 'configRequest' });
+
+    const cfgPost = posted.find(p => p && p.type === 'config');
+    expect(cfgPost).toBeDefined();
+    const s = cfgPost.settings;
+    expect(s.respectGitignore).toBe(false);
+    expect(s.binaryFilePolicy).toBe('includeBase64');
+    expect(s.maxFiles).toBe(thresholds.maxFiles);
+    expect(s.maxTotalSizeBytes).toBe(thresholds.maxTotalSizeBytes);
+    expect(s.tokenLimit).toBe(thresholds.tokenLimit);
+
+    (vscode.workspace as any).getConfiguration = originalGetConfig;
   });
 });

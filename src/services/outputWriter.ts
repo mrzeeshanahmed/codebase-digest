@@ -56,7 +56,7 @@ export class OutputWriter {
                 }
                 vscode.window.showInformationMessage(`Digest saved to ${uri.fsPath}`);
             }
-        } else if (config.outputWriteLocation === 'clipboard') {
+    } else if (writeLocation === 'clipboard') {
             await vscode.env.clipboard.writeText(output);
             vscode.window.showInformationMessage('Digest copied to clipboard.');
         }

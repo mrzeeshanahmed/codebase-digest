@@ -56,19 +56,28 @@ export class SelectionManager {
     }
 
     setSelectionByRelPaths(relPaths: string[]): void {
-        this.selectedRelPaths.length = 0;
+        // Convert requested relPaths into a Set for O(1) membership checks and
+        // perform a single pass over the tree to update node.isSelected and
+        // accumulate selectedRelPaths. This avoids repeated includes/filter
+        // operations which produce O(n*m) behavior on large trees.
+        const want = new Set(relPaths || []);
+        const collected: string[] = [];
         const markSelection = (node: FileNode) => {
-            node.isSelected = relPaths.includes(node.relPath);
-            if (node.isSelected) {
-                if (!this.selectedRelPaths.includes(node.relPath)) { this.selectedRelPaths.push(node.relPath); }
-            } else {
-                this.selectedRelPaths = this.selectedRelPaths.filter(rp => rp !== node.relPath);
+            const isSel = want.has(node.relPath);
+            node.isSelected = !!isSel;
+            if (node.type === 'file' && isSel) {
+                collected.push(node.relPath);
             }
             if (node.children) {
                 for (const child of node.children) { markSelection(child); }
             }
         };
         for (const node of this.getRoots()) { markSelection(node); }
+        // Keep selectedRelPaths deterministic and compact: sort by relPath so
+        // callers relying on stable ordering (and persisted snapshots) behave
+        // consistently. getSelectedFiles() also sorts, so this aligns both APIs.
+        collected.sort((a, b) => a.localeCompare(b));
+        this.selectedRelPaths = collected;
         this.onChange(undefined);
         if (this.previewUpdater) { this.previewUpdater(); }
     }

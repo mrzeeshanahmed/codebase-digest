@@ -2,9 +2,9 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { CodebaseDigestTreeProvider } from './treeDataProvider';
 import { onProgress } from './eventBus';
+import { setWebviewHtml, wireWebviewMessages } from './webviewHelpers';
 
 const panels: Map<string, CodebaseDigestPanel> = new Map();
-let sidebarRegistered = false;
 let registeredDisposable: vscode.Disposable | undefined;
 const activeViews: Set<vscode.WebviewView> = new Set();
 
@@ -13,11 +13,25 @@ export class CodebaseDigestPanel {
     private extensionUri: vscode.Uri;
     private treeProvider: CodebaseDigestTreeProvider;
     private folderPath: string;
+    private context?: vscode.ExtensionContext;
 
-    constructor(extensionUri: vscode.Uri, treeProvider: CodebaseDigestTreeProvider, folderPath: string) {
-        this.extensionUri = extensionUri;
-        this.treeProvider = treeProvider;
-        this.folderPath = folderPath;
+    // Support two constructor shapes for backwards compatibility with tests:
+    // - new CodebaseDigestPanel(context, extensionUri, treeProvider, folderPath)
+    // - legacy: new CodebaseDigestPanel(extensionUri, treeProvider, folderPath)
+    constructor(contextOrExtensionUri: any, extensionUriOrTreeProvider?: any, treeProviderOrFolderPath?: any, folderPathArg?: any) {
+        // Detect whether the first argument is an ExtensionContext (has workspaceState/subscriptions)
+        if (contextOrExtensionUri && typeof contextOrExtensionUri === 'object' && ('workspaceState' in contextOrExtensionUri || 'subscriptions' in contextOrExtensionUri)) {
+            this.context = contextOrExtensionUri as vscode.ExtensionContext;
+            this.extensionUri = extensionUriOrTreeProvider as vscode.Uri;
+            this.treeProvider = treeProviderOrFolderPath as CodebaseDigestTreeProvider;
+            this.folderPath = folderPathArg as string;
+        } else {
+            // Legacy calling shape: (extensionUri, treeProvider, folderPath)
+            this.context = undefined;
+            this.extensionUri = contextOrExtensionUri as vscode.Uri;
+            this.treeProvider = extensionUriOrTreeProvider as CodebaseDigestTreeProvider;
+            this.folderPath = treeProviderOrFolderPath as string;
+        }
     }
 
     public reveal() {
@@ -31,9 +45,9 @@ export class CodebaseDigestPanel {
         });
         this.setHtml(this.panel.webview);
         // Wire message routing via shared helper so panel and view remain consistent
-        wireWebviewMessages(this.panel.webview, this.treeProvider, this.folderPath, async (changes: Record<string, any>) => {
+    wireWebviewMessages(this.panel.webview, this.treeProvider, this.folderPath, async (changes: Record<string, any>) => {
             await this.applyConfigChanges(changes);
-        }, () => this.postPreviewState());
+    }, () => this.postPreviewState(), this.context);
         this.panel.onDidDispose(() => {
             this.panel = undefined;
             panels.delete(this.folderPath);
@@ -60,16 +74,25 @@ export class CodebaseDigestPanel {
             if (!this.panel) { return; }
             const cfg = vscode.workspace.getConfiguration('codebaseDigest', vscode.Uri.file(this.folderPath));
                 const thresholdsDefault = { maxFiles: 25000, maxTotalSizeBytes: 536870912, tokenLimit: 32000 };
+                const thresholds = cfg.get('thresholds', thresholdsDefault) as any || {};
+                const maxFiles = cfg.get('maxFiles', thresholds.maxFiles || thresholdsDefault.maxFiles) as number;
+                const maxTotalSizeBytes = cfg.get('maxTotalSizeBytes', thresholds.maxTotalSizeBytes || thresholdsDefault.maxTotalSizeBytes) as number;
+                const tokenLimit = cfg.get('tokenLimit', thresholds.tokenLimit || thresholdsDefault.tokenLimit) as number;
+
                 const payload = {
                     type: 'config',
                     folderPath: this.folderPath,
                     settings: {
-                        gitignore: cfg.get('gitignore', true),
+                        respectGitignore: cfg.get('respectGitignore', cfg.get('gitignore', true)),
                         presets: cfg.get('presets', []),
                         outputFormat: cfg.get('outputFormat', 'text'),
-                        tokenModel: cfg.get('tokenModel', 'gpt-4o'),
-                        binaryPolicy: cfg.get('binaryPolicy', 'skip'),
-                        thresholds: cfg.get('thresholds', thresholdsDefault),
+                        tokenModel: cfg.get('tokenModel', 'chars-approx'),
+                        binaryFilePolicy: cfg.get('binaryFilePolicy', cfg.get('binaryPolicy', 'skip')),
+                        // flattened thresholds
+                        maxFiles,
+                        maxTotalSizeBytes,
+                        tokenLimit,
+                        thresholds: Object.assign({}, thresholdsDefault, thresholds),
                         // redaction settings
                         showRedacted: cfg.get('showRedacted', false),
                         redactionPatterns: cfg.get('redactionPatterns', []),
@@ -129,7 +152,7 @@ export function registerCodebasePanel(context: vscode.ExtensionContext, extensio
     const folderPath = treeProvider['workspaceRoot'] || '';
     const key = folderPath || String(context.storageUri || context.extensionUri);
     if (panels.has(key)) { return panels.get(key)!; }
-    const panel = new CodebaseDigestPanel(extensionUri, treeProvider, folderPath);
+    const panel = new CodebaseDigestPanel(context, extensionUri, treeProvider, folderPath);
     panels.set(key, panel);
     return panel;
 }
@@ -140,8 +163,7 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
     // If a provider was already registered previously, dispose it so we can re-register with a new treeProvider.
     if (registeredDisposable) {
         try { registeredDisposable.dispose(); } catch (e) { /* ignore */ }
-        registeredDisposable = undefined;
-        sidebarRegistered = false;
+    registeredDisposable = undefined;
     }
     const provider: vscode.WebviewViewProvider = {
         resolveWebviewView(webviewView: vscode.WebviewView) {
@@ -164,13 +186,30 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                     try { await cfg.update(key, value, vscode.ConfigurationTarget.WorkspaceFolder); } catch (e) { await cfg.update(key, value, vscode.ConfigurationTarget.Workspace); }
                 }
                 const thresholdsDefault = { maxFiles: 25000, maxTotalSizeBytes: 536870912, tokenLimit: 32000 };
-                const updated = { gitignore: cfg.get('gitignore', true), presets: cfg.get('presets', []), outputFormat: cfg.get('outputFormat', 'text'), tokenModel: cfg.get('tokenModel', 'gpt-4o'), binaryPolicy: cfg.get('binaryPolicy', 'skip'), thresholds: cfg.get('thresholds', thresholdsDefault), showRedacted: cfg.get('showRedacted', false), redactionPatterns: cfg.get('redactionPatterns', []), redactionPlaceholder: cfg.get('redactionPlaceholder', '[REDACTED]') };
+                const thresholds = cfg.get('thresholds', thresholdsDefault) as any || {};
+                const maxFiles = cfg.get('maxFiles', thresholds.maxFiles || thresholdsDefault.maxFiles) as number;
+                const maxTotalSizeBytes = cfg.get('maxTotalSizeBytes', thresholds.maxTotalSizeBytes || thresholdsDefault.maxTotalSizeBytes) as number;
+                const tokenLimit = cfg.get('tokenLimit', thresholds.tokenLimit || thresholdsDefault.tokenLimit) as number;
+                const updated = {
+                    respectGitignore: cfg.get('respectGitignore', cfg.get('gitignore', true)),
+                    presets: cfg.get('presets', []),
+                    outputFormat: cfg.get('outputFormat', 'text'),
+                    tokenModel: cfg.get('tokenModel', 'chars-approx'),
+                    binaryFilePolicy: cfg.get('binaryFilePolicy', cfg.get('binaryPolicy', 'skip')),
+                    maxFiles,
+                    maxTotalSizeBytes,
+                    tokenLimit,
+                    thresholds: Object.assign({}, thresholdsDefault, thresholds),
+                    showRedacted: cfg.get('showRedacted', false),
+                    redactionPatterns: cfg.get('redactionPatterns', []),
+                    redactionPlaceholder: cfg.get('redactionPlaceholder', '[REDACTED]')
+                };
                 webviewView.webview.postMessage({ type: 'config', folderPath: folder, settings: updated });
             }, () => {
                 // on getState, send current preview
                 const preview = treeProvider.getPreviewData();
                 webviewView.webview.postMessage({ type: 'state', state: preview });
-            });
+            }, context);
 
             // Forward progress events to the sidebar webview with light throttling to avoid UI jank
             ((): void => {
@@ -223,7 +262,7 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
         console.error('[codebase-digest] failed to register webview view provider', err);
         throw err;
     }
-    sidebarRegistered = true;
+    // registration tracked via registeredDisposable
 }
 
 // Broadcast generation result to open panels and sidebar views so webview can show toasts (e.g., redactionApplied)
@@ -245,107 +284,5 @@ export function broadcastGenerationResult(result: any, folderPath?: string) {
     }
 }
 
-// Shared helper: load the same index.html, rewrite resource URIs for the webview, and inject a CSP meta
-export function setWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri) {
-    const fs = require('fs');
-    const indexPath = path.join(extensionUri.fsPath, 'resources', 'webview', 'index.html');
-    let html = fs.readFileSync(indexPath, 'utf8');
-    html = html.replace(/<link\s+[^>]*href="([^"]+)"[^>]*>/g, (m: string, href: string) => {
-        const uri = webview.asWebviewUri(vscode.Uri.file(path.join(extensionUri.fsPath, 'resources', 'webview', href)));
-        return m.replace(href, uri.toString());
-    });
-    html = html.replace(/<script\s+[^>]*src="([^"]+)"[^>]*>/g, (m: string, src: string) => {
-        const uri = webview.asWebviewUri(vscode.Uri.file(path.join(extensionUri.fsPath, 'resources', 'webview', src)));
-        return m.replace(src, uri.toString());
-    });
-    // Rewrite image src attributes to use the webview asWebviewUri so resources are loaded from the local webview root
-    html = html.replace(/<img\s+[^>]*src="([^"]+)"[^>]*>/g, (m: string, src: string) => {
-        const uri = webview.asWebviewUri(vscode.Uri.file(path.join(extensionUri.fsPath, 'resources', 'webview', src)));
-        return m.replace(src, uri.toString());
-    });
-    html = html.replace(/<meta[^>]+http-equiv=['"]?Content-Security-Policy['"]?[^>]*>/gi, '');
-    // Inject a single, strict CSP meta that restricts all sources except resources served via webview.cspSource.
-    // Note: if inline scripts/styles are ever required in the future, generate a nonce and include it here
-    // (e.g. script-src ${webview.cspSource} 'nonce-<nonceVal>') and set the same nonce on the inline elements.
-    const cspMeta = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src ${webview.cspSource}; style-src ${webview.cspSource}; img-src ${webview.cspSource};">`;
-    html = html.replace(/<head[^>]*>/i, (match: string) => `${match}${cspMeta}`);
-    webview.html = html;
-}
-
-// Shared wiring for webview message routing to avoid duplication between panel and sidebar view
-function wireWebviewMessages(webview: vscode.Webview, treeProvider: CodebaseDigestTreeProvider, folderPath: string, onConfigSet: (changes: Record<string, any>) => Promise<void>, onGetState?: () => void) {
-    webview.onDidReceiveMessage((msg: any) => {
-        if (msg.type === 'getState') {
-            if (onGetState) { onGetState(); }
-            return;
-        }
-        if (msg.type === 'configRequest') {
-            const folder = folderPath || '';
-            const cfg = vscode.workspace.getConfiguration('codebaseDigest', vscode.Uri.file(folder));
-            const thresholdsDefault = { maxFiles: 25000, maxTotalSizeBytes: 536870912, tokenLimit: 32000 };
-            webview.postMessage({ type: 'config', folderPath: folder, settings: {
-                gitignore: cfg.get('gitignore', true),
-                presets: cfg.get('presets', []),
-                outputFormat: cfg.get('outputFormat', 'text'),
-                tokenModel: cfg.get('tokenModel', 'gpt-4o'),
-                binaryPolicy: cfg.get('binaryPolicy', 'skip'),
-                thresholds: cfg.get('thresholds', thresholdsDefault),
-                showRedacted: cfg.get('showRedacted', false),
-                redactionPatterns: cfg.get('redactionPatterns', []),
-                redactionPlaceholder: cfg.get('redactionPlaceholder', '[REDACTED]')
-            }});
-            return;
-        }
-        if (msg.type === 'config' && msg.action === 'set' && msg.changes) {
-            // delegate persistence to caller
-            (async () => { try { await onConfigSet(msg.changes); } catch (e) { /* swallow */ } })();
-            return;
-        }
-        if (msg.type === 'action') {
-            const commandMap: Record<string, string> = {
-                refresh: 'codebaseDigest.refreshTree',
-                selectAll: 'codebaseDigest.selectAll',
-                clearSelection: 'codebaseDigest.clearSelection',
-                expandAll: 'codebaseDigest.expandAll',
-                collapseAll: 'codebaseDigest.collapseAll',
-                generateDigest: 'codebaseDigest.generateDigest',
-                tokenCount: 'codebaseDigest.estimateTokens'
-            };
-            const targetFolder = (msg && (msg.folderPath || msg.folder)) || folderPath || treeProvider['workspaceRoot'] || '';
-
-            if (msg.actionType === 'pauseScan') {
-                vscode.commands.executeCommand('codebaseDigest.pauseScan', targetFolder);
-                return;
-            }
-            if (msg.actionType === 'resumeScan') {
-                vscode.commands.executeCommand('codebaseDigest.resumeScan', targetFolder);
-                return;
-            }
-            if (msg.actionType === 'ingestRemote' && msg.repo) {
-                const params = { repo: msg.repo, ref: msg.ref, subpath: msg.subpath, includeSubmodules: !!msg.includeSubmodules };
-                vscode.commands.executeCommand('codebaseDigest.ingestRemoteRepoProgrammatic', params).then((result: any) => {
-                    try { webview.postMessage({ type: 'ingestPreview', payload: result }); } catch (e) { /* swallow */ }
-                }, (err: any) => { try { webview.postMessage({ type: 'ingestError', error: String(err) }); } catch (e) { /* swallow */ } });
-                return;
-            }
-
-            if (msg.actionType === 'setSelection' && Array.isArray(msg.relPaths)) {
-                treeProvider.setSelectionByRelPaths(msg.relPaths);
-                try { const preview = treeProvider.getPreviewData(); webview.postMessage({ type: 'state', state: preview }); } catch (e) { /* swallow */ }
-                return;
-            }
-            if (msg.actionType === 'toggleExpand' && typeof msg.relPath === 'string') {
-                vscode.commands.executeCommand('codebaseDigest.toggleExpand', targetFolder, msg.relPath);
-                return;
-            }
-            if (commandMap[msg.actionType]) {
-                if (msg.actionType === 'generateDigest' && msg.overrides) {
-                    vscode.commands.executeCommand(commandMap[msg.actionType], targetFolder, msg.overrides);
-                } else {
-                    vscode.commands.executeCommand(commandMap[msg.actionType], targetFolder);
-                }
-                return;
-            }
-        }
-    });
-}
+// Re-export helpers for backwards compatibility with imports from codebasePanel
+export { setWebviewHtml, wireWebviewMessages };

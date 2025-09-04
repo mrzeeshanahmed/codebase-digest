@@ -10,6 +10,7 @@ import { computePreviewState } from './previewState';
 import { ExpandState, MAX_EXPAND_DEPTH } from './expandState';
 import { formatSize, formatTooltip, createTreeIcon, ContextValues } from './treeHelpers';
 import { emitProgress } from './eventBus';
+import { getMutex } from '../utils/asyncLock';
 import { minimatch } from 'minimatch';
 
 export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileNode> {
@@ -265,6 +266,11 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
         const rootPath = this.workspaceFolder.uri.fsPath;
         this.workspaceRoot = rootPath;
         const config = this.loadConfig();
+        // Serialize workspace scans to avoid overlapping scan operations which
+        // previously led to race conditions when refresh() or watcher events
+        // triggered multiple scans concurrently.
+        const mutex = getMutex(rootPath);
+        const release = await mutex.lock();
         try {
             this.rootNodes = await this.fileScanner.scanRoot(rootPath, config, token);
             // Apply any configured virtual folder mappings so UI presents synthetic top-level groups
@@ -295,6 +301,9 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
             }
         } catch (err) {
             this.rootNodes = [];
+        } finally {
+            // Always release the mutex so other queued operations can proceed
+            try { release(); } catch (e) { }
         }
     }
 
@@ -449,7 +458,7 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
             notebookProcess: cfg.get('notebookProcess', false),
             notebookIncludeNonTextOutputs: cfg.get('notebookIncludeNonTextOutputs', false),
             tokenEstimate: cfg.get('tokenEstimate', false),
-            tokenModel: cfg.get('tokenModel', ''),
+            tokenModel: cfg.get('tokenModel', 'chars-approx'),
             performanceLogLevel: cfg.get('performanceLogLevel', 'info'),
             performanceCollectMetrics: cfg.get('performanceCollectMetrics', false),
             outputSeparatorsHeader: cfg.get('outputSeparatorsHeader', ''),
@@ -478,6 +487,8 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
                 ];
             }
             if (!this.rootNodes || this.rootNodes.length === 0) {
+                // Provide a helpful welcome state with actionable entries so users can
+                // open the dashboard, generate a digest, ingest a remote repo, clear cache or open settings.
                 return [
                     {
                         type: 'file',
@@ -488,7 +499,62 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
                         depth: 0,
                         children: [],
                         virtualType: 'welcome'
-                    } as FileNode & { virtualType: 'welcome' }
+                    } as FileNode & { virtualType: 'welcome' },
+                    {
+                        type: 'file',
+                        name: 'Open Dashboard',
+                        relPath: '__welcome__:openDashboard',
+                        path: '',
+                        isSelected: false,
+                        depth: 0,
+                        children: [],
+                        virtualType: 'welcomeAction',
+                        action: 'openDashboard'
+                    } as any,
+                    {
+                        type: 'file',
+                        name: 'Generate Digest',
+                        relPath: '__welcome__:generate',
+                        path: '',
+                        isSelected: false,
+                        depth: 0,
+                        children: [],
+                        virtualType: 'welcomeAction',
+                        action: 'generate'
+                    } as any,
+                    {
+                        type: 'file',
+                        name: 'Ingest Remote Repo',
+                        relPath: '__welcome__:ingest',
+                        path: '',
+                        isSelected: false,
+                        depth: 0,
+                        children: [],
+                        virtualType: 'welcomeAction',
+                        action: 'ingest'
+                    } as any,
+                    {
+                        type: 'file',
+                        name: 'Clear Digest Cache',
+                        relPath: '__welcome__:clearCache',
+                        path: '',
+                        isSelected: false,
+                        depth: 0,
+                        children: [],
+                        virtualType: 'welcomeAction',
+                        action: 'clearCache'
+                    } as any,
+                    {
+                        type: 'file',
+                        name: 'Settings',
+                        relPath: '__welcome__:settings',
+                        path: '',
+                        isSelected: false,
+                        depth: 0,
+                        children: [],
+                        virtualType: 'welcomeAction',
+                        action: 'settings'
+                    } as any
                 ];
             }
             return this.rootNodes;
@@ -507,11 +573,24 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
                 };
                 // Start async scan
                 const config = this.loadConfig();
-                this.fileScanner.scanDirectory(element.path, config, this.scanToken || undefined).then(children => {
-                    element.children = children;
-                    this.directoryCache.set(element.path, children);
-                    this._onDidChangeTreeData.fire(element);
-                });
+                // Hydration of a directory can be long-running; serialize per-workspace
+                // so multiple hydrations or full scans don't race. Use the workspace mutex
+                // but make hydration non-blocking for the caller (we await acquisition
+                // inside the background task).
+                (async () => {
+                    const m = getMutex(this.workspaceRoot || this.workspaceFolder.uri.fsPath);
+                    const relRelease = await m.lock();
+                    try {
+                        const children = await this.fileScanner.scanDirectory(element.path, config, this.scanToken || undefined);
+                        element.children = children;
+                        this.directoryCache.set(element.path, children);
+                        this._onDidChangeTreeData.fire(element);
+                    } catch (e) {
+                        // swallow; keep UI responsive
+                    } finally {
+                        try { relRelease(); } catch (e) { }
+                    }
+                })();
                 return [loadingNode];
             }
             if (this.directoryCache.has(element.path)) {
@@ -530,10 +609,32 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
             item.tooltip = 'Welcome to Codebase Digest';
             item.iconPath = new vscode.ThemeIcon('rocket');
             item.contextValue = ContextValues.welcome;
-            // Provide a quick action: clicking the welcome node focuses the sidebar dashboard view
+            // Clicking the welcome node focuses the sidebar dashboard view
             item.command = {
                 command: 'codebaseDigest.focusView',
                 title: 'Focus Codebase Digest',
+                arguments: [this.workspaceFolder.uri.fsPath]
+            } as any;
+            return item;
+        }
+        // Special-case welcome action rows which are shown below the main welcome node
+        if ((element as any).virtualType === 'welcomeAction') {
+            const act = (element as any).action || '';
+            const item = new vscode.TreeItem(element.name, vscode.TreeItemCollapsibleState.None);
+            item.iconPath = new vscode.ThemeIcon('gear');
+            item.contextValue = ContextValues.file;
+            // Map friendly action names to extension command IDs
+            const cmdMap: Record<string, string> = {
+                openDashboard: 'codebaseDigest.openDashboard',
+                generate: 'codebaseDigest.generateDigest',
+                ingest: 'codebaseDigest.ingestRemoteRepo',
+                clearCache: 'codebaseDigest.invalidateCache',
+                settings: 'codebaseDigest.openSettings'
+            };
+            const cmd = cmdMap[act] || 'codebaseDigest.openDashboard';
+            item.command = {
+                command: cmd,
+                title: element.name,
                 arguments: [this.workspaceFolder.uri.fsPath]
             } as any;
             return item;
@@ -589,8 +690,18 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
         }
     }
 
-    // Resume is a no-op here; clients should call refresh() to start a fresh scan.
+    // Resume scanning: cancel any current token if set and trigger a fresh refresh.
+    // We intentionally do not emit a separate "Resuming" progress event here because
+    // refresh() will emit the scan start/end progress events. Emitting both led to
+    // duplicate progress messages being shown in the webview.
     public resumeScan(): void {
-        try { emitProgress({ op: 'scan', mode: 'start', determinate: false, message: 'Resuming scan...' }); } catch (e) { }
+        try {
+            if (this.scanToken) {
+                // ensure previous scan is signaled to cancel; refresh will create a new token
+                this.scanToken.isCancellationRequested = true;
+            }
+        } catch (e) { /* swallow */ }
+        // Start a fresh scan which will emit its own progress events
+        try { this.refresh(); } catch (e) { /* swallow */ }
     }
 }

@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { generateDigest } from '../providers/digestProvider';
-import { showUserWarning, showUserError } from '../utils/errors';
+import { internalErrors, interactiveMessages } from '../utils';
 import { takeTransientOverride } from '../utils/transientOverrides';
 
 export function registerCommands(context: vscode.ExtensionContext, treeProvider: any, services?: any) {
@@ -11,7 +11,7 @@ export function registerCommands(context: vscode.ExtensionContext, treeProvider:
                 const workspaceFolders = vscode.workspace.workspaceFolders;
                 const workspaceFolder = workspaceFolders && workspaceFolders.length > 0 ? workspaceFolders[0] : undefined;
                 if (!workspaceFolder) {
-                    showUserError('No workspace folder found.');
+                    interactiveMessages.showUserError(new Error('No workspace folder found.'));
                     return;
                 }
                 // Assume WorkspaceManager is available on services
@@ -27,7 +27,7 @@ export function registerCommands(context: vscode.ExtensionContext, treeProvider:
                 }
                 const result = await generateDigest(workspaceFolder, workspaceManager, treeProvider, finalOverrides);
                 if (!result) {
-                    showUserWarning('No digest was generated.');
+                    interactiveMessages.showUserWarning('No digest was generated.');
                     return;
                 }
                 vscode.window.showInformationMessage('Digest generated successfully.');
@@ -40,7 +40,7 @@ export function registerCommands(context: vscode.ExtensionContext, treeProvider:
                     }
                 } catch (e) { /* ignore */ }
             } catch (e) {
-                showUserError('Error generating digest.', String(e));
+                interactiveMessages.showUserError(new Error('Error generating digest.'), String(e));
             }
         })
     );

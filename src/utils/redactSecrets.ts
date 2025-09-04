@@ -28,7 +28,7 @@ interface RedactionRule {
  * @returns The entropy value.
  */
 function calculateEntropy(str: string): number {
-    if (!str) return 0;
+    if (!str) { return 0; }
     const charCounts: { [key: string]: number } = {};
     for (const char of str) {
         charCounts[char] = (charCounts[char] || 0) + 1;
@@ -86,10 +86,49 @@ export function redactSecrets(
         return { content: input, applied: false };
     }
 
-    // For now, we'll just use the robust default rules.
-    // This could be extended to merge user-provided patterns from `config.redactionPatterns`.
-    const rules = defaultRules;
+    // Merge user-provided patterns (if any) before the default rules so user intent is prioritized.
     const placeholder = config?.redactionPlaceholder || '[REDACTED]';
+
+    const userPatterns = Array.isArray(config?.redactionPatterns) ? config!.redactionPatterns : [] as any[];
+
+    // Helper to escape literal strings for RegExp
+    const escapeForRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+    const compiledUserRules: RedactionRule[] = [];
+    for (const raw of userPatterns) {
+        if (!raw || typeof raw !== 'string') { continue; }
+        const trimmed = raw.trim();
+        if (!trimmed) { continue; }
+        try {
+            let re: RegExp | null = null;
+            // If user provided a /pattern/flags form, extract body and flags
+            const m = trimmed.match(/^\/(.*)\/(g?i?m?s?u?y?)$/);
+            if (m) {
+                const body = m[1];
+                let flags = m[2] || '';
+                if (!flags.includes('g')) { flags += 'g'; }
+                re = new RegExp(body, flags);
+            } else {
+                // Heuristic: if the string contains regex special characters, treat it as a pattern
+                // Allow common constructs like [], (), +, ?, ^, $ and |
+                if (/[.\\^$*+?()[\]{}|]/.test(trimmed)) {
+                    // compile as provided, ensure global
+                    re = new RegExp(trimmed, 'g');
+                } else {
+                    // treat as literal
+                    re = new RegExp(escapeForRegExp(trimmed), 'g');
+                }
+            }
+            if (re) {
+                compiledUserRules.push({ name: 'User pattern', pattern: re });
+            }
+        } catch (e) {
+            // On invalid regex, skip the pattern but don't throw
+            continue;
+        }
+    }
+
+    const rules = [...compiledUserRules, ...defaultRules];
     const entropyThreshold = 3.5;
 
     let out = input;
@@ -117,7 +156,7 @@ export function redactSecrets(
                 const groupIndex = rule.redactGroup ?? 0;
                 const target = match[groupIndex];
 
-                if (!target) continue;
+                if (!target) { continue; }
 
                 // Perform entropy check if required
                 if (rule.checkEntropy && calculateEntropy(target) < entropyThreshold) {
@@ -126,14 +165,14 @@ export function redactSecrets(
         
                 // Avoid redacting parts of file paths or common non-secrets
                 if (target.includes('/') || target.includes('\\') || target.toLowerCase() === 'true' || target.toLowerCase() === 'false') {
-                        continue;
+                    continue;
                 }
 
                 // Replace the target in the line
                 // We do this carefully to handle multiple matches in a single line
                 if (modifiedLine.includes(target)) {
-                        modifiedLine = modifiedLine.replace(target, placeholder);
-                        applied = true;
+                    modifiedLine = modifiedLine.replace(target, placeholder);
+                    applied = true;
                 }
             }
             newLines.push(modifiedLine);

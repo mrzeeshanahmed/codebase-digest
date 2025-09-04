@@ -36,6 +36,10 @@ const extensionConfig = {
   typescript: 'commonjs typescript'
   ,
   'optional-tiktoken-adapter': 'commonjs optional-tiktoken-adapter'
+  ,
+  // Avoid bundling minimatch (it pulls in brace-expansion/balanced-match and inflates the bundle).
+  // Leave as commonjs so runtime require() resolves the package from node_modules when present.
+  minimatch: 'commonjs minimatch'
   // Note: If you add other optional adapters that must remain external, list
   // them here as 'moduleName': 'commonjs moduleName'. Modules marked external
   // will be required at runtime (if present) and should be installed by the
