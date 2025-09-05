@@ -73,11 +73,11 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
             const key = String(dir || this.workspaceRoot || 'root');
             const runNow = async () => {
                 // If the dir equals workspace root, perform a full refresh
-                if (dir === this.workspaceRoot) {
-                    // Respect any existing cancellation token: refresh will create a fresh token
-                    try { this.refresh(); } catch (e) { /* swallow */ }
-                    return;
-                }
+                    if (dir === this.workspaceRoot) {
+                        // Respect any existing cancellation token: refresh will create a fresh token
+                        try { await this.refresh(); } catch (e) { /* swallow */ }
+                        return;
+                    }
 
                 // Find parent node in tree
                 let parentNode: FileNode | undefined;
@@ -98,10 +98,18 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
                 parentNode = findNode(this.rootNodes);
                 if (parentNode) {
                     const config = this.loadConfig();
-                    // Pass through current scan token so a global cancellation will abort this directory scan if needed
-                    parentNode.children = await this.fileScanner.scanDirectory(parentNode.path, config, this.scanToken || undefined);
-                    this.directoryCache.set(parentNode.path, parentNode.children);
-                    this._onDidChangeTreeData.fire(parentNode);
+                    // Acquire workspace mutex so directory-level scans do not overlap with
+                    // full workspace scans (scanWorkspace) which also use the same mutex.
+                    const m = getMutex(this.workspaceRoot || this.workspaceFolder.uri.fsPath);
+                    const relRelease = await m.lock();
+                    try {
+                        // Pass through current scan token so a global cancellation will abort this directory scan if needed
+                        parentNode.children = await this.fileScanner.scanDirectory(parentNode.path, config, this.scanToken || undefined);
+                        this.directoryCache.set(parentNode.path, parentNode.children);
+                        this._onDidChangeTreeData.fire(parentNode);
+                    } finally {
+                        try { relRelease(); } catch (e) { /* swallow */ }
+                    }
                 }
             };
 

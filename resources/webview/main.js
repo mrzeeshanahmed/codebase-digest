@@ -66,6 +66,15 @@ window.addEventListener('message', event => {
     }
     if (msg.type === 'state') {
         renderFileList(msg.state);
+        // Synchronize paused state from extension state when provided so the
+        // Pause/Resume button stays in sync with extension-side scanning state.
+        try {
+            const s = msg.state || {};
+            if (typeof s.paused !== 'undefined') {
+                paused = !!s.paused;
+                updatePauseButton();
+            }
+        } catch (e) { /* swallow */ }
         // If we have a persisted selection buffered, only apply it once the
         // incoming state indicates the workspace has files (totalFiles > 0).
         try {
@@ -723,6 +732,20 @@ window.onload = function() {
             sendCmd(action);
         });
     }
+    // Also wire the explicit pause button if present (some DOM variants
+    // may render a dedicated pause button without data-action wiring).
+    try {
+        const explicitPause = nodes.pauseBtn || document.getElementById('btn-pause-resume');
+        if (explicitPause) {
+            explicitPause.addEventListener('click', (ev) => {
+                ev.preventDefault(); ev.stopPropagation();
+                paused = !paused;
+                try { window.localStorage.setItem('cbd_paused', paused ? '1' : '0'); } catch (e) {}
+                updatePauseButton();
+                postAction(paused ? 'pauseScan' : 'resumeScan');
+            });
+        }
+    } catch (e) { /* swallow */ }
     // Cancel write button wiring (posts cancelWrite action to extension)
     const cancelWriteBtn = nodes.cancelWriteBtn || document.getElementById('btn-cancel-write');
     if (cancelWriteBtn) {

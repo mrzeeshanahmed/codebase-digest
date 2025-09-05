@@ -123,10 +123,18 @@ export class CodebaseDigestPanel {
         private async applyConfigChanges(changes: Record<string, any>) {
             const cfg = vscode.workspace.getConfiguration('codebaseDigest', vscode.Uri.file(this.folderPath));
             for (const [key, value] of Object.entries(changes)) {
-                // Prefer WorkspaceFolder-level settings; only fallback to Workspace if that write throws.
+                // Prefer WorkspaceFolder-level settings when the folder is part of the workspace;
+                // otherwise update at the Workspace level.
                 try {
-                    await cfg.update(key, value, vscode.ConfigurationTarget.WorkspaceFolder);
+                    const folderUri = vscode.Uri.file(this.folderPath);
+                    const wf = vscode.workspace.getWorkspaceFolder(folderUri);
+                    if (wf) {
+                        await cfg.update(key, value, vscode.ConfigurationTarget.WorkspaceFolder);
+                    } else {
+                        await cfg.update(key, value, vscode.ConfigurationTarget.Workspace);
+                    }
                 } catch (e) {
+                    // Best-effort: if WorkspaceFolder update failed for unexpected reasons, try Workspace as a fallback.
                     try { await cfg.update(key, value, vscode.ConfigurationTarget.Workspace); } catch (err) { /* ignore */ }
                 }
             }
@@ -233,7 +241,13 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                 const cfg = vscode.workspace.getConfiguration('codebaseDigest', vscode.Uri.file(folder));
                 for (const [key, value] of Object.entries(changes)) {
                     try {
-                        await cfg.update(key, value, vscode.ConfigurationTarget.WorkspaceFolder);
+                        const folderUri = vscode.Uri.file(folder);
+                        const wf = vscode.workspace.getWorkspaceFolder(folderUri);
+                        if (wf) {
+                            await cfg.update(key, value, vscode.ConfigurationTarget.WorkspaceFolder);
+                        } else {
+                            await cfg.update(key, value, vscode.ConfigurationTarget.Workspace);
+                        }
                     } catch (e) {
                         try { await cfg.update(key, value, vscode.ConfigurationTarget.Workspace); } catch (err) { /* ignore */ }
                     }

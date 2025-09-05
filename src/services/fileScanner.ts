@@ -225,6 +225,52 @@ export class FileScanner {
         });
     }
 
+    // Handle a symbolic link entry
+    private async handleSymlink(entry: fs.Dirent, absPath: string, relPath: string, stat: fs.Stats, depth: number, results: FileNode[], stats: TraversalStats) {
+        this.pushFileNode(results, {
+            path: absPath,
+            relPath,
+            name: entry.name,
+            type: 'symlink',
+            size: stat.size,
+            mtime: stat.mtime,
+            depth,
+            isSelected: false,
+            isBinary: false,
+        }, stats);
+    }
+
+    // Handle a regular file entry: push node and emit occasional progress
+    private async handleFile(entry: fs.Dirent, absPath: string, relPath: string, stat: fs.Stats, depth: number, results: FileNode[], stats: TraversalStats) {
+        this.pushFileNode(results, {
+            path: absPath,
+            relPath,
+            name: entry.name,
+            type: 'file',
+            size: stat.size,
+            mtime: stat.mtime,
+            depth,
+            isSelected: false,
+            isBinary: false,
+        }, stats);
+        // Emit progress every 100 files
+        if (stats.totalFiles % 100 === 0) {
+            try {
+                emitProgress({ op: 'scan', mode: 'progress', determinate: true, percent: 0, message: 'Scanning...', totalFiles: stats.totalFiles, totalSize: stats.totalSize });
+            } catch (e) { }
+        }
+    }
+
+    // Handle a directory entry: load gitignore for dir, recurse and push directory node
+    private async handleDirectory(entry: fs.Dirent, absPath: string, relPath: string, stat: fs.Stats, rootPath: string, depth: number, cfg: DigestConfig, stats: TraversalStats, results: FileNode[], token?: { isCancellationRequested?: boolean }) {
+        try {
+            await this.gitignoreService.loadForDir(absPath);
+        } catch {}
+        stats.directories++;
+        const childResults = await this.scanDir(absPath, rootPath, depth + 1, cfg, stats, token);
+        this.pushDirectoryNode(results, absPath, relPath, entry.name, stat, depth, childResults);
+    }
+
     async scanRoot(rootPath: string, cfg: DigestConfig, token?: { isCancellationRequested?: boolean }): Promise<FileNode[]> {
         await this.gitignoreService.loadRoot(rootPath, cfg.gitignoreFiles);
         const stats: TraversalStats = {
@@ -382,17 +428,7 @@ export class FileScanner {
 
                 // symlink handling
                 if (entry.isSymbolicLink()) {
-                    this.pushFileNode(results, {
-                        path: absPath,
-                        relPath,
-                        name: entry.name,
-                        type: 'symlink',
-                        size: stat.size,
-                        mtime: stat.mtime,
-                        depth,
-                        isSelected: false,
-                        isBinary: false,
-                    }, stats);
+                    await this.handleSymlink(entry, absPath, relPath, stat, depth, results, stats);
                     continue;
                 }
 
@@ -403,31 +439,9 @@ export class FileScanner {
                     continue;
                 }
                 if (isDir) {
-                    // Ensure .gitignore in this directory is loaded before scanning children
-                    try {
-                        await this.gitignoreService.loadForDir(absPath);
-                    } catch {}
-                    stats.directories++;
-                    const childResults = await this.scanDir(absPath, rootPath, depth + 1, cfg, stats, token);
-                    this.pushDirectoryNode(results, absPath, relPath, entry.name, stat, depth, childResults);
+                    await this.handleDirectory(entry, absPath, relPath, stat, rootPath, depth, cfg, stats, results, token);
                 } else {
-                    this.pushFileNode(results, {
-                        path: absPath,
-                        relPath,
-                        name: entry.name,
-                        type: 'file',
-                        size: stat.size,
-                        mtime: stat.mtime,
-                        depth,
-                        isSelected: false,
-                        isBinary: false,
-                    }, stats);
-                    // Emit progress every 100 files
-                    if (stats.totalFiles % 100 === 0) {
-                        try {
-                            emitProgress({ op: 'scan', mode: 'progress', determinate: true, percent: 0, message: 'Scanning...', /* attach stats */ totalFiles: stats.totalFiles, totalSize: stats.totalSize });
-                        } catch (e) { }
-                    }
+                    await this.handleFile(entry, absPath, relPath, stat, depth, results, stats);
                 }
             }
         } catch (e) {
