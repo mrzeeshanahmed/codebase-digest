@@ -27,6 +27,15 @@
 	--elevation-1: 0 6px 20px rgba(2,6,23,0.5);
 }
 
+/* ----- appended: folder expand/collapse styles ----- */
+.folder-item > .file-tree-label { font-weight: 600; }
+.folder-item > ul { display: none; }
+.folder-item.expanded > ul { display: block; }
+.folder-item.expanded > .file-tree-label > .file-tree-icon {
+	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='%23c5c5c5'%3E%3Cpath d='M.5 14a.5.5 0 0 0 .5.5h14a.5.5 0 0 0 .5-.5V5.5a.5.5 0 0 0-.5-.5h-6.381l-1.5-1.5H1.5a.5.5 0 0 0-.5.5V14z'/%3E%3C/svg%3E");
+}
+
+
 html,body{
 	height:100%;
 	margin:0;
@@ -313,4 +322,44 @@ svg[aria-hidden="true"] {
 	width: 0;
 	height: 0;
 	overflow: hidden;
+}
+
+/* --- Styles for Hierarchical File Tree --- */
+.file-tree-ul {
+	list-style-type: none;
+	padding-left: 20px; /* Indentation for nesting */
+}
+
+.file-tree-li {
+	margin: 4px 0;
+}
+
+.file-tree-label {
+	display: flex;
+	align-items: center;
+	cursor: pointer;
+}
+
+.file-tree-icon {
+	width: 16px;
+	height: 16px;
+	margin-right: 6px;
+	background-size: contain;
+	background-repeat: no-repeat;
+	background-position: center;
+}
+
+/* VS Code Codicon-like folder/file icons */
+.folder-item > .file-tree-label > .file-tree-icon {
+	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='%23c5c5c5'%3E%3Cpath d='M1.5 2h4.381l1.5 1.5H14.5a.5.5 0 0 1 .5.5v8a.5.5 0 0 1-.5.5H1.5a.5.5 0 0 1-.5-.5v-9a.5.5 0 0 1 .5-.5z'/%3E%3C/svg%3E");
+}
+
+.file-item > .file-tree-label > .file-tree-icon {
+	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='%23c5c5c5'%3E%3Cpath d='M3.5 2a.5.5 0 0 0-.5.5v11a.5.5 0 0 0 .5.5h9a.5.5 0 0 0 .5-.5V5.621a.5.5 0 0 0-.146-.354l-3.121-3.121A.5.5 0 0 0 9.379 2H3.5z'/%3E%3C/svg%3E");
+}
+
+.file-row-message {
+	padding: 10px;
+	text-align: center;
+	color: var(--muted);
 }

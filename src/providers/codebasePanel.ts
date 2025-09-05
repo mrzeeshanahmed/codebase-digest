@@ -155,8 +155,9 @@ export class CodebaseDigestPanel {
             selectedSize: preview.selectedSize,
             tokenEstimate: preview.tokenEstimate,
             contextLimit: preview.contextLimit,
-            // provide a fallback flattened file list so the webview can render files when nothing is selected
-            flattenedFiles: Array.isArray(preview.flattenedFiles) ? preview.flattenedFiles : []
+                // Send hierarchical tree and selected paths (webview will decide how to render compactly)
+                fileTree: preview.fileTree,
+                selectedPaths: Array.isArray(preview.selectedPaths) ? preview.selectedPaths : []
         };
         this.panel.webview.postMessage({ type: 'previewDelta', delta });
     }
@@ -314,7 +315,7 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
             // send an immediate preview delta so chips populate quickly on reveal
             try {
                 const preview = treeProvider.getPreviewData();
-                const delta = { selectedCount: preview.selectedCount, totalFiles: preview.totalFiles, selectedSize: preview.selectedSize, tokenEstimate: preview.tokenEstimate, contextLimit: preview.contextLimit, flattenedFiles: Array.isArray(preview.flattenedFiles) ? preview.flattenedFiles : [] };
+                const delta = { selectedCount: preview.selectedCount, totalFiles: preview.totalFiles, selectedSize: preview.selectedSize, tokenEstimate: preview.tokenEstimate, contextLimit: preview.contextLimit, fileTree: preview.fileTree, selectedPaths: Array.isArray(preview.selectedPaths) ? preview.selectedPaths : [] };
                 webviewView.webview.postMessage({ type: 'previewDelta', delta });
             } catch (e) { /* ignore */ }
 
@@ -325,7 +326,7 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                     if (ev && ev.op === 'scan' && ev.mode === 'end') {
                         try {
                             const preview = treeProvider.getPreviewData();
-                            const delta = { selectedCount: preview.selectedCount, totalFiles: preview.totalFiles, selectedSize: preview.selectedSize, tokenEstimate: preview.tokenEstimate, contextLimit: preview.contextLimit, flattenedFiles: Array.isArray(preview.flattenedFiles) ? preview.flattenedFiles : [] };
+                            const delta = { selectedCount: preview.selectedCount, totalFiles: preview.totalFiles, selectedSize: preview.selectedSize, tokenEstimate: preview.tokenEstimate, contextLimit: preview.contextLimit, fileTree: preview.fileTree, selectedPaths: Array.isArray(preview.selectedPaths) ? preview.selectedPaths : [] };
                             webviewView.webview.postMessage({ type: 'previewDelta', delta });
                         } catch (inner) { /* ignore */ }
                     }
@@ -335,7 +336,7 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
             // Provide periodic preview deltas
             const interval = setInterval(() => {
                 const preview = treeProvider.getPreviewData();
-                const delta = { selectedCount: preview.selectedCount, totalFiles: preview.totalFiles, selectedSize: preview.selectedSize, tokenEstimate: preview.tokenEstimate, contextLimit: preview.contextLimit, flattenedFiles: Array.isArray(preview.flattenedFiles) ? preview.flattenedFiles : [] };
+                const delta = { selectedCount: preview.selectedCount, totalFiles: preview.totalFiles, selectedSize: preview.selectedSize, tokenEstimate: preview.tokenEstimate, contextLimit: preview.contextLimit, fileTree: preview.fileTree, selectedPaths: Array.isArray(preview.selectedPaths) ? preview.selectedPaths : [] };
                 webviewView.webview.postMessage({ type: 'previewDelta', delta });
             }, 5000);
             webviewView.onDidDispose(() => clearInterval(interval));

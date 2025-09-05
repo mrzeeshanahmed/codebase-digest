@@ -52,105 +52,159 @@ function postConfig(action, payload) {
 
 function renderFileList(state) {
     const fileListRoot = document.getElementById('file-list');
-    if (!fileListRoot) return;
+    if (!fileListRoot) { return; }
 
-    // Ensure we don't try to render to a detached element
-    if (!document.body.contains(fileListRoot)) {
-        filesCache = [];
+    fileListRoot.innerHTML = ''; // Clear previous content
+
+    const fileTree = (state && state.fileTree) ? state.fileTree : {};
+    const selectedPaths = new Set((state && Array.isArray(state.selectedPaths)) ? state.selectedPaths : []);
+
+    if (!fileTree || Object.keys(fileTree).length === 0) {
+        fileListRoot.innerHTML = '<div class="file-row-message">No files to display.</div>';
         return;
     }
 
-    fileListRoot.innerHTML = ''; // Clear previous list
+    function createTreeHtml(node, pathPrefix = '') {
+        const ul = document.createElement('ul');
+        ul.className = 'file-tree-ul';
+        // expose group semantics for assistive tech
+        ul.setAttribute('role', 'group');
 
-    if (!state) {
-        filesCache = [];
-        return;
-    }
-
-    // Use selected files if available, otherwise fall back to the complete flattened list
-    const filesToRender = (Array.isArray(state.selectedFiles) && state.selectedFiles.length > 0)
-        ? state.selectedFiles
-        : (Array.isArray(state.flattenedFiles) ? state.flattenedFiles : []);
-
-    // Update global caches for interaction handlers
-    filesCache = filesToRender;
-    selectedSet = new Set(Array.isArray(state.selectedFiles) ? state.selectedFiles : []);
-
-    if (filesToRender.length === 0) {
-        fileListRoot.innerHTML = '<div class="file-row" style="justify-content: center; color: var(--muted);">No files to display. Select files or refresh.</div>';
-        return;
-    }
-
-    // Helper function to handle selection toggling, defined within scope
-    const toggleSelectionAt = (i) => {
-        const rel = filesCache[i];
-        if (!rel) return;
-        const currentlySelected = selectedSet.has(rel);
-        const newSelection = Array.from(selectedSet);
-
-        if (currentlySelected) {
-            const idx = newSelection.indexOf(rel);
-            if (idx > -1) newSelection.splice(idx, 1);
-        } else {
-            newSelection.push(rel);
-        }
-        postAction('setSelection', { relPaths: newSelection });
-    };
-
-    const fragment = document.createDocumentFragment();
-
-    for (let i = 0; i < filesToRender.length; i++) {
-        const relPath = filesToRender[i];
-        const row = document.createElement('div');
-        row.className = 'file-row';
-        row.setAttribute('data-index', String(i));
-        row.setAttribute('data-rel', relPath);
-        row.setAttribute('role', 'treeitem');
-
-        const cb = document.createElement('input');
-        cb.type = 'checkbox';
-        cb.className = 'file-checkbox';
-        try { cb.checked = selectedSet.has(relPath); } catch (e) {}
-        cb.setAttribute('aria-label', relPath);
-        cb.addEventListener('change', (ev) => {
-            ev.stopPropagation();
-            toggleSelectionAt(i);
+        const entries = Object.keys(node).sort((a, b) => {
+            const aIsFile = node[a] && node[a].__isFile;
+            const bIsFile = node[b] && node[b].__isFile;
+            if (aIsFile && !bIsFile) { return 1; }
+            if (!aIsFile && bIsFile) { return -1; }
+            return a.localeCompare(b);
         });
 
-        const label = document.createElement('span');
-        label.className = 'name';
-        label.textContent = relPath;
+        for (const key of entries) {
+            const currentNode = node[key] || {};
+            const isFile = !!currentNode.__isFile;
+            const fullPath = currentNode.path || `${pathPrefix}${key}`;
 
-        row.appendChild(cb);
-        row.appendChild(label);
+            const li = document.createElement('li');
+            li.className = isFile ? 'file-tree-li file-item' : 'file-tree-li folder-item';
+            li.setAttribute('data-path', fullPath);
+            li.setAttribute('role', 'treeitem');
 
-        if (selectedSet.has(relPath)) {
-            row.classList.add('selected');
-            row.setAttribute('aria-selected', 'true');
+            const label = document.createElement('label');
+            label.className = 'file-tree-label';
+
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.className = 'file-checkbox';
+            try { checkbox.checked = selectedPaths.has(fullPath); } catch (e) {}
+            checkbox.setAttribute('data-path', fullPath);
+            // When a checkbox changes, propagate to descendants (for folders) and compute the authoritative selection from the DOM
+            const updateSelectionFromDOM = () => {
+                try {
+                    const checked = Array.from(fileListRoot.querySelectorAll('.file-checkbox:checked'))
+                        .map(cb => cb.getAttribute('data-path'))
+                        .filter(Boolean);
+                    postAction('setSelection', { relPaths: checked });
+                } catch (e) { /* swallow DOM errors */ }
+            };
+
+            checkbox.addEventListener('change', (ev) => {
+                try { ev.stopPropagation(); } catch (e) {}
+                const isChecked = checkbox.checked;
+                const affectedPaths = [fullPath];
+                // If it's a folder, toggle all descendant checkboxes to match
+                if (!isFile) {
+                    try {
+                        const descendantCheckboxes = li.querySelectorAll('.file-checkbox');
+                        descendantCheckboxes.forEach(descCb => {
+                            descCb.checked = isChecked;
+                            const p = descCb.getAttribute('data-path'); if (p) { affectedPaths.push(p); }
+                        });
+                    } catch (e) { /* swallow */ }
+                }
+
+                // Build authoritative selection from DOM
+                try {
+                    const currentSelection = Array.from(fileListRoot.querySelectorAll('.file-checkbox:checked'))
+                        .map(cb => cb.getAttribute('data-path'))
+                        .filter(Boolean);
+                    postAction('setSelection', { relPaths: currentSelection });
+                } catch (e) { /* swallow */ }
+            });
+
+            const icon = document.createElement('span');
+            icon.className = 'file-tree-icon';
+
+            const name = document.createElement('span');
+            name.className = 'file-tree-name';
+            name.textContent = key;
+
+            label.appendChild(checkbox);
+            label.appendChild(icon);
+            label.appendChild(name);
+            li.appendChild(label);
+
+            // Make folders keyboard-expandable and enable space to toggle checkboxes
+            // Ensure folder items are focusable for keyboard users
+            if (!isFile) {
+                try { li.setAttribute('tabindex', '0'); li.setAttribute('aria-expanded', 'true'); } catch (e) {}
+            } else {
+                // files should also be focusable so Space key works
+                try { li.setAttribute('tabindex', '0'); } catch (e) {}
+            }
+
+            // Keyboard support: Space toggles checkbox; Enter expands/collapses folders
+            li.addEventListener('keydown', (ev) => {
+                const k = ev.key;
+                if (k === ' ' || k === 'Spacebar' || k === 'Space') {
+                    ev.preventDefault(); ev.stopPropagation();
+                    const cb = li.querySelector('.file-checkbox');
+                    if (cb) { cb.checked = !cb.checked; updateSelectionFromDOM(); }
+                    return;
+                }
+                if (k === 'Enter') {
+                    if (!isFile) {
+                        ev.preventDefault(); ev.stopPropagation();
+                        const childUl = li.querySelector(':scope > ul');
+                        if (childUl) {
+                            const nowHidden = childUl.hasAttribute('hidden');
+                            if (nowHidden) { childUl.removeAttribute('hidden'); li.setAttribute('aria-expanded', 'true'); }
+                            else { childUl.setAttribute('hidden', ''); li.setAttribute('aria-expanded', 'false'); }
+                        }
+                    }
+                }
+            });
+
+            if (!isFile) {
+                // Folder: clicking label toggles expansion (avoid toggling when clicking the checkbox)
+                label.addEventListener('click', (e) => {
+                    try {
+                        if (e && e.target && e.target.tagName === 'INPUT') { return; }
+                        li.classList.toggle('expanded');
+                        const childUl = li.querySelector(':scope > ul');
+                        if (childUl) {
+                            const nowExpanded = li.classList.contains('expanded');
+                            if (nowExpanded) { childUl.removeAttribute('hidden'); li.setAttribute('aria-expanded', 'true'); }
+                            else { childUl.setAttribute('hidden', ''); li.setAttribute('aria-expanded', 'false'); }
+                        }
+                    } catch (e) {}
+                });
+                // Create child subtree and append; default collapsed unless expanded class present
+                const child = createTreeHtml(currentNode, `${fullPath}/`);
+                if (!li.classList.contains('expanded')) { child.setAttribute('hidden', ''); li.setAttribute('aria-expanded', 'false'); }
+                else { child.removeAttribute('hidden'); li.setAttribute('aria-expanded', 'true'); }
+                li.appendChild(child);
+            }
+
+            ul.appendChild(li);
         }
-
-        row.onclick = (e) => {
-            const target = e.target;
-            if (target && target.tagName === 'INPUT') return;
-            e.preventDefault();
-            toggleSelectionAt(i);
-        };
-
-        fragment.appendChild(row);
+        return ul;
     }
 
-    fileListRoot.appendChild(fragment);
+    fileListRoot.appendChild(createTreeHtml(fileTree));
 
-    // ASCII tree rendering (unchanged)
+    // Also update ascii tree if present
     const asciiTree = document.getElementById('ascii-tree');
-    if (asciiTree) {
-        function compactLines(lines, head = 6, tail = 3) {
-            if (!Array.isArray(lines)) return '';
-            if (lines.length <= head + tail + 1) return lines.join('\n');
-            return lines.slice(0, head).concat(['...']).concat(lines.slice(lines.length - tail)).join('\n');
-        }
-        asciiTree.textContent = compactLines(state.minimalSelectedTreeLines || []);
-        asciiTree.title = Array.isArray(state.minimalSelectedTreeLines) ? state.minimalSelectedTreeLines.join('\n') : '';
+    if (asciiTree && state && state.minimalSelectedTreeLines) {
+        asciiTree.textContent = Array.isArray(state.minimalSelectedTreeLines) ? state.minimalSelectedTreeLines.join('\n') : String(state.minimalSelectedTreeLines);
     }
 }
 
@@ -179,7 +233,25 @@ window.addEventListener('message', event => {
         } catch (e) { /* swallow */ }
         try {
             const s = msg.state || {};
-            const totalFiles = (typeof s.totalFiles === 'number') ? s.totalFiles : (Array.isArray(s.flattenedFiles) ? s.flattenedFiles.length : 0);
+            // Derive a sensible totalFiles value: prefer explicit totalFiles, otherwise
+            // infer from selectedPaths length, otherwise count leaves in fileTree.
+            let totalFiles = (typeof s.totalFiles === 'number') ? s.totalFiles : 0;
+            if ((!totalFiles || totalFiles === 0) && Array.isArray(s.selectedPaths) && s.selectedPaths.length > 0) {
+                totalFiles = s.selectedPaths.length;
+            }
+            if ((!totalFiles || totalFiles === 0) && s.fileTree && typeof s.fileTree === 'object') {
+                // count leaves in fileTree quickly
+                const countLeaves = (node) => {
+                    if (!node || typeof node !== 'object') { return 0; }
+                    let c = 0;
+                    for (const k of Object.keys(node)) {
+                        if (node[k] && node[k].__isFile) { c += 1; }
+                        if (node[k] && !node[k].__isFile) { c += countLeaves(node[k]); }
+                    }
+                    return c;
+                };
+                try { totalFiles = countLeaves(s.fileTree); } catch (e) { /* ignore counting errors */ }
+            }
             if (pendingPersistedSelection && totalFiles > 0) {
                 postAction('setSelection', { relPaths: pendingPersistedSelection });
                 try {
@@ -212,11 +284,11 @@ window.addEventListener('message', event => {
     } else if (msg.type === 'previewDelta') {
         // This is the core of the fix. We now call renderFileList from here.
         renderPreviewDelta(msg.delta); // Update the chips
-        if (msg.delta && (Array.isArray(msg.delta.flattenedFiles) || Array.isArray(msg.delta.selectedFiles))) {
-            // Construct a minimal state object for the rendering function
+        if (msg.delta && msg.delta.fileTree) {
+            // Construct a minimal state object for the rendering function using fileTree/selectedPaths
             const syntheticState = {
-                selectedFiles: msg.delta.selectedFiles || selectedSet, // Use last known selection or new one
-                flattenedFiles: msg.delta.flattenedFiles,
+                fileTree: msg.delta.fileTree,
+                selectedPaths: Array.isArray(msg.delta.selectedPaths) ? msg.delta.selectedPaths : [],
                 minimalSelectedTreeLines: msg.delta.minimalSelectedTreeLines
             };
             renderFileList(syntheticState); // Re-render the file list
@@ -528,11 +600,22 @@ window.onload = function() {
             const action = btn.getAttribute('data-action');
             if (!action) { return; }
             // handle parameterized actions like applyPreset
-                if (action === 'applyPreset') {
-                    const preset = btn.getAttribute('data-preset');
-                    sendCmd('applyPreset', { preset });
-                    // Immediately update UI to reflect user's choice (optimistic)
-                    try { togglePresetSelectionUI(preset); } catch (e) {}
+            if (action === 'applyPreset') {
+                const preset = btn.getAttribute('data-preset');
+                sendCmd('applyPreset', { preset });
+                // Immediately update UI to reflect user's choice (optimistic)
+                try { togglePresetSelectionUI(preset); } catch (e) {}
+                return;
+            }
+
+            // Select all / clear selection operate on the rendered tree DOM
+            if (action === 'selectAll' || action === 'clearSelection') {
+                const shouldSelect = action === 'selectAll';
+                try {
+                    const checkboxes = document.querySelectorAll('#file-list .file-checkbox');
+                    const allPaths = Array.from(checkboxes).map(cb => cb.getAttribute('data-path'));
+                    postAction('setSelection', { relPaths: shouldSelect ? allPaths : [] });
+                } catch (e) { /* swallow DOM errors */ }
                 return;
             }
             if (action === 'togglePause') {

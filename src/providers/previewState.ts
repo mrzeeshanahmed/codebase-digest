@@ -1,5 +1,6 @@
 import { FileNode } from '../types/interfaces';
 import { FileScanner } from '../services/fileScanner';
+import { buildFileTree } from './treeHelpers';
 
 export function computePreviewState(rootNodes: FileNode[], selectedFiles: FileNode[], fileScanner: FileScanner, config: any) {
     const maxLines = config.maxSelectedTreeLines || 50;
@@ -44,22 +45,26 @@ export function computePreviewState(rootNodes: FileNode[], selectedFiles: FileNo
         };
         totalFiles = countFiles(rootNodes);
     }
-    // Build a flattened file list (DFS) of relPaths to provide a fallback file list when no selection exists
-    const flattenedFiles: string[] = [];
-    const maxFlatten = 500;
-    const collect = (nodes: FileNode[]) => {
+    // Collect all file relPaths and build a hierarchical file tree for the webview
+    const allFilePaths: string[] = [];
+    const collectPaths = (nodes: FileNode[]) => {
         for (const node of nodes) {
-            if (flattenedFiles.length >= maxFlatten) { return; }
-            if (node.type === 'file' && node.relPath) { flattenedFiles.push(node.relPath); }
-            if (node.children) { collect(node.children); if (flattenedFiles.length >= maxFlatten) { return; } }
+            if (node.type === 'file' && node.relPath) { allFilePaths.push(node.relPath); }
+            if (node.children) { collectPaths(node.children); }
         }
     };
-    collect(rootNodes);
+    collectPaths(rootNodes);
+
+    // Build a hierarchical file tree and selected paths for the webview
+    const fileTree = buildFileTree(allFilePaths);
+    const selectedPaths = selectedFiles.filter(f => f.relPath).map(f => f.relPath);
+
     return {
         selectedCount: selectedFiles.length,
         selectedSize: selectedFiles.reduce((acc, n) => acc + (n.size || 0), 0),
-        totalFiles,
-        flattenedFiles,
+    totalFiles,
+    fileTree,
+    selectedPaths,
         tokenEstimate,
         presetNames,
         contextLimit,
