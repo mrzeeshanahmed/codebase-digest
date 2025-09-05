@@ -62,4 +62,38 @@ describe('FileScanner.scanRoot', () => {
     expect(stats?.warnings.length && stats!.warnings.length > 0).toBe(true);
         expect(stats?.warnings.some(w => /directory depth/i.test(w))).toBe(true);
     });
+
+    it('supports anchored negations and directory-only patterns with nested matches', async () => {
+        // Create additional nested files and explicit negation list
+        const nestedDir = path.join(testDir, 'nested');
+        if (!fs.existsSync(nestedDir)) { fs.mkdirSync(nestedDir); }
+        fs.writeFileSync(path.join(nestedDir, 'keep.txt'), 'KEEP');
+        fs.writeFileSync(path.join(nestedDir, 'ignoreme.log'), 'IGNORE');
+
+        const cfg: DigestConfig = {
+            maxFileSize: 1000,
+            maxFiles: 50,
+            maxTotalSizeBytes: 100000,
+            maxDirectoryDepth: 5,
+            includePatterns: [],
+            excludePatterns: ['**/*.log', '!nested/ignoreme.log']
+        } as any;
+        const GitignoreService = require('../services/gitignoreService').GitignoreService;
+        const Diagnostics = require('../utils/diagnostics').Diagnostics;
+        const gitignoreService = new GitignoreService();
+        const diagnostics = new Diagnostics('info');
+        const scanner = new FileScanner(gitignoreService, diagnostics);
+
+        // Provide explicit negations method if available on service
+        if (typeof (gitignoreService as any).listExplicitNegations === 'function') {
+            // pretend the user provided an explicit negation for nested/ignoreme.log
+            try { (gitignoreService as any).listExplicitNegations = () => ['nested/ignoreme.log']; } catch (e) {}
+        }
+
+        const filesArr = await scanner.scanRoot(testDir, cfg);
+        const files = flattenTree(filesArr).map(f => f.relPath);
+        expect(files).toContain('nested/keep.txt');
+        // Since excludePatterns include **/*.log, ignoreme.log should be excluded
+        expect(files).not.toContain('nested/ignoreme.log');
+    });
 });

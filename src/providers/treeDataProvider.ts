@@ -48,6 +48,8 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
     private scanning: boolean = false;
     // Simple cancellation token for scan operations
     private scanToken: { isCancellationRequested?: boolean } | null = null;
+    // Per-directory debounce timers to coalesce rapid FS events
+    private debounceTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
     private selectionManager: SelectionManager;
 
     constructor(folder: vscode.WorkspaceFolder, services: any) {
@@ -63,37 +65,55 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
         const watcher = (vscode.workspace && typeof (vscode.workspace as any).createFileSystemWatcher === 'function')
             ? (vscode.workspace as any).createFileSystemWatcher('**/*')
             : null;
-        const handleChange = async (uri: vscode.Uri) => {
-            // Find parent directory
-            const dir = require('path').dirname(uri.fsPath);
-            // If root is impacted, do full refresh
-            if (dir === this.workspaceRoot) {
-                this.refresh();
-                return;
-            }
-            // Find parent node in tree
-            let parentNode: FileNode | undefined;
-            const findNode = (nodes: FileNode[]): FileNode | undefined => {
-                for (const node of nodes) {
-                    if (node.path === dir && node.type === 'directory') {
-                        return node;
-                    }
-                    if (node.children) {
-                        const found = findNode(node.children);
-                        if (found) {
-                            return found;
+        const path = require('path');
+        const handleChange = (uri: vscode.Uri) => {
+            const dir = path.dirname(uri.fsPath);
+
+            // Debounce key is the directory path; coalesce rapid events for same dir
+            const key = String(dir || this.workspaceRoot || 'root');
+            const runNow = async () => {
+                // If the dir equals workspace root, perform a full refresh
+                if (dir === this.workspaceRoot) {
+                    // Respect any existing cancellation token: refresh will create a fresh token
+                    try { this.refresh(); } catch (e) { /* swallow */ }
+                    return;
+                }
+
+                // Find parent node in tree
+                let parentNode: FileNode | undefined;
+                const findNode = (nodes: FileNode[]): FileNode | undefined => {
+                    for (const node of nodes) {
+                        if (node.path === dir && node.type === 'directory') {
+                            return node;
+                        }
+                        if (node.children) {
+                            const found = findNode(node.children);
+                            if (found) {
+                                return found;
+                            }
                         }
                     }
+                    return undefined;
+                };
+                parentNode = findNode(this.rootNodes);
+                if (parentNode) {
+                    const config = this.loadConfig();
+                    // Pass through current scan token so a global cancellation will abort this directory scan if needed
+                    parentNode.children = await this.fileScanner.scanDirectory(parentNode.path, config, this.scanToken || undefined);
+                    this.directoryCache.set(parentNode.path, parentNode.children);
+                    this._onDidChangeTreeData.fire(parentNode);
                 }
-                return undefined;
             };
-            parentNode = findNode(this.rootNodes);
-            if (parentNode) {
-                const config = this.loadConfig();
-                parentNode.children = await this.fileScanner.scanDirectory(parentNode.path, config, this.scanToken || undefined);
-                this.directoryCache.set(parentNode.path, parentNode.children);
-                this._onDidChangeTreeData.fire(parentNode);
-            }
+
+            // Clear existing timer and schedule a new one
+            try {
+                const prev = this.debounceTimers.get(key);
+                if (prev) { clearTimeout(prev); }
+            } catch (e) { /* ignore timing clear errors */ }
+            const t = setTimeout(async () => {
+                try { await runNow(); } catch (e) { /* swallow */ } finally { this.debounceTimers.delete(key); }
+            }, 250);
+            this.debounceTimers.set(key, t as ReturnType<typeof setTimeout>);
         };
         if (watcher) {
             watcher.onDidCreate(handleChange);

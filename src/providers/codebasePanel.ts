@@ -43,7 +43,9 @@ export class CodebaseDigestPanel {
             enableScripts: true,
             localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, 'resources', 'webview'), this.extensionUri]
         });
-        this.setHtml(this.panel.webview);
+    this.setHtml(this.panel.webview);
+    // Send current configuration to webview immediately so settings UI is populated
+    try { this.postConfig(); } catch (e) { /* swallow */ }
         // Wire message routing via shared helper so panel and view remain consistent
     wireWebviewMessages(this.panel.webview, this.treeProvider, this.folderPath, async (changes: Record<string, any>) => {
             await this.applyConfigChanges(changes);
@@ -62,12 +64,27 @@ export class CodebaseDigestPanel {
             this.panel.webview.postMessage({ type: 'progress', event: e });
         }
     });
-    // Also send initial full state
-    this.postPreviewState();
+    // Post an immediate preview delta when scans start or end so chips update promptly
+    const scanProgressDisp = onProgress((ev: any) => {
+        try {
+            // Only update preview chips when a scan completes (end) to avoid noisy updates on start
+            if (ev && ev.op === 'scan' && ev.mode === 'end') {
+                try { this.postPreviewDelta(); } catch (inner) { /* ignore */ }
+            }
+        } catch (ex) { /* ignore */ }
+    });
+    // Send initial full state only if a scan has already populated data; otherwise wait for scan completion to avoid empty first-paint
+    try {
+        const previewNow = this.treeProvider.getPreviewData();
+        if (previewNow && typeof previewNow.totalFiles === 'number' && previewNow.totalFiles > 0) {
+            this.postPreviewState();
+        }
+    } catch (e) { /* ignore */ }
     // Periodic heartbeat to refresh stats every 5s
     const interval = setInterval(() => this.postPreviewDelta(), 5000);
     this.panel.onDidDispose(() => { clearInterval(interval); });
     this.panel.onDidDispose(() => { disposeProgress(); });
+    this.panel.onDidDispose(() => { try { scanProgressDisp(); } catch (e) { /* ignore */ } });
     }
 
         private async postConfig() {
@@ -106,11 +123,11 @@ export class CodebaseDigestPanel {
         private async applyConfigChanges(changes: Record<string, any>) {
             const cfg = vscode.workspace.getConfiguration('codebaseDigest', vscode.Uri.file(this.folderPath));
             for (const [key, value] of Object.entries(changes)) {
+                // Prefer WorkspaceFolder-level settings; only fallback to Workspace if that write throws.
                 try {
                     await cfg.update(key, value, vscode.ConfigurationTarget.WorkspaceFolder);
                 } catch (e) {
-                    // fallback to workspace if workspaceFolder fails
-                    await cfg.update(key, value, vscode.ConfigurationTarget.Workspace);
+                    try { await cfg.update(key, value, vscode.ConfigurationTarget.Workspace); } catch (err) { /* ignore */ }
                 }
             }
         }
@@ -118,7 +135,7 @@ export class CodebaseDigestPanel {
     private postPreviewState() {
         if (!this.panel) { return; }
         const preview = this.treeProvider.getPreviewData();
-        this.panel.webview.postMessage({ type: 'state', state: preview });
+    this.panel.webview.postMessage({ type: 'state', state: preview });
     }
 
     private postPreviewDelta() {
@@ -129,7 +146,9 @@ export class CodebaseDigestPanel {
             totalFiles: preview.totalFiles,
             selectedSize: preview.selectedSize,
             tokenEstimate: preview.tokenEstimate,
-            contextLimit: preview.contextLimit
+            contextLimit: preview.contextLimit,
+            // provide a fallback flattened file list so the webview can render files when nothing is selected
+            flattenedFiles: Array.isArray(preview.flattenedFiles) ? preview.flattenedFiles : []
         };
         this.panel.webview.postMessage({ type: 'previewDelta', delta });
     }
@@ -174,6 +193,36 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
             // Render the same HTML used by the panel via shared helper
             setWebviewHtml(webviewView.webview, extensionUri);
 
+            // Post configuration eagerly so settings UI is populated on first open
+            try {
+                const folder = treeProvider['workspaceRoot'] || '';
+                const cfg = vscode.workspace.getConfiguration('codebaseDigest', vscode.Uri.file(folder));
+                const thresholdsDefault = { maxFiles: 25000, maxTotalSizeBytes: 536870912, tokenLimit: 32000 };
+                const thresholds = cfg.get('thresholds', thresholdsDefault) as any || {};
+                const maxFiles = cfg.get('maxFiles', thresholds.maxFiles || thresholdsDefault.maxFiles) as number;
+                const maxTotalSizeBytes = cfg.get('maxTotalSizeBytes', thresholds.maxTotalSizeBytes || thresholdsDefault.maxTotalSizeBytes) as number;
+                const tokenLimit = cfg.get('tokenLimit', thresholds.tokenLimit || thresholdsDefault.tokenLimit) as number;
+                const payload = {
+                    type: 'config',
+                    folderPath: folder,
+                    settings: {
+                        respectGitignore: cfg.get('respectGitignore', cfg.get('gitignore', true)),
+                        presets: cfg.get('presets', []),
+                        outputFormat: cfg.get('outputFormat', 'text'),
+                        tokenModel: cfg.get('tokenModel', 'chars-approx'),
+                        binaryFilePolicy: cfg.get('binaryFilePolicy', cfg.get('binaryPolicy', 'skip')),
+                        maxFiles,
+                        maxTotalSizeBytes,
+                        tokenLimit,
+                        thresholds: Object.assign({}, thresholdsDefault, thresholds),
+                        showRedacted: cfg.get('showRedacted', false),
+                        redactionPatterns: cfg.get('redactionPatterns', []),
+                        redactionPlaceholder: cfg.get('redactionPlaceholder', '[REDACTED]')
+                    }
+                };
+                webviewView.webview.postMessage(payload);
+            } catch (e) { /* ignore */ }
+
             // track active view so we can broadcast messages to it later
             try { activeViews.add(webviewView); } catch (e) {}
 
@@ -183,7 +232,11 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                 const folder = treeProvider['workspaceRoot'] || '';
                 const cfg = vscode.workspace.getConfiguration('codebaseDigest', vscode.Uri.file(folder));
                 for (const [key, value] of Object.entries(changes)) {
-                    try { await cfg.update(key, value, vscode.ConfigurationTarget.WorkspaceFolder); } catch (e) { await cfg.update(key, value, vscode.ConfigurationTarget.Workspace); }
+                    try {
+                        await cfg.update(key, value, vscode.ConfigurationTarget.WorkspaceFolder);
+                    } catch (e) {
+                        try { await cfg.update(key, value, vscode.ConfigurationTarget.Workspace); } catch (err) { /* ignore */ }
+                    }
                 }
                 const thresholdsDefault = { maxFiles: 25000, maxTotalSizeBytes: 536870912, tokenLimit: 32000 };
                 const thresholds = cfg.get('thresholds', thresholdsDefault) as any || {};
@@ -244,13 +297,35 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                 });
             })();
 
+            // send an immediate preview delta so chips populate quickly on reveal
+            try {
+                const preview = treeProvider.getPreviewData();
+                const delta = { selectedCount: preview.selectedCount, totalFiles: preview.totalFiles, selectedSize: preview.selectedSize, tokenEstimate: preview.tokenEstimate, contextLimit: preview.contextLimit, flattenedFiles: Array.isArray(preview.flattenedFiles) ? preview.flattenedFiles : [] };
+                webviewView.webview.postMessage({ type: 'previewDelta', delta });
+            } catch (e) { /* ignore */ }
+
+            // Hook into treeProvider progress to post preview deltas when scans start/end
+            const scanProgressDisp = onProgress((ev: any) => {
+                try {
+                    // Post a preview delta when a scan finishes so chips update to reflect final counts
+                    if (ev && ev.op === 'scan' && ev.mode === 'end') {
+                        try {
+                            const preview = treeProvider.getPreviewData();
+                            const delta = { selectedCount: preview.selectedCount, totalFiles: preview.totalFiles, selectedSize: preview.selectedSize, tokenEstimate: preview.tokenEstimate, contextLimit: preview.contextLimit, flattenedFiles: Array.isArray(preview.flattenedFiles) ? preview.flattenedFiles : [] };
+                            webviewView.webview.postMessage({ type: 'previewDelta', delta });
+                        } catch (inner) { /* ignore */ }
+                    }
+                } catch (ex) { /* ignore */ }
+            });
+
             // Provide periodic preview deltas
             const interval = setInterval(() => {
                 const preview = treeProvider.getPreviewData();
-                const delta = { selectedCount: preview.selectedCount, totalFiles: preview.totalFiles, selectedSize: preview.selectedSize, tokenEstimate: preview.tokenEstimate, contextLimit: preview.contextLimit };
+                const delta = { selectedCount: preview.selectedCount, totalFiles: preview.totalFiles, selectedSize: preview.selectedSize, tokenEstimate: preview.tokenEstimate, contextLimit: preview.contextLimit, flattenedFiles: Array.isArray(preview.flattenedFiles) ? preview.flattenedFiles : [] };
                 webviewView.webview.postMessage({ type: 'previewDelta', delta });
             }, 5000);
             webviewView.onDidDispose(() => clearInterval(interval));
+            webviewView.onDidDispose(() => { try { scanProgressDisp(); } catch (e) {} });
             webviewView.onDidDispose(() => { try { activeViews.delete(webviewView); } catch (e) {} });
         }
     };
@@ -282,6 +357,35 @@ export function broadcastGenerationResult(result: any, folderPath?: string) {
             vw.webview.postMessage({ type: 'generationResult', result });
         } catch (e) { /* ignore */ }
     }
+}
+
+// Broadcast a previewDelta to open panels and sidebar views so the UI updates chips
+export function broadcastPreviewDelta(delta: any, folderPath?: string) {
+    try {
+        // Post to panels matching folderPath (or all if not specified)
+        for (const [key, panel] of panels.entries()) {
+            try {
+                if (!folderPath || key === folderPath || (panel as any).folderPath === folderPath) {
+                    if ((panel as any).panel) { (panel as any).panel.webview.postMessage({ type: 'previewDelta', delta }); }
+                }
+            } catch (e) { /* ignore */ }
+        }
+    } catch (e) { /* ignore */ }
+    try {
+        // Post to active sidebar views (best-effort, no folder filtering available here)
+        for (const vw of activeViews) {
+            try {
+                vw.webview.postMessage({ type: 'previewDelta', delta });
+            } catch (e) { /* ignore */ }
+        }
+    } catch (e) { /* ignore */ }
+}
+
+// Small convenience helper to allow external callers (commands) to push a previewDelta
+// that updates chips in open panels and sidebar views. This is intentionally thin and
+// delegates to broadcastPreviewDelta so behavior is consistent.
+export function postPreviewDeltaToActiveViews(delta: any, folderPath?: string) {
+    try { broadcastPreviewDelta(delta, folderPath); } catch (e) { /* ignore */ }
 }
 
 // Re-export helpers for backwards compatibility with imports from codebasePanel

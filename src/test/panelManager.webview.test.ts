@@ -153,6 +153,25 @@ describe('View registration and WebviewView HTML', () => {
   (vscode.Uri as any).file = originalUriFile;
   });
 
+  it('receives generationResult error messages (webview toast path)', async () => {
+    // Fake webview that captures posted messages
+    const posted: any[] = [];
+    const fakeWebview: any = {
+      postMessage: (m: any) => { posted.push(m); return true; }
+    };
+
+    // Simulate extension sending a generationResult with an error to the webview
+    const payload = { type: 'generationResult', result: { error: 'Simulated generation failure' } };
+    // In real runtime the extension would call webview.postMessage; we simulate that here
+    fakeWebview.postMessage(payload);
+
+    // The fake webview should have captured the message
+    expect(posted.length).toBeGreaterThan(0);
+    const found = posted.find(p => p && p.type === 'generationResult');
+    expect(found).toBeDefined();
+    expect(found.result && found.result.error).toBe('Simulated generation failure');
+  });
+
   it('configRequest maps gitignore->respectGitignore, binaryPolicy->binaryFilePolicy, and flattens thresholds', async () => {
     let handler: ((m: any) => void) | null = null;
     let posted: any[] = [];

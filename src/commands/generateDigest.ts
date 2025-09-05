@@ -12,6 +12,12 @@ export function registerCommands(context: vscode.ExtensionContext, treeProvider:
                 const workspaceFolder = workspaceFolders && workspaceFolders.length > 0 ? workspaceFolders[0] : undefined;
                 if (!workspaceFolder) {
                     interactiveMessages.showUserError(new Error('No workspace folder found.'));
+                    try {
+                        const panelApi = require('../providers/codebasePanel');
+                        if (panelApi && typeof panelApi.broadcastGenerationResult === 'function') {
+                            panelApi.broadcastGenerationResult({ error: 'No workspace folder found.' });
+                        }
+                    } catch (e) { /* ignore */ }
                     return;
                 }
                 // Assume WorkspaceManager is available on services
@@ -28,6 +34,12 @@ export function registerCommands(context: vscode.ExtensionContext, treeProvider:
                 const result = await generateDigest(workspaceFolder, workspaceManager, treeProvider, finalOverrides);
                 if (!result) {
                     interactiveMessages.showUserWarning('No digest was generated.');
+                    try {
+                        const panelApi = require('../providers/codebasePanel');
+                        if (panelApi && typeof panelApi.broadcastGenerationResult === 'function') {
+                            panelApi.broadcastGenerationResult({ error: 'No digest was generated.' });
+                        }
+                    } catch (e) { /* ignore */ }
                     return;
                 }
                 vscode.window.showInformationMessage('Digest generated successfully.');

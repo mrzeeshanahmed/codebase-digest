@@ -148,6 +148,33 @@ export async function processWebviewMessage(msg: any, webview: vscode.Webview, t
         }
 
         if (msg.actionType === 'setSelection' && Array.isArray(msg.relPaths)) {
+            // If the provider has no populated root nodes yet (e.g., before first scan),
+            // applying selection is a no-op. Detect that and instead schedule a
+            // re-request of state so the webview can apply its persisted selection
+            // once scanning completes and nodes exist.
+            try {
+                // treeProvider may expose rootNodes, getRoots, or getPreviewData
+                const preview = (typeof treeProvider.getPreviewData === 'function') ? treeProvider.getPreviewData() : null;
+                const totalFiles = preview && typeof preview.totalFiles === 'number' ? preview.totalFiles : undefined;
+                const hasRoots = Array.isArray((treeProvider as any).rootNodes) ? ((treeProvider as any).rootNodes.length > 0) : (typeof totalFiles === 'number' ? totalFiles > 0 : undefined);
+                if (!hasRoots) {
+                    // schedule a re-request of state for the webview to retry applying
+                    // persisted selection. Use a simple backoff with limited retries
+                    // to avoid infinite scheduling.
+                    const retryKey = '__cbd_sel_retry_count';
+                    const prev = (webview as any)[retryKey] || 0;
+                    if (prev < 6) {
+                        (webview as any)[retryKey] = prev + 1;
+                        setTimeout(() => {
+                            try { webview.postMessage({ type: 'getState' }); } catch (e) { /* swallow */ }
+                        }, 500 * (prev + 1));
+                    }
+                    // Defer setting selection until nodes exist
+                    return;
+                }
+            } catch (e) { /* swallow detection errors and fall back to immediate set */ }
+
+            // provider appears to have roots; apply selection immediately
             treeProvider.setSelectionByRelPaths(msg.relPaths);
             try { const preview = treeProvider.getPreviewData(); webview.postMessage({ type: 'state', state: preview }); } catch (e) { /* swallow */ }
             return;

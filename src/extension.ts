@@ -51,7 +51,7 @@ export function activate(context: vscode.ExtensionContext) {
 			try { registerCodebaseView(context, context.extensionUri, earlyDummy); } catch (e) { /* ignore */ }
 		}
 	} catch (e) { /* ignore */ }
-	// Estimate Tokens command
+	// Estimate Tokens command (fast heuristic): sum (size/4) or fallback to relPath length/4
 	context.subscriptions.push(vscode.commands.registerCommand('codebaseDigest.estimateTokens', async (folderPath?: string) => {
 		const resolvedPath = getFolderPath(folderPath);
 		if (!resolvedPath) { return; }
@@ -62,28 +62,25 @@ export function activate(context: vscode.ExtensionContext) {
 			vscode.window.showInformationMessage('No files selected for token estimation.');
 			return;
 		}
-		const config = tp.loadConfig ? tp.loadConfig() : {};
-		const tokenAnalyzer = new TokenAnalyzer();
-		const contentProcessor = new ContentProcessor();
+		// Lightweight estimate without heavy file reads: use known size or relPath length
 		let totalEstimate = 0;
 		for (const file of selectedFiles) {
-			try {
-				const ext = require('path').extname(file.path);
-				const result = await contentProcessor.getFileContent(file.path, ext, config);
-				const estimate = tokenAnalyzer.estimate(result.content, config.tokenModel || 'chars-approx', config.tokenDivisorOverrides || {});
-				totalEstimate += estimate;
-			} catch (e) {
-				// Ignore errors for individual files
+			const size = (typeof file.size === 'number' && file.size > 0) ? file.size : (file.relPath ? file.relPath.length : 1000);
+			totalEstimate += Math.ceil(size / 4);
+		}
+		// Format a human-friendly number
+		const formatted = totalEstimate.toLocaleString();
+		vscode.window.showInformationMessage(`Estimated tokens for selected files: ${formatted}`);
+		// Broadcast previewDelta so UI tokens chip updates immediately
+		try {
+			const { postPreviewDeltaToActiveViews } = require('./providers/codebasePanel');
+			if (typeof postPreviewDeltaToActiveViews === 'function') {
+				postPreviewDeltaToActiveViews({ tokenEstimate: totalEstimate }, resolvedPath);
+			} else {
+				const { broadcastPreviewDelta } = require('./providers/codebasePanel');
+				broadcastPreviewDelta({ tokenEstimate: totalEstimate }, resolvedPath);
 			}
-		}
-		const formatted = tokenAnalyzer.formatEstimate(totalEstimate);
-		let message = `Estimated tokens for selected files: ${formatted}`;
-		const warning = tokenAnalyzer.warnIfExceedsLimit(totalEstimate, config.tokenLimit);
-		if (warning) {
-			message += `\n${warning}`;
-		}
-		vscode.window.showInformationMessage(message);
-		// Optionally update status bar
+		} catch (e) { /* ignore if module not available */ }
 		if (tp.updateCounts) { tp.updateCounts(); }
 	}));
 	// Expand/Collapse All commands

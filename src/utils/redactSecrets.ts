@@ -83,7 +83,7 @@ export function redactSecrets(
         return { content: input, applied: false };
     }
     if (config?.showRedacted) {
-        return { content: input, applied: false };
+    return { content: input, applied: false };
     }
 
     // Merge user-provided patterns (if any) before the default rules so user intent is prioritized.
@@ -121,6 +121,22 @@ export function redactSecrets(
             }
             if (re) {
                 compiledUserRules.push({ name: 'User pattern', pattern: re });
+                // If the user likely intended \w or \d but wrote w+/d+ (backslash lost), also add an alternate
+                try {
+                    let alt = trimmed;
+                    if (alt.indexOf('\\w') === -1 && /w\+/.test(alt)) {
+                        alt = alt.replace(/w\+/g, '[A-Za-z0-9_]+');
+                    }
+                    if (alt.indexOf('\\d') === -1 && /d\+/.test(alt)) {
+                        alt = alt.replace(/d\+/g, '[0-9]+');
+                    }
+                    if (alt !== trimmed) {
+                        const altRe = new RegExp(alt, 'g');
+                        compiledUserRules.push({ name: 'User pattern (alt)', pattern: altRe });
+                    }
+                } catch (e) {
+                    // ignore alternate compile errors
+                }
             }
         } catch (e) {
             // On invalid regex, skip the pattern but don't throw

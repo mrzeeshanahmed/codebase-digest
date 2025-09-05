@@ -21,6 +21,7 @@ import { DigestGenerator } from '../services/digestGenerator';
 import { OutputWriter } from '../services/outputWriter';
 import { redactSecrets } from '../utils/redactSecrets';
 import { showUserError } from '../utils/userMessages';
+import * as errorsUtil from '../utils/errors';
 import { emitProgress } from './eventBus';
 import { broadcastGenerationResult } from './codebasePanel';
 import { getMutex } from '../utils/asyncLock';
@@ -48,7 +49,9 @@ export async function generateDigest(
     try {
     const services = workspaceManager.getBundleForFolder(workspaceFolder);
     if (!services) {
-        await showUserError(new Error('No services found for workspace folder.'), workspaceFolder.uri.fsPath);
+        // Log and show error consistently, then broadcast to any webviews
+        errorsUtil.showUserError('No services found for workspace folder.', workspaceFolder.uri.fsPath);
+        try { broadcastGenerationResult({ error: 'No services found for workspace folder.' }, workspacePath); } catch (e) { /* swallow */ }
         return;
     }
     const config: DigestConfig = vscode.workspace.getConfiguration('codebaseDigest', workspaceFolder.uri) as any;
@@ -80,20 +83,24 @@ export async function generateDigest(
             if (remoteTmpDir) {
                 await cleanupRemoteTmp(remoteTmpDir);
             }
-            diagnostics?.error && diagnostics.error('Remote repo ingest failed: ' + String(err));
-            await showUserError(new Error('Remote repo ingest failed.'), String(err));
+            const details = String(err);
+            diagnostics?.error && diagnostics.error('Remote repo ingest failed: ' + details);
+            // Log to output channel and show an error; broadcast to webview
+            errorsUtil.showUserError('Remote repo ingest failed.', details, diagnostics);
+            try { broadcastGenerationResult({ error: 'Remote repo ingest failed.' }, workspacePath); } catch (e) { /* swallow */ }
             return;
         }
     } else {
-        const selectedFiles: FileNode[] = treeProvider ? treeProvider.getSelectedFiles() : [];
+    const selectedFiles: FileNode[] = treeProvider ? treeProvider.getSelectedFiles() : [];
         if (!selectedFiles || selectedFiles.length === 0) {
             const pick = await vscode.window.showQuickPick([
                 { label: 'Select All Files', value: 'all' },
                 { label: 'Cancel', value: 'cancel' }
             ], { placeHolder: 'No files selected. What would you like to do?' });
             if (!pick || pick.value === 'cancel') {
-                vscode.window.showInformationMessage('Digest generation cancelled: no files selected.');
-                return;
+        errorsUtil.showUserWarning('Digest generation cancelled: no files selected.');
+        try { broadcastGenerationResult({ error: 'Digest generation cancelled: no files selected.' }, workspacePath); } catch (e) { /* swallow */ }
+        return;
             }
             if (pick.value === 'all' && treeProvider) {
                 treeProvider.selectAll();
@@ -102,7 +109,8 @@ export async function generateDigest(
         }
         files = treeProvider ? treeProvider.getSelectedFiles() : [];
         if (!files || files.length === 0) {
-            vscode.window.showInformationMessage('Digest generation cancelled: no files selected.');
+            errorsUtil.showUserWarning('Digest generation cancelled: no files selected.');
+            try { broadcastGenerationResult({ error: 'Digest generation cancelled: no files selected.' }, workspacePath); } catch (e) { /* swallow */ }
             return;
         }
     }
@@ -142,7 +150,8 @@ export async function generateDigest(
                     { label: 'Cancel', value: 'cancel' }
                 ], { placeHolder: 'Cached digest found. What would you like to do?' });
                 if (!pick || pick.value === 'cancel') {
-                    vscode.window.showInformationMessage('Digest generation cancelled.');
+                    errorsUtil.showUserWarning('Digest generation cancelled.');
+                    try { broadcastGenerationResult({ error: 'Digest generation cancelled.' }, workspacePath); } catch (e) { /* swallow */ }
                     return;
                 }
                 if (pick.value === 'cached') {

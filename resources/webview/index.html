@@ -58,9 +58,9 @@
 
         <!-- Preset menu (popup) -->
         <div id="preset-menu" role="menu" aria-hidden="true" hidden>
-            <button role="menuitem" data-preset="codeOnly" id="preset-codeOnly" type="button">Code only</button>
-            <button role="menuitem" data-preset="docsOnly" id="preset-docsOnly" type="button">Docs only</button>
-            <button role="menuitem" data-preset="testsOnly" id="preset-testsOnly" type="button">Tests only</button>
+            <button role="menuitem" data-preset="codeOnly" data-selected="false" id="preset-codeOnly" type="button">Code only</button>
+            <button role="menuitem" data-preset="docsOnly" data-selected="false" id="preset-docsOnly" type="button">Docs only</button>
+            <button role="menuitem" data-preset="testsOnly" data-selected="false" id="preset-testsOnly" type="button">Tests only</button>
         </div>
         <!-- Progress bar + inline stats + toast container -->
         <div class="progress-wrapper" aria-hidden="false">
@@ -101,13 +101,13 @@
                     <span class="label">Tokens</span>
                 </button>
                 <!-- Quick preset actions -->
-                <button id="btn-preset-code" type="button" data-action="applyPreset" data-preset="codeOnly" title="Code only" aria-label="Code only">
+                <button id="btn-preset-code" type="button" data-action="applyPreset" data-preset="codeOnly" data-selected="false" title="Code only" aria-label="Code only">
                     <span class="label">Code</span>
                 </button>
-                <button id="btn-preset-docs" type="button" data-action="applyPreset" data-preset="docsOnly" title="Docs only" aria-label="Docs only">
+                <button id="btn-preset-docs" type="button" data-action="applyPreset" data-preset="docsOnly" data-selected="false" title="Docs only" aria-label="Docs only">
                     <span class="label">Docs</span>
                 </button>
-                <button id="btn-preset-tests" type="button" data-action="applyPreset" data-preset="testsOnly" title="Tests only" aria-label="Tests only">
+                <button id="btn-preset-tests" type="button" data-action="applyPreset" data-preset="testsOnly" data-selected="false" title="Tests only" aria-label="Tests only">
                     <span class="label">Tests</span>
                 </button>
                 <button id="openSettings" type="button" data-action="openSettings" title="Open settings" aria-label="Open settings">
@@ -136,7 +136,10 @@
                 <button id="ingest-submit">Start Ingest</button>
                 <button id="ingest-cancel">Cancel</button>
             </div>
-            <div id="ingest-preview"></div>
+            <div id="ingest-preview">
+                <div class="spinner" id="ingest-spinner" aria-hidden="true" hidden></div>
+                <pre class="ingest-text" id="ingest-preview-text" aria-live="polite"></pre>
+            </div>
         </div>
     </div>
             <div id="settings" hidden>

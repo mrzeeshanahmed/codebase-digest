@@ -16,6 +16,73 @@ describe('Full pipeline integration (scan -> select -> generate)', () => {
     fs.mkdirSync(root, { recursive: true });
   });
 
+  it('handles binary includeBase64, notebook processing, and JSON redaction', async () => {
+    const fixture = path.join(root, 'binary-notebook-redaction');
+    fs.mkdirSync(fixture, { recursive: true });
+    // Create a small binary-looking file and a notebook-like JSON
+    const binPath = path.join(fixture, 'image.png');
+    fs.writeFileSync(binPath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    const nbPath = path.join(fixture, 'notebook.ipynb');
+    const nbContent = JSON.stringify({ cells: [{ cell_type: 'code', source: ['print("secret_key=VALUE")'] }] });
+    fs.writeFileSync(nbPath, nbContent, 'utf8');
+
+    const diagnostics = new Diagnostics();
+    const gitignore = new GitignoreService();
+    const scanner = new FileScanner(gitignore, diagnostics);
+
+    const config: DigestConfig = {
+      maxFileSize: 10 * 1024 * 1024,
+      maxFiles: 100,
+      maxTotalSizeBytes: 100 * 1024 * 1024,
+      maxDirectoryDepth: 5,
+      excludePatterns: [],
+      includePatterns: [],
+      respectGitignore: true,
+      gitignoreFiles: [],
+      outputFormat: 'json',
+      includeMetadata: true,
+      includeTree: false,
+      includeSummary: true,
+      includeFileContents: true,
+      useStreamingRead: false,
+      binaryFilePolicy: 'includeBase64',
+      notebookProcess: true,
+      tokenEstimate: false,
+      performanceLogLevel: 'info',
+      performanceCollectMetrics: false,
+      outputSeparatorsHeader: '\n',
+      outputWriteLocation: 'editor',
+      redactionPatterns: ['secret_key=\w+'],
+      redactionPlaceholder: '[REDACTED]',
+      showRedacted: false
+    } as any;
+
+    const filesHier = await scanner.scanRoot(fixture, config);
+    const files = flattenTree(filesHier);
+
+    const cp: Partial<ContentProcessor> = {
+      getFileContent: async (p: string, ext: string) => {
+        const content = fs.readFileSync(p, ext === '.ipynb' ? 'utf8' : null as any);
+        return { content, isBinary: ext !== '.ipynb' } as any;
+      }
+    };
+    const tokenAnalyzer = new TokenAnalyzer();
+    const generator = new DigestGenerator(cp as any, tokenAnalyzer as any);
+
+    const digest = await generator.generate(files as any, config as any, [], 'json');
+    // redactionApplied should be true because pattern matched content in notebook
+    expect((digest as any).redactionApplied).toBe(true);
+    // Parse JSON and ensure outputObjects bodies do not contain raw secret
+    const parsed = JSON.parse(digest.content);
+    expect(Array.isArray(parsed.files)).toBe(true);
+    for (const f of parsed.files) {
+      const body = typeof f.body === 'string' ? f.body : '';
+      expect(body).not.toMatch(/secret_key=\w+/);
+      // If showRedacted=false we expect placeholder present when a secret was present
+      if (body.includes('[REDACTED]')) { expect(body).toMatch(/\[REDACTED\]/); }
+    }
+  });
+
   afterEach(() => {
     try { fs.rmSync(root, { recursive: true, force: true }); } catch {}
   });

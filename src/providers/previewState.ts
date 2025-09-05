@@ -5,7 +5,7 @@ export function computePreviewState(rootNodes: FileNode[], selectedFiles: FileNo
     const maxLines = config.maxSelectedTreeLines || 50;
     const minimalSelectedTreeLines = selectedFiles.length > 0
         ? require('../utils/formatters').Formatters.buildSelectedTreeLines(selectedFiles, maxLines)
-        : [];
+        : require('../format/treeBuilder').buildTreeLines(rootNodes, 'full', maxLines);
     const chartStats = fileScanner.aggregateStats(selectedFiles.length > 0 ? selectedFiles : rootNodes);
     // Compute a lightweight token estimate for preview/status.
     // Old behavior used config.tokenEstimate as a boolean which produced 0/1 values.
@@ -44,10 +44,22 @@ export function computePreviewState(rootNodes: FileNode[], selectedFiles: FileNo
         };
         totalFiles = countFiles(rootNodes);
     }
+    // Build a flattened file list (DFS) of relPaths to provide a fallback file list when no selection exists
+    const flattenedFiles: string[] = [];
+    const maxFlatten = 500;
+    const collect = (nodes: FileNode[]) => {
+        for (const node of nodes) {
+            if (flattenedFiles.length >= maxFlatten) { return; }
+            if (node.type === 'file' && node.relPath) { flattenedFiles.push(node.relPath); }
+            if (node.children) { collect(node.children); if (flattenedFiles.length >= maxFlatten) { return; } }
+        }
+    };
+    collect(rootNodes);
     return {
         selectedCount: selectedFiles.length,
         selectedSize: selectedFiles.reduce((acc, n) => acc + (n.size || 0), 0),
         totalFiles,
+        flattenedFiles,
         tokenEstimate,
         presetNames,
         contextLimit,

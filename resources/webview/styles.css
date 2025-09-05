@@ -226,6 +226,22 @@ html,body{
 #preset-menu button { background:transparent; border:none; padding:8px 12px; text-align:left; border-radius:4px; }
 #preset-menu button:hover { background:rgba(0,0,0,0.04); }
 
+/* Selected preset visual state */
+#toolbar .segmented button[data-selected="true"],
+#preset-menu button[data-selected="true"] {
+	background: linear-gradient(90deg, rgba(125,211,252,0.08), rgba(139,92,246,0.04));
+	color: var(--text);
+	border: 1px solid rgba(125,211,252,0.12);
+	box-shadow: 0 6px 18px rgba(2,6,23,0.35) inset;
+}
+
+/* Slight badge for the active preset to make it clearer */
+#toolbar .segmented button[data-selected="true"] .label::after {
+	content: ' •';
+	color: var(--accent);
+	margin-left: 6px;
+}
+
 /* Toasts */
 #toast-root{position:fixed;right:18px;bottom:18px;z-index:1000;display:flex;flex-direction:column;gap:.6rem}
 .toast{background:linear-gradient(180deg,var(--panel),rgba(255,255,255,0.01));color:var(--text);padding:.75rem .9rem;border-radius:10px;border:1px solid var(--border);box-shadow:0 12px 40px rgba(2,6,23,0.6);min-width:220px}
@@ -259,6 +275,25 @@ html,body{
 
 /* ingest preview in modal */
 #ingest-preview{margin-top:8px;font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, "Roboto Mono", "Segoe UI Mono";white-space:pre-wrap;max-height:200px;overflow:auto;background:#111;color:var(--text);padding:8px;border-radius:4px}
+
+/* Spinner for ingest modal */
+.spinner{
+	width:20px;
+	height:20px;
+	border-radius:50%;
+	border:3px solid rgba(255,255,255,0.06);
+	border-top-color:var(--accent);
+	animation:spin 900ms linear infinite;
+	display:inline-block;
+	vertical-align:middle;
+	margin-right:8px;
+}
+@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+
+/* Ingest preview loading state */
+#ingest-preview.loading{background:linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.006));border:1px dashed rgba(125,211,252,0.06)}
+#ingest-preview .ingest-text{display:inline-block}
+#ingest-preview .ingest-text.loading-placeholder{opacity:0.9;color:var(--muted)}
 
 /* small layout helpers */
 .modal .modal-content{padding:12px}

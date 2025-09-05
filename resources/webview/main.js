@@ -3,6 +3,34 @@ const vscode = acquireVsCodeApi();
 let currentFolderPath = null;
 // transient override for next generation only
 let overrideDisableRedaction = false;
+// Track whether a transient override was used for an in-flight generate request
+let pendingOverrideUsed = false;
+
+// Lightweight DOM cache for frequently accessed nodes to avoid repeated queries
+const nodes = {
+    toolbar: null,
+    settings: null,
+    presetBtn: null,
+    presetMenu: null,
+    toastRoot: null,
+    ingestPreviewRoot: null,
+    ingestSpinner: null,
+    ingestPreviewText: null,
+    fileListRoot: null,
+    asciiTree: null,
+    chartContainer: null,
+    stats: null,
+    chips: null,
+    progressContainer: null,
+    progressBar: null,
+    cancelWriteBtn: null,
+    pauseBtn: null
+};
+
+function node(id) {
+    // return cached node if present, otherwise fall back to live query
+    return nodes[id] || document.getElementById(id);
+}
 
 function postAction(actionType, payload) {
     const msg = Object.assign({ type: 'action', actionType }, payload || {});
@@ -23,17 +51,38 @@ window.addEventListener('message', event => {
             const s = msg.state || {};
             // If the extension has a persisted selection, apply it
             if (Array.isArray(s.selectedFiles) && s.selectedFiles.length > 0) {
-                // Request the extension to set selection to persisted relPaths
-                postAction('setSelection', { relPaths: s.selectedFiles });
+                // Defer applying persisted selection until after a scan has
+                // populated the file list (state.totalFiles > 0). Store in
+                // a pending buffer and apply when we receive the next state
+                // message where totalFiles > 0.
+                pendingPersistedSelection = s.selectedFiles.slice();
             }
             // Also accept persisted viewport/focus info if provided
             if (s.focusIndex !== undefined && typeof s.focusIndex === 'number') {
-                focusedIndex = s.focusIndex;
+                // defer focus application alongside selection
+                pendingPersistedFocusIndex = s.focusIndex;
             }
         } catch (e) { /* swallow */ }
     }
     if (msg.type === 'state') {
         renderFileList(msg.state);
+        // If we have a persisted selection buffered, only apply it once the
+        // incoming state indicates the workspace has files (totalFiles > 0).
+        try {
+            const s = msg.state || {};
+            const totalFiles = (typeof s.totalFiles === 'number') ? s.totalFiles : (Array.isArray(s.flattenedFiles) ? s.flattenedFiles.length : 0);
+            if (pendingPersistedSelection && totalFiles > 0) {
+                postAction('setSelection', { relPaths: pendingPersistedSelection });
+                // Persist lightweight UI state back to extension as well
+                try {
+                    const persist = { selectedFiles: pendingPersistedSelection, focusIndex: pendingPersistedFocusIndex };
+                    vscode.postMessage({ type: 'persistState', state: persist });
+                } catch (e) {}
+                pendingPersistedSelection = null;
+                pendingPersistedFocusIndex = undefined;
+            }
+        } catch (e) { /* swallow */ }
+
         // Also populate the compact chips from the full state so the sidebar shows counts immediately
         try {
             const s = msg.state || {};
@@ -49,18 +98,51 @@ window.addEventListener('message', event => {
     // update current folderPath and show workspace slug if available
     try {
         currentFolderPath = msg.state && (msg.state.folderPath || msg.state.workspaceFolder || msg.state.rootPath || msg.state.workspaceSlug) || null;
-        const slugEl = document.getElementById('workspace-slug'); if (slugEl) { const wf = msg.state && (msg.state.workspaceFolder || msg.state.workspaceSlug || msg.state.rootPath || msg.state.folderPath); slugEl.textContent = wf ? String(wf) : wf === undefined ? '' : String(wf); }
+        const slugEl = node('workspace-slug') || document.getElementById('workspace-slug'); if (slugEl) { const wf = msg.state && (msg.state.workspaceFolder || msg.state.workspaceSlug || msg.state.rootPath || msg.state.folderPath); slugEl.textContent = wf ? String(wf) : wf === undefined ? '' : String(wf); }
     } catch (e) {}
     } else if (msg.type === 'previewDelta') {
         renderPreviewDelta(msg.delta);
     } else if (msg.type === 'ingestPreview') {
-        const p = document.getElementById('ingest-preview'); if (p) { p.textContent = msg.payload && msg.payload.preview ? (msg.payload.preview.summary || '') + '\n\n' + (msg.payload.preview.tree || '') : (msg.payload && msg.payload.output ? msg.payload.output.slice(0, 2000) : 'No preview'); }
+        // clear loading state and render preview
+    const previewRoot = nodes.ingestPreviewRoot || document.getElementById('ingest-preview');
+    const textEl = nodes.ingestPreviewText || document.getElementById('ingest-preview-text');
+    const spinner = nodes.ingestSpinner || document.getElementById('ingest-spinner');
+    if (previewRoot) { previewRoot.classList.remove('loading'); }
+    if (spinner) { spinner.hidden = true; spinner.setAttribute('aria-hidden', 'true'); }
+    if (textEl) {
+            const payload = msg.payload || {};
+            const p = payload.preview;
+            if (p) {
+                textEl.textContent = (p.summary || '') + '\n\n' + (p.tree || '');
+            } else if (payload.output) {
+                textEl.textContent = String(payload.output).slice(0, 2000);
+            } else {
+                textEl.textContent = 'No preview available';
+            }
+        }
     } else if (msg.type === 'ingestError') {
+        // clear loading state and surface error
+    const previewRoot = nodes.ingestPreviewRoot || document.getElementById('ingest-preview');
+    const spinner = nodes.ingestSpinner || document.getElementById('ingest-spinner');
+    const textEl = nodes.ingestPreviewText || document.getElementById('ingest-preview-text');
+    if (previewRoot) { previewRoot.classList.remove('loading'); }
+    if (spinner) { spinner.hidden = true; spinner.setAttribute('aria-hidden', 'true'); }
+    if (textEl) { textEl.textContent = ''; }
         showToast('Ingest failed: ' + (msg.error || 'unknown'), 'error', 6000);
     } else if (msg.type === 'config') {
     // config may include folderPath or workspace info
     try { currentFolderPath = msg.folderPath || msg.workspaceFolder || currentFolderPath; } catch (e) {}
     populateSettings(msg.settings);
+    // Highlight active preset if provided. Support both settings.filterPresets (new) and settings.presets (legacy)
+    try {
+        const settings = msg.settings || {};
+        const active = settings.filterPresets || settings.presets || null;
+        // active may be a string (single preset) or array; normalize to string
+        let activePreset = null;
+        if (Array.isArray(active) && active.length > 0) { activePreset = String(active[0]); }
+        else if (typeof active === 'string' && active.trim()) { activePreset = active.trim(); }
+        togglePresetSelectionUI(activePreset);
+    } catch (e) { /* swallow */ }
     } else if (msg.type === 'progress') {
         (window.__handleProgress || handleProgress)(msg.event);
     } else if (msg.type === 'generationResult') {
@@ -69,9 +151,43 @@ window.addEventListener('message', event => {
             if (res.redactionApplied) {
                 showToast('Output contained redacted content (masked). Toggle "Show redacted" in Settings to reveal.', 'warn', 6000);
             }
+            // If the generationResult contains an error, show it as a warning toast
+            if (res && res.error) {
+                showToast(String(res.error), 'warn', 6000);
+                // If we had used a transient override for this generation and it failed,
+                // restore the No-Redact toggle so the user can retry without re-toggling.
+                if (pendingOverrideUsed) {
+                    overrideDisableRedaction = true;
+                    const rb = document.getElementById('btn-disable-redaction');
+                    if (rb) { rb.setAttribute('aria-pressed', 'true'); rb.classList.add('active'); }
+                }
+            } else {
+                // Successful generation: clear any pending override marker and ensure
+                // the transient toggle remains cleared (attempt was consumed).
+                pendingOverrideUsed = false;
+                // UI already cleared when the generate action was sent; keep it cleared.
+            }
         } catch (e) {}
     }
 });
+
+// Toggle the selected state on preset buttons and menu items
+function togglePresetSelectionUI(activePreset) {
+    try {
+        const quickBtns = Array.from(document.querySelectorAll('#toolbar [data-action="applyPreset"][data-preset]'));
+        const menuItems = Array.from(document.querySelectorAll('#preset-menu [role="menuitem"][data-preset]'));
+        quickBtns.forEach(b => {
+            const p = b.getAttribute('data-preset');
+            const is = (activePreset && p === activePreset) ? 'true' : 'false';
+            b.setAttribute('data-selected', is);
+        });
+        menuItems.forEach(m => {
+            const p = m.getAttribute('data-preset');
+            const is = (activePreset && p === activePreset) ? 'true' : 'false';
+            m.setAttribute('data-selected', is);
+        });
+    } catch (e) { /* swallow UI errors */ }
+}
 
 // Simple virtualization parameters
 const ITEM_HEIGHT = 28; // px
@@ -79,14 +195,18 @@ const OVERSCAN = 5;
 let filesCache = [];
 let selectedSet = new Set();
 let focusedIndex = 0;
+// Pending persisted selection buffer: used to delay applying restored selections
+// until the first scan populates nodes (avoid no-op setSelection calls).
+let pendingPersistedSelection = null;
+let pendingPersistedFocusIndex = undefined;
 
 function renderFileList(state) {
-    const fileList = document.getElementById('file-list');
+    const fileList = nodes.fileListRoot || document.getElementById('file-list');
     if (!fileList) { return; }
     fileList.innerHTML = '';
     if (!state) { filesCache = []; return; }
     // Render ASCII tree
-    const asciiTree = document.getElementById('ascii-tree');
+    const asciiTree = nodes.asciiTree || document.getElementById('ascii-tree');
     if (asciiTree) {
         // Keep ASCII tree compact: show head + ellipsis + tail when long
         function compactLines(lines, head = 6, tail = 3) {
@@ -131,13 +251,13 @@ function renderFileList(state) {
             gb.appendChild(pill);
         });
         // Insert before the file list
-        const fileListRoot = document.getElementById('file-list');
-        if (fileListRoot && fileListRoot.parentNode) {
-            fileListRoot.parentNode.insertBefore(gb, fileListRoot);
-        }
+    const fileListRoot = nodes.fileListRoot || document.getElementById('file-list');
+    if (fileListRoot && fileListRoot.parentNode) { fileListRoot.parentNode.insertBefore(gb, fileListRoot); }
     }
-    // Files list (strings of relPath)
-    const files = Array.isArray(state.selectedFiles) ? state.selectedFiles : (state.fileIndex ? Object.keys(state.fileIndex) : []);
+    // Files list (strings of relPath). Prefer current selection; fallback to flattenedFiles provided by the extension.
+    const files = (Array.isArray(state.selectedFiles) && state.selectedFiles.length > 0)
+        ? state.selectedFiles
+        : (Array.isArray(state.flattenedFiles) ? state.flattenedFiles : (state.fileIndex ? Object.keys(state.fileIndex) : []));
     filesCache = files;
     selectedSet = new Set(Array.isArray(state.selectedFiles) ? state.selectedFiles : []);
 
@@ -301,11 +421,9 @@ function renderFileList(state) {
 }
 
 function renderPreviewDelta(delta) {
-    const statsTarget = document.getElementById('stats');
-    const chipsTarget = document.getElementById('status-chips');
-    if (statsTarget === null && chipsTarget === null) {
-        return;
-    }
+    const statsTarget = nodes.stats || document.getElementById('stats');
+    const chipsTarget = nodes.chips || document.getElementById('status-chips');
+    if (statsTarget === null && chipsTarget === null) { return; }
 
     // Small helpers
     function fmtSize(n) {
@@ -336,9 +454,7 @@ function renderPreviewDelta(delta) {
     }
 
     // Preserve legacy #stats text
-    if (statsTarget !== null) {
-        statsTarget.textContent = parts.join(' · ');
-    }
+    if (statsTarget !== null) { statsTarget.textContent = parts.join(' · '); }
 
     // Render compact chips
     if (chipsTarget !== null) {
@@ -358,7 +474,7 @@ function renderPreviewDelta(delta) {
 
         const overLimit = delta && delta.tokenEstimate !== undefined && delta.contextLimit !== undefined && delta.tokenEstimate > delta.contextLimit;
 
-        chipsTarget.innerHTML = chips
+    chipsTarget.innerHTML = chips
             .map(function (c) {
                 return (
                     '<div class="status-chip' + (overLimit ? ' over-limit' : '') + '">' +
@@ -379,7 +495,6 @@ function renderPreviewDelta(delta) {
                     banner = document.createElement('div');
                     banner.id = bannerId;
                     banner.className = 'over-limit-banner';
-                    // Use an assertive live region to ensure immediate announcement by screen readers
                     banner.setAttribute('role', 'status');
                     banner.setAttribute('aria-live', 'assertive');
                     banner.setAttribute('aria-atomic', 'true');
@@ -387,34 +502,27 @@ function renderPreviewDelta(delta) {
                     text.className = 'over-limit-text';
                     banner.appendChild(text);
                     // Insert the banner above the chips target for visual prominence
-                    if (chipsTarget && chipsTarget.parentNode) {
-                        chipsTarget.parentNode.insertBefore(banner, chipsTarget);
-                    } else {
-                        document.body.insertBefore(banner, document.body.firstChild);
-                    }
+                    if (chipsTarget && chipsTarget.parentNode) { chipsTarget.parentNode.insertBefore(banner, chipsTarget); }
+                    else { document.body.insertBefore(banner, document.body.firstChild); }
                 }
-                // Update text content (keeps same DOM node for a11y)
-                const txt = banner.querySelector('.over-limit-text');
-                if (txt) { txt.textContent = message; }
-            } else {
-                if (banner && banner.parentNode) { banner.parentNode.removeChild(banner); }
-            }
+                const txt = banner.querySelector('.over-limit-text'); if (txt) { txt.textContent = message; }
+            } else { if (banner && banner.parentNode) { banner.parentNode.removeChild(banner); } }
         } catch (e) { /* swallow DOM errors to avoid breaking the webview */ }
     }
 }
 
 // Progress & toast helpers
-const progressContainer = () => document.getElementById('progress-container');
-const progressBar = () => document.getElementById('progress-bar');
+const progressContainer = () => nodes.progressContainer || document.getElementById('progress-container');
+const progressBar = () => nodes.progressBar || document.getElementById('progress-bar');
 function handleProgress(e) {
     if (!e) { return; }
     const container = progressContainer();
     const bar = progressBar();
     if (!container || !bar) { return; }
     // Also update inline progress stats for generation as well as scan
-    try {
-        const progressStats = document.querySelector('.progress-stats');
-        if (progressStats) {
+        try {
+            const progressStats = document.querySelector('.progress-stats');
+            if (progressStats) {
             const pParts = [];
             if (typeof e.totalFiles === 'number') { pParts.push(`${e.totalFiles} files`); }
             if (typeof e.totalSize === 'number') {
@@ -444,12 +552,7 @@ function handleProgress(e) {
         }
         showToast(e.message || (e.op + ' started'));
         // If a write operation starts, reveal the Cancel write affordance
-        try {
-            if (e.op === 'write') {
-                const cw = document.getElementById('btn-cancel-write');
-                if (cw) { cw.hidden = false; cw.removeAttribute('aria-hidden'); }
-            }
-        } catch (ex) {}
+    try { if (e.op === 'write') { const cw = nodes.cancelWriteBtn || document.getElementById('btn-cancel-write'); if (cw) { cw.hidden = false; cw.removeAttribute('aria-hidden'); } } } catch (ex) {}
     } else if (e.mode === 'progress') {
         container.classList.remove('indeterminate');
         bar.style.width = (e.percent || 0) + '%';
@@ -461,23 +564,26 @@ function handleProgress(e) {
         setTimeout(() => { bar.style.width = '0%'; }, 600);
         showToast(e.message || (e.op + ' finished'), 'success');
     // hide cancel affordance when write ends
-    try { if (e.op === 'write') { const cw = document.getElementById('btn-cancel-write'); if (cw) { cw.hidden = true; cw.setAttribute('aria-hidden', 'true'); } } } catch (ex) {}
+    try { if (e.op === 'write') { const cw = nodes.cancelWriteBtn || document.getElementById('btn-cancel-write'); if (cw) { cw.hidden = true; cw.setAttribute('aria-hidden', 'true'); } } } catch (ex) {}
     }
 }
 
 // Pause/Resume UI wiring
 let paused = false;
-const pauseBtn = () => document.getElementById('btn-pause-resume');
+const pauseBtn = () => nodes.pauseBtn || document.getElementById('btn-pause-resume');
 function updatePauseButton() {
     const b = pauseBtn();
     if (!b) { return; }
+    // Update text, pressed state and CSS class for accessibility and styling
     b.textContent = paused ? 'Resume' : 'Pause';
+    try { b.setAttribute('aria-pressed', String(!!paused)); } catch (e) {}
+    try { b.classList.toggle('paused', !!paused); } catch (e) {}
 }
 
 // Listen for scan progress stats to update small status area
 function handleScanStats(e) {
     if (!e || e.op !== 'scan') { return; }
-    const statsEl = document.getElementById('stats');
+    const statsEl = nodes.stats || document.getElementById('stats');
     if (!statsEl) { return; }
     const parts = [];
     if (typeof e.totalFiles === 'number') { parts.push(`Scanned: ${e.totalFiles}`); }
@@ -525,9 +631,37 @@ function showToast(msg, kind='info', ttl=4000) {
 // Request initial state
 window.onload = function() {
     vscode.postMessage({ type: 'getState' });
+    // Populate node cache for frequently used elements
+    try {
+        nodes.toolbar = document.getElementById('toolbar');
+        nodes.settings = document.getElementById('settings');
+        nodes.presetBtn = document.getElementById('preset-btn');
+        nodes.presetMenu = document.getElementById('preset-menu');
+        nodes.toastRoot = document.getElementById('toast-root');
+        nodes.ingestPreviewRoot = document.getElementById('ingest-preview');
+        nodes.ingestSpinner = document.getElementById('ingest-spinner');
+        nodes.ingestPreviewText = document.getElementById('ingest-preview-text');
+        nodes.fileListRoot = document.getElementById('file-list');
+        nodes.asciiTree = document.getElementById('ascii-tree');
+        nodes.chartContainer = document.getElementById('chart-container');
+        nodes.stats = document.getElementById('stats');
+        nodes.chips = document.getElementById('status-chips');
+        nodes.progressContainer = document.getElementById('progress-container');
+        nodes.progressBar = document.getElementById('progress-bar');
+        nodes.cancelWriteBtn = document.getElementById('btn-cancel-write');
+        nodes.pauseBtn = document.getElementById('btn-pause-resume');
+    } catch (e) { /* ignore cache wiring errors */ }
+
     // Delegate toolbar clicks to buttons with data-action attributes (simpler aria-friendly wiring)
-    const toolbar = document.getElementById('toolbar');
+    const toolbar = nodes.toolbar || document.getElementById('toolbar');
     function sendCmd(cmd, payload) { postAction(cmd, payload); }
+    // Restore paused state from localStorage if present
+    try {
+        const p = window.localStorage.getItem('cbd_paused');
+        if (p !== null) { paused = p === '1' || p === 'true'; }
+    } catch (e) {}
+    // Ensure the pause button reflects current state
+    updatePauseButton();
     if (toolbar) {
         toolbar.addEventListener('click', (ev) => {
             const btn = ev.target && (ev.target.closest ? ev.target.closest('button') : null);
@@ -538,18 +672,22 @@ window.onload = function() {
                 if (action === 'applyPreset') {
                     const preset = btn.getAttribute('data-preset');
                     sendCmd('applyPreset', { preset });
+                    // Immediately update UI to reflect user's choice (optimistic)
+                    try { togglePresetSelectionUI(preset); } catch (e) {}
                 return;
             }
             if (action === 'togglePause') {
                 paused = !paused;
+                try { window.localStorage.setItem('cbd_paused', paused ? '1' : '0'); } catch (e) {}
                 updatePauseButton();
-                sendCmd(paused ? 'pauseScan' : 'resumeScan');
+                postAction(paused ? 'pauseScan' : 'resumeScan');
                 return;
             }
             if (action === 'openSettings') {
                 const settingsEl = document.getElementById('settings');
                 if (settingsEl) { settingsEl.hidden = false; }
-                sendCmd('configRequest');
+                // Request latest config from the extension for the settings UI
+                postAction('configRequest');
                 return;
             }
             if (action === 'ingestRemote') {
@@ -575,9 +713,10 @@ window.onload = function() {
                         const payload = {};
                         if (overrideDisableRedaction) {
                             payload.overrides = { showRedacted: true };
+                            // mark that we used an override for this in-flight generation; do NOT
+                            // clear the UI immediately — only clear on success, and restore on error.
+                            pendingOverrideUsed = true;
                         }
-                        // reset one-shot override after using it (UI reflects the transient nature)
-                        if (overrideDisableRedaction) { overrideDisableRedaction = false; const rb = document.getElementById('btn-disable-redaction'); if (rb) { rb.setAttribute('aria-pressed','false'); rb.classList.remove('active'); } }
                         postAction(action, payload);
                         return;
                     }
@@ -585,11 +724,10 @@ window.onload = function() {
         });
     }
     // Cancel write button wiring (posts cancelWrite action to extension)
-    const cancelWriteBtn = document.getElementById('btn-cancel-write');
+    const cancelWriteBtn = nodes.cancelWriteBtn || document.getElementById('btn-cancel-write');
     if (cancelWriteBtn) {
         cancelWriteBtn.addEventListener('click', (ev) => {
             ev.preventDefault(); ev.stopPropagation();
-            // post a cancelWrite action which the extension translates to emitProgress({op:'write', mode:'cancel'})
             postAction('cancelWrite');
             // hide the button immediately to give immediate feedback
             cancelWriteBtn.hidden = true; cancelWriteBtn.setAttribute('aria-hidden', 'true');
@@ -632,28 +770,24 @@ window.onload = function() {
         if (presetMenu.contains && presetMenu.contains(tgt)) { return; }
         closePresetMenu();
     }
-    if (presetBtn) {
-        presetBtn.addEventListener('click', (e) => { e.stopPropagation(); togglePresetMenu(); });
+    if (nodes.presetBtn) {
+        nodes.presetBtn.addEventListener('click', (e) => { e.stopPropagation(); togglePresetMenu(); });
         // close on Escape when the button has focus
-        presetBtn.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closePresetMenu(); } });
+        nodes.presetBtn.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closePresetMenu(); } });
     }
-    if (presetMenu) {
-        // Wire each menuitem to post an applyPreset action and then close the menu
-        const items = Array.from(presetMenu.querySelectorAll('[role="menuitem"][data-preset]'));
-        items.forEach(it => {
-            it.addEventListener('click', (ev) => {
-                ev.preventDefault(); ev.stopPropagation();
-                const preset = it.getAttribute('data-preset');
-                if (preset) {
-                    postAction('applyPreset', { preset });
-                }
-                closePresetMenu();
-            });
-            // allow keyboard activation
-            it.addEventListener('keydown', (ev) => {
-                if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); it.click(); }
-                if (ev.key === 'Escape') { closePresetMenu(); }
-            });
+    if (nodes.presetMenu) {
+        // Use a small delegation for menu items to avoid per-item wiring
+        nodes.presetMenu.addEventListener('click', (ev) => {
+            const it = ev.target && ev.target.closest ? ev.target.closest('[role="menuitem"][data-preset]') : null;
+            if (!it) { return; }
+            ev.preventDefault(); ev.stopPropagation();
+            const preset = it.getAttribute('data-preset');
+            if (preset) { postAction('applyPreset', { preset }); }
+            closePresetMenu();
+        });
+        nodes.presetMenu.addEventListener('keydown', (ev) => {
+            if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); const it = ev.target && ev.target.closest ? ev.target.closest('[role="menuitem"][data-preset]') : null; if (it) { it.click(); } }
+            if (ev.key === 'Escape') { closePresetMenu(); }
         });
     }
     document.getElementById('ingest-cancel')?.addEventListener('click', () => { const m = document.getElementById('ingestModal'); if (m) { m.hidden = true; } });
@@ -668,7 +802,10 @@ window.onload = function() {
         if (!slugLike) { showToast('Invalid repo format', 'error'); return; }
     // send to extension
     postAction('ingestRemote', { repo: repo.trim(), ref: ref.trim() || undefined, subpath: subpath.trim() || undefined, includeSubmodules });
-        const previewEl = document.getElementById('ingest-preview'); if (previewEl) { previewEl.textContent = 'Starting ingest...'; }
+    // set loading state in modal so users get immediate feedback
+    if (nodes.ingestPreviewRoot) { nodes.ingestPreviewRoot.classList.add('loading'); }
+    if (nodes.ingestSpinner) { nodes.ingestSpinner.hidden = false; nodes.ingestSpinner.removeAttribute('aria-hidden'); }
+    if (nodes.ingestPreviewText) { nodes.ingestPreviewText.textContent = 'Starting ingest...'; nodes.ingestPreviewText.classList.add('loading-placeholder'); }
     });
 };
 
