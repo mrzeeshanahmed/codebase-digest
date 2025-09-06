@@ -11,6 +11,8 @@ let filesCache = [];
 let selectedSet = new Set();
 let pendingPersistedSelection = null;
 let pendingPersistedFocusIndex = undefined;
+// Pause state (moved up so message handlers can reference it safely)
+let paused = false;
 
 // Lightweight DOM cache for frequently accessed nodes to avoid repeated queries
 const nodes = {
@@ -56,37 +58,53 @@ function renderFileList(state) {
 
     fileListRoot.innerHTML = ''; // Clear previous content
 
-    const fileTree = (state && state.fileTree) ? state.fileTree : {};
-    const selectedPaths = new Set((state && Array.isArray(state.selectedPaths)) ? state.selectedPaths : []);
+    const fileTree = state.fileTree || {};
+    // Use selectedPaths from the state, which is an array of strings
+    const selectedPaths = new Set(state.selectedPaths || []);
 
-    if (!fileTree || Object.keys(fileTree).length === 0) {
+    if (Object.keys(fileTree).length === 0) {
         fileListRoot.innerHTML = '<div class="file-row-message">No files to display.</div>';
         return;
     }
 
+    // This function will be called when a checkbox state changes.
+    const handleSelectionChange = () => {
+        const allCheckboxes = fileListRoot.querySelectorAll('.file-checkbox');
+        const newSelectedPaths = [];
+        allCheckboxes.forEach(cb => {
+            if (cb.checked) {
+                const path = cb.getAttribute('data-path');
+                // Only add file paths to the selection, not folders
+                const li = cb.closest('li.file-item');
+                if (li && path) {
+                    newSelectedPaths.push(path);
+                }
+            }
+        });
+        postAction('setSelection', { relPaths: newSelectedPaths });
+    };
+
+    // Recursive function to build the tree HTML and attach listeners
     function createTreeHtml(node, pathPrefix = '') {
         const ul = document.createElement('ul');
         ul.className = 'file-tree-ul';
-        // expose group semantics for assistive tech
-        ul.setAttribute('role', 'group');
 
         const entries = Object.keys(node).sort((a, b) => {
-            const aIsFile = node[a] && node[a].__isFile;
-            const bIsFile = node[b] && node[b].__isFile;
+            const aIsFile = node[a].__isFile;
+            const bIsFile = node[b].__isFile;
             if (aIsFile && !bIsFile) { return 1; }
             if (!aIsFile && bIsFile) { return -1; }
             return a.localeCompare(b);
         });
 
         for (const key of entries) {
-            const currentNode = node[key] || {};
+            const currentNode = node[key];
             const isFile = !!currentNode.__isFile;
             const fullPath = currentNode.path || `${pathPrefix}${key}`;
 
             const li = document.createElement('li');
             li.className = isFile ? 'file-tree-li file-item' : 'file-tree-li folder-item';
             li.setAttribute('data-path', fullPath);
-            li.setAttribute('role', 'treeitem');
 
             const label = document.createElement('label');
             label.className = 'file-tree-label';
@@ -94,118 +112,50 @@ function renderFileList(state) {
             const checkbox = document.createElement('input');
             checkbox.type = 'checkbox';
             checkbox.className = 'file-checkbox';
-            try { checkbox.checked = selectedPaths.has(fullPath); } catch (e) {}
+            checkbox.checked = selectedPaths.has(fullPath);
             checkbox.setAttribute('data-path', fullPath);
-            // When a checkbox changes, propagate to descendants (for folders) and compute the authoritative selection from the DOM
-            const updateSelectionFromDOM = () => {
-                try {
-                    const checked = Array.from(fileListRoot.querySelectorAll('.file-checkbox:checked'))
-                        .map(cb => cb.getAttribute('data-path'))
-                        .filter(Boolean);
-                    postAction('setSelection', { relPaths: checked });
-                } catch (e) { /* swallow DOM errors */ }
-            };
 
-            checkbox.addEventListener('change', (ev) => {
-                try { ev.stopPropagation(); } catch (e) {}
+            // *** ADDING CHECKBOX INTERACTIVITY ***
+            checkbox.addEventListener('change', () => {
                 const isChecked = checkbox.checked;
-                const affectedPaths = [fullPath];
-                // If it's a folder, toggle all descendant checkboxes to match
+                // If a folder is checked/unchecked, apply the same state to all children
                 if (!isFile) {
-                    try {
-                        const descendantCheckboxes = li.querySelectorAll('.file-checkbox');
-                        descendantCheckboxes.forEach(descCb => {
-                            descCb.checked = isChecked;
-                            const p = descCb.getAttribute('data-path'); if (p) { affectedPaths.push(p); }
-                        });
-                    } catch (e) { /* swallow */ }
+                    const descendantCheckboxes = li.querySelectorAll('.file-checkbox');
+                    descendantCheckboxes.forEach(descCb => {
+                        descCb.checked = isChecked;
+                    });
                 }
-
-                // Build authoritative selection from DOM
-                try {
-                    const currentSelection = Array.from(fileListRoot.querySelectorAll('.file-checkbox:checked'))
-                        .map(cb => cb.getAttribute('data-path'))
-                        .filter(Boolean);
-                    postAction('setSelection', { relPaths: currentSelection });
-                } catch (e) { /* swallow */ }
+                handleSelectionChange();
             });
-
+            
             const icon = document.createElement('span');
             icon.className = 'file-tree-icon';
 
             const name = document.createElement('span');
             name.className = 'file-tree-name';
             name.textContent = key;
+            
+            // *** ADDING EXPAND/COLLAPSE INTERACTIVITY ***
+            if (!isFile) {
+                // Clicking the name/icon of a folder toggles its expanded state
+                name.addEventListener('click', () => li.classList.toggle('expanded'));
+                icon.addEventListener('click', () => li.classList.toggle('expanded'));
+            }
 
             label.appendChild(checkbox);
             label.appendChild(icon);
             label.appendChild(name);
             li.appendChild(label);
 
-            // Make folders keyboard-expandable and enable space to toggle checkboxes
-            // Ensure folder items are focusable for keyboard users
             if (!isFile) {
-                try { li.setAttribute('tabindex', '0'); li.setAttribute('aria-expanded', 'true'); } catch (e) {}
-            } else {
-                // files should also be focusable so Space key works
-                try { li.setAttribute('tabindex', '0'); } catch (e) {}
+                li.appendChild(createTreeHtml(currentNode, `${fullPath}/`));
             }
-
-            // Keyboard support: Space toggles checkbox; Enter expands/collapses folders
-            li.addEventListener('keydown', (ev) => {
-                const k = ev.key;
-                if (k === ' ' || k === 'Spacebar' || k === 'Space') {
-                    ev.preventDefault(); ev.stopPropagation();
-                    const cb = li.querySelector('.file-checkbox');
-                    if (cb) { cb.checked = !cb.checked; updateSelectionFromDOM(); }
-                    return;
-                }
-                if (k === 'Enter') {
-                    if (!isFile) {
-                        ev.preventDefault(); ev.stopPropagation();
-                        const childUl = li.querySelector(':scope > ul');
-                        if (childUl) {
-                            const nowHidden = childUl.hasAttribute('hidden');
-                            if (nowHidden) { childUl.removeAttribute('hidden'); li.setAttribute('aria-expanded', 'true'); }
-                            else { childUl.setAttribute('hidden', ''); li.setAttribute('aria-expanded', 'false'); }
-                        }
-                    }
-                }
-            });
-
-            if (!isFile) {
-                // Folder: clicking label toggles expansion (avoid toggling when clicking the checkbox)
-                label.addEventListener('click', (e) => {
-                    try {
-                        if (e && e.target && e.target.tagName === 'INPUT') { return; }
-                        li.classList.toggle('expanded');
-                        const childUl = li.querySelector(':scope > ul');
-                        if (childUl) {
-                            const nowExpanded = li.classList.contains('expanded');
-                            if (nowExpanded) { childUl.removeAttribute('hidden'); li.setAttribute('aria-expanded', 'true'); }
-                            else { childUl.setAttribute('hidden', ''); li.setAttribute('aria-expanded', 'false'); }
-                        }
-                    } catch (e) {}
-                });
-                // Create child subtree and append; default collapsed unless expanded class present
-                const child = createTreeHtml(currentNode, `${fullPath}/`);
-                if (!li.classList.contains('expanded')) { child.setAttribute('hidden', ''); li.setAttribute('aria-expanded', 'false'); }
-                else { child.removeAttribute('hidden'); li.setAttribute('aria-expanded', 'true'); }
-                li.appendChild(child);
-            }
-
             ul.appendChild(li);
         }
         return ul;
     }
 
     fileListRoot.appendChild(createTreeHtml(fileTree));
-
-    // Also update ascii tree if present
-    const asciiTree = document.getElementById('ascii-tree');
-    if (asciiTree && state && state.minimalSelectedTreeLines) {
-        asciiTree.textContent = Array.isArray(state.minimalSelectedTreeLines) ? state.minimalSelectedTreeLines.join('\n') : String(state.minimalSelectedTreeLines);
-    }
 }
 
 // Lightweight message router: forward a few key message types to the UI functions
@@ -500,7 +450,6 @@ function handleProgress(e) {
 }
 
 // Pause/Resume UI wiring
-let paused = false;
 const pauseBtn = () => nodes.pauseBtn || document.getElementById('btn-pause-resume');
 function updatePauseButton() {
     const b = pauseBtn();

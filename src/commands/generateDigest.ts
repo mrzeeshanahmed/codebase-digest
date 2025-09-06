@@ -53,6 +53,7 @@ export function registerCommands(context: vscode.ExtensionContext, treeProvider:
                 } catch (e) { /* ignore */ }
             } catch (e) {
                 interactiveMessages.showUserError(new Error('Error generating digest.'), String(e));
+                return; // make the error path explicit so the command handler doesn't leave a hanging/rejected promise
             }
         })
     );

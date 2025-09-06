@@ -99,7 +99,9 @@ export async function ingestRemoteRepoProgrammatic(params: { repo: string, ref?:
         } else {
             interactiveMessages.showUserError(new Error('Remote repo ingest failed.'), String(err));
         }
-        throw err;
+        // Do not re-throw: we already displayed an error to the user and callers (including interactive flows)
+        // expect a graceful return rather than a duplicate error being surfaced.
+        return;
     } finally {
         if (tmpDir) { await cleanupRemoteTmp(tmpDir); }
     }
