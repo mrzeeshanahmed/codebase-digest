@@ -40,8 +40,8 @@ describe('generateDigest transient overrides', () => {
         // Provide a fake workspace folder
         const wf = { uri: { fsPath: process.cwd() } } as vscode.WorkspaceFolder;
         // Mock workspace.getConfiguration to return a minimal config used by generateDigest
-        const originalGetConfig = (vscode.workspace as any).getConfiguration;
-        (vscode.workspace as any).getConfiguration = (_section: string, _resource: any) => {
+    const originalGetConfig = (vscode.workspace as any).getConfiguration;
+    (vscode.workspace as any).getConfiguration = (_section: string, _resource: any) => {
             return {
                 showRedacted: false,
                 redactionPatterns: ['secret'],
@@ -71,15 +71,19 @@ describe('generateDigest transient overrides', () => {
     // Patch OutputWriter to avoid VS Code UI interactions during test
     const OutputWriter = require('../services/outputWriter').OutputWriter;
     const origWrite = OutputWriter.prototype.write;
-    OutputWriter.prototype.write = async function (_output: string, _cfg: any) { /* noop */ };
-    // Call with override to show redacted values (i.e., do not apply redaction)
-    const result = await generateDigest(wf, workspaceManager, treeProvider, { showRedacted: true });
-    // restore OutputWriter
-    OutputWriter.prototype.write = origWrite;
-        // restore original
-        (vscode.workspace as any).getConfiguration = originalGetConfig;
+    try {
+        OutputWriter.prototype.write = async function (_output: string, _cfg: any) { /* noop */ };
+        // Call with override to show redacted values (i.e., do not apply redaction)
+        const result = await generateDigest(wf, workspaceManager, treeProvider, { showRedacted: true });
+        // restore OutputWriter in finally below
         expect(result).toBeDefined();
-    // When showRedacted=true, redactionApplied should be false
-    expect((result as any)?.metadata?.redactionApplied).toBe(false);
+        // When showRedacted=true, redactionApplied should be false
+        expect((result as any)?.metadata?.redactionApplied).toBe(false);
+    } finally {
+        // restore OutputWriter and workspace config
+        OutputWriter.prototype.write = origWrite;
+        (vscode.workspace as any).getConfiguration = originalGetConfig;
+    }
+
     });
 });

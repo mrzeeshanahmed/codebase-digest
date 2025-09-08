@@ -26,16 +26,20 @@ export function buildRemoteSummary(meta: RemoteRepoMeta): string {
 }
 
 export async function runSubmoduleUpdate(repoPath: string): Promise<void> {
-    await new Promise<void>((resolve, reject) => {
-        const proc = require('child_process').spawn('git', ['submodule', 'update', '--init', '--recursive'], { cwd: repoPath, env: process.env });
-        proc.on('error', reject);
-        proc.on('exit', (code: number) => code === 0 ? resolve() : reject(new Error(`git submodule update failed with code ${code}`)));
-    });
+    // Use spawnGitPromise wrapper which validates args and scrubs output
+    await spawnGitPromise(['submodule', 'update', '--init', '--recursive'], { cwd: repoPath, env: process.env }).then(() => {});
 }
 
 export async function authenticate(): Promise<string> {
-    const session = await vscode.authentication.getSession('github', ['repo'], { createIfNone: true });
-        if (!session || !session.accessToken) {
+    // Request minimal scopes first (no 'repo') to support public repo access without elevated scopes.
+    // If the user authorizes with a session that lacks necessary scopes for private repos, callers
+    // that need 'repo' will need to request a re-auth with the broader scope.
+    let session = await vscode.authentication.getSession('github', [], { createIfNone: true });
+    if (!session || !session.accessToken) {
+        // Fall back to requesting repo scope (for private repo access) if user agrees.
+        session = await vscode.authentication.getSession('github', ['repo'], { createIfNone: true });
+    }
+    if (!session || !session.accessToken) {
         throw new internalErrors.GitAuthError('github.com', 'GitHub authentication failed');
     }
     return session.accessToken;
@@ -108,14 +112,25 @@ export async function resolveRefToSha(ownerRepo: string, ref?: { tag?: string; b
             }
         }
     }
-    // Fallback: git ls-remote
-    const remoteUrl = `https://github.com/${owner}/${repo}.git`;
+    // Fallback: git ls-remote. Prefer using an authenticated URL when we have a token so
+    // private repositories can be resolved. We still scrub tokens from any surfaced messages.
     const refName = ref?.tag ? `refs/tags/${ref.tag}` : ref?.branch ? `refs/heads/${ref.branch}` : 'HEAD';
-    return await spawnGitPromise(['ls-remote', remoteUrl, refName]).then(r => {
-        const match = r.stdout.match(/^([a-f0-9]+)\s+/m);
-        if (match) { return match[1]; }
-        throw new Error(scrubTokens(`Could not resolve ref: ${refName}`));
-    });
+    try {
+        const remoteUrl = token ? `https://x-access-token:${encodeURIComponent(token)}@github.com/${owner}/${repo}.git` : `https://github.com/${owner}/${repo}.git`;
+        return await spawnGitPromise(['ls-remote', remoteUrl, refName]).then(r => {
+            const match = (r.stdout || '').match(/^([a-f0-9]+)\s+/m);
+            if (match) { return match[1]; }
+            throw new Error(scrubTokens(`Could not resolve ref: ${refName}`));
+        });
+    } catch (lsErr: any) {
+        // Scrub any tokens or repo/ref values before throwing up to callers. Provide an actionable message.
+        const safeRef = scrubTokens(refName);
+        const msg = `Could not resolve reference ${safeRef} via git ls-remote. Ensure the repository and ref are correct and you have network/access permissions.`;
+        const err = new Error(msg);
+        // Attach original error details (scrubbed) on a non-sensitive property for diagnostics
+        try { (err as any).details = scrubTokens(String(lsErr && lsErr.message ? lsErr.message : lsErr)); } catch (e) { /* ignore */ }
+        throw err;
+    }
 }
 
 export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?: string, tmpDir?: string, opts?: { skipSparse?: boolean, skipFilter?: boolean }): Promise<string> {
@@ -278,11 +293,7 @@ export async function ingestRemoteRepo(urlOrSlug: string, options?: { ref?: { ta
         // If includeSubmodules, run git submodule update --init --recursive
         if (options?.includeSubmodules) {
             try {
-                await new Promise<void>((resolve, reject) => {
-                    const proc = require('child_process').spawn('git', ['submodule', 'update', '--init', '--recursive'], { cwd: localPath!, env: process.env });
-                    proc.on('error', reject);
-                    proc.on('exit', (code: number) => code === 0 ? resolve() : reject(new Error(`git submodule update failed with code ${code}`)));
-                });
+                await spawnGitPromise(['submodule', 'update', '--init', '--recursive'], { cwd: localPath!, env: process.env }).then(() => {});
             } catch (err: any) {
                 if (err && err.message) { err.message = scrubTokens(String(err.message)); }
                 await interactiveMessages.showUserError(new Error(scrubTokens('Git submodule update failed.')), scrubTokens(String(err)));

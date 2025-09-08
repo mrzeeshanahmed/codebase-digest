@@ -99,8 +99,8 @@ describe('Integration: codeOnly preset, ignore files, notebooks, binaries, symli
     // Generate digest
   // Provide required plugins and diagnostics arguments
   const plugins: any[] = [];
-  const diagnostics = { warn: () => {}, info: () => {} } as any;
-  const digest = await digestGenerator.generate(selectedFiles, config, plugins, diagnostics);
+  // DigestGenerator.generate expects (files, config, plugins, outputFormat)
+  const digest = await digestGenerator.generate(selectedFiles, config, plugins, config.outputFormat || 'markdown');
     // Validate output
   // Ensure main.js code is present in output; some summaries may not contain raw filename depending on formatting
   expect(digest.summary + (digest.tree || '')).toMatch(/console\.log\(|main\.js/);

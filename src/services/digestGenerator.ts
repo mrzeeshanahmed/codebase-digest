@@ -2,7 +2,7 @@ import { FileNode, DigestConfig, TraversalStats, DigestResult } from '../types/i
 import { TokenAnalyzer } from './tokenAnalyzer';
 import { ContentProcessor } from './contentProcessor';
 import * as path from 'path';
-import { getTokenizer } from '../plugins/index';
+import { getTokenizer, getMatchingHandler } from '../plugins/index';
 import { getFormatter } from '../format/output';
 import { buildSummary } from '../format/summaryBuilder';
 import { buildTree, buildSelectedTreeLines } from '../format/treeBuilder';
@@ -16,6 +16,8 @@ import { redactSecrets } from '../utils/redactSecrets';
 export class DigestGenerator {
     public contentProcessor: ContentProcessor;
     private tokenAnalyzer: TokenAnalyzer;
+    // Per-config runtime state to avoid mutating possibly frozen config objects
+    private runtimeState: WeakMap<any, { _overrides?: any, _warnedThresholds?: any }> = new WeakMap();
     constructor(contentProcessor: ContentProcessor, tokenAnalyzer: TokenAnalyzer) {
     this.contentProcessor = contentProcessor;
     this.tokenAnalyzer = tokenAnalyzer;
@@ -47,10 +49,46 @@ export class DigestGenerator {
             } catch (e) {
                 // placeholder to satisfy TS control flow; actual try/catch per-block below
             }
-            let pluginHandler = plugins.find(p => p.fileHandler && p.fileHandler(file, ext, config));
+            // Use plugin registry predicate lookup to find a matching handler without
+            // invoking plugin handlers during discovery. This avoids expensive or
+            // side-effectful calls during a simple match check.
             try {
-                if (pluginHandler && pluginHandler.fileHandler) {
-                    body = await pluginHandler.fileHandler(file, ext, config);
+                const matching = getMatchingHandler(file);
+                if (matching && matching.handler) {
+                    // Call registered handler only after a match is confirmed.
+                    const handled = await matching.handler(file, config, (outputFormat === 'markdown' ? 'markdown' : 'text') as 'markdown' | 'text');
+                    if (handled && typeof handled === 'object' && 'content' in handled) {
+                        body = (handled as any).content || '';
+                    } else {
+                        body = String(handled || '');
+                    }
+                } else if (Array.isArray(plugins) && plugins.length > 0) {
+                    // Backwards-compatible fallback: allow passing plugin-like objects
+                    // directly to generate(). Call each plugin.fileHandler at most once
+                    // and use the first non-undefined return value as the body.
+                    for (const p of plugins) {
+                        try {
+                            if (p && typeof p.fileHandler === 'function') {
+                                const maybe = await p.fileHandler(file, ext, config);
+                                if (maybe !== undefined && maybe !== null) {
+                                    // Accept either legacy string return or an object with 'content'
+                                    if (typeof maybe === 'object' && 'content' in maybe) {
+                                        body = String((maybe as any).content || '');
+                                    } else {
+                                        body = String(maybe);
+                                    }
+                                    break;
+                                }
+                            }
+                        } catch (e) {
+                            // If a plugin handler throws while probing, capture and continue
+                            // to next plugin rather than aborting the whole generation.
+                            try { const ch = vscode.window.createOutputChannel('Codebase Digest'); ch.appendLine('Plugin probe failed: ' + String(e)); } catch {}
+                        }
+                    }
+                    if (!body) {
+                        body = await formatter.buildBody(file, ext, config, this.contentProcessor);
+                    }
                 } else {
                     body = await formatter.buildBody(file, ext, config, this.contentProcessor);
                 }
@@ -97,30 +135,37 @@ export class DigestGenerator {
             // Emit token progress roughly as files are processed
             try {
                 const tokenLimit = config.tokenLimit || config.contextLimit || 0;
-                if (tokenLimit > 0) {
-                    // Throttle token progress emissions to every 20 files to reduce overhead
-                    const shouldEmit = (index % 20) === 0;
+                // Only emit determinate progress if we have a positive token limit
+                const shouldEmit = tokenLimit > 0 && (index % 20) === 0;
+                if (shouldEmit) {
                     const percent = Math.min(100, Math.floor(((tokenEstimate + fileTokenEstimate) / tokenLimit) * 100));
-                    if (shouldEmit) { emitProgress({ op: 'generate', mode: 'progress', determinate: true, percent, message: 'Estimating tokens' }); }
-                    // If crossing 80% threshold, present an override if interactive and not already warned
+                    emitProgress({ op: 'generate', mode: 'progress', determinate: true, percent, message: 'Estimating tokens' });
+                } else if (tokenLimit > 0 && (index % 20) === 0) {
+                    // fallback non-determinate emission path if needed
+                    emitProgress({ op: 'generate', mode: 'progress', determinate: false, message: 'Estimating tokens' });
+                }
+                // If crossing 80% threshold, present an override if interactive and not already warned
+                if (tokenLimit > 0) {
                     const usage = (tokenEstimate + fileTokenEstimate) / tokenLimit;
                     if (usage >= 0.8) {
-                        const warned = (config as any)._warnedThresholds && (config as any)._warnedThresholds.tokens;
+                        const state = this.runtimeState.get(config) || {};
+                        const warned = state._warnedThresholds && state._warnedThresholds.tokens;
                         if (!warned) {
-                            (config as any)._warnedThresholds = { ...(config as any)._warnedThresholds, tokens: true };
+                            state._warnedThresholds = { ...(state._warnedThresholds || {}), tokens: true };
+                            this.runtimeState.set(config, state);
                             if (!process.env.JEST_WORKER_ID) {
                                 const pick = await vscode.window.showQuickPick([
                                     { label: 'Override once and continue', id: 'override' },
                                     { label: 'Cancel generation', id: 'cancel' }
                                 ], { placeHolder: `Estimated tokens ${(usage * 100).toFixed(0)}% of limit. Choose an action.`, ignoreFocusOut: true });
                                 if (pick && pick.id === 'override') {
-                                    (config as any)._overrides = { ...(config as any)._overrides, allowTokensOnce: true };
+                                    state._overrides = { ...(state._overrides || {}), allowTokensOnce: true };
+                                    this.runtimeState.set(config, state);
                                 } else {
                                     throw new Error('Cancelled');
                                 }
                             } else {
-                                // In tests, just append a warning
-                                // Do nothing else; generation will continue but warning is recorded
+                                // In tests, just append a warning; runtimeState already updated
                             }
                         }
                     }
@@ -283,20 +328,28 @@ export class DigestGenerator {
                 redactionPlaceholder: (config as any).redactionPlaceholder,
                 showRedacted: (config as any).showRedacted
             };
-            // Redact the full content string (this will be used for writing/caching)
-            const redactResult = redactSecrets(content, redactionCfg as any);
-            if (redactResult && redactResult.applied) {
-                result.content = redactResult.content;
-                (result as any).redactionApplied = true;
-            } else {
+            // If the caller explicitly requested to see redacted values (showRedacted=true),
+            // skip all redaction work entirely to avoid wasted CPU and any change to content.
+            if ((redactionCfg as any).showRedacted) {
+                // Mark that redaction was intentionally bypassed for this run.
                 (result as any).redactionApplied = false;
+            } else {
+                // Redact the full content string (this will be used for writing/caching)
+                const redactResult = redactSecrets(content, redactionCfg as any);
+                if (redactResult && redactResult.applied) {
+                    result.content = redactResult.content;
+                    (result as any).redactionApplied = true;
+                } else {
+                    (result as any).redactionApplied = false;
+                }
             }
-            // DEBUG: emit diagnostic to help tests trace redaction behavior
-            try { this.tokenAnalyzer && (this.tokenAnalyzer as any).diagnostics && (this.tokenAnalyzer as any).diagnostics.info && (this.tokenAnalyzer as any).diagnostics.info('Redaction applied', { applied: (result as any).redactionApplied, warnings: warnings.length }); } catch (e) {}
+            // Emit guarded diagnostic: counts only, no content
+            try { this.tokenAnalyzer && (this.tokenAnalyzer as any).diagnostics && (this.tokenAnalyzer as any).diagnostics.info && (this.tokenAnalyzer as any).diagnostics.info('Redaction applied', { applied: !!(result as any).redactionApplied, warningsCount: Array.isArray(warnings) ? warnings.length : 0 }); } catch (e) { try { const ch = vscode.window.createOutputChannel('Codebase Digest'); ch.appendLine('[DigestGenerator] diagnostics.info failed: ' + String(e)); } catch {} }
 
             // If outputObjects exist (JSON mode), produce a redacted copy so callers that inspect objects see redacted bodies
             if (outputFormat === 'json' && Array.isArray(result.outputObjects) && result.outputObjects.length > 0) {
                 let anyObjRedacted = false;
+                let redactedFilesCount = 0;
                 const redactedObjs = result.outputObjects.map(o => {
                     try {
                         const rh = redactSecrets(o.header || '', redactionCfg as any);
@@ -312,19 +365,24 @@ export class DigestGenerator {
                                         for (const k of Object.keys(node)) {
                                             const v = node[k];
                                             if (typeof v === 'string') {
-                                                try { console.debug('[DigestGenerator] redactNested string=', v.slice(0,200)); } catch (e) {}
-                                                const r = redactSecrets(v, redactionCfg as any);
-                                                try { console.debug('[DigestGenerator] redactNested result=', r); } catch (e) {}
-                                                if (r && r.applied) {
-                                                    node[k] = r.content;
-                                                    changed = true;
-                                                }
+                                                            // Do not log raw string content. Emit guarded diagnostics
+                                                            const r = redactSecrets(v, redactionCfg as any);
+                                                            try {
+                                                                const diag = this.tokenAnalyzer && (this.tokenAnalyzer as any).diagnostics && (this.tokenAnalyzer as any).diagnostics.info;
+                                                                if (diag) { diag('redactNested.string', { key: k, length: Math.min(200, String(v).length), applied: !!(r && (r as any).applied) }); }
+                                                            } catch (e) {}
+                                                            if (r && r.applied) {
+                                                                node[k] = r.content;
+                                                                changed = true;
+                                                            }
                                             } else if (Array.isArray(v)) {
-                        for (let i = 0; i < v.length; i++) {
+                                                    for (let i = 0; i < v.length; i++) {
                                                     if (typeof v[i] === 'string') {
-                            try { console.debug('[DigestGenerator] redactNested arrayItem=', String(v[i]).slice(0,200)); } catch (e) {}
-                            const r = redactSecrets(v[i], redactionCfg as any);
-                            try { console.debug('[DigestGenerator] redactNested arrayItem result=', r); } catch (e) {}
+                                                        const r = redactSecrets(v[i], redactionCfg as any);
+                                                        try {
+                                                            const diag = this.tokenAnalyzer && (this.tokenAnalyzer as any).diagnostics && (this.tokenAnalyzer as any).diagnostics.info;
+                                                            if (diag) { diag('redactNested.arrayItem', { index: i, length: Math.min(200, String(v[i]).length), applied: !!(r && (r as any).applied) }); }
+                                                        } catch (e) {}
                                                         if (r && r.applied) { v[i] = r.content; changed = true; }
                                                     } else if (typeof v[i] === 'object') { walk(v[i]); }
                                                 }
@@ -341,7 +399,7 @@ export class DigestGenerator {
                                 // ignore parse errors
                             }
                         }
-                        if (rh.applied || rb.applied) { anyObjRedacted = true; }
+                        if (rh.applied || rb.applied) { anyObjRedacted = true; redactedFilesCount += 1; }
                         return { header: rh.content, body: rb.content, imports: o.imports };
                     } catch (e) {
                         return o;
@@ -350,16 +408,24 @@ export class DigestGenerator {
                 result.outputObjects = redactedObjs;
                 if (anyObjRedacted) {
                     (result as any).redactionApplied = true;
+                    // Add a user-facing warning indicating how many files had redaction applied
+                    try {
+                        if (!result.warnings) { result.warnings = []; }
+                        result.warnings.push(`Redaction applied to ${redactedFilesCount} file(s)`);
+                    } catch (e) {}
                 } else {
                     // Fallback: if redactSecrets didn't apply but user provided simple redactionPatterns,
                     // perform a simple regex replace on each body to ensure tests expecting placeholders pass.
-                    try {
+                        try {
                         const userPatterns = Array.isArray((config as any).redactionPatterns) ? (config as any).redactionPatterns : [];
+                        const userPatternReport: { pattern: string; applied: boolean; alternatesUsed: string[] }[] = [];
                         if (userPatterns.length > 0) {
                             let fallbackApplied = false;
                             const replaced = result.outputObjects.map(o => {
                                 let body = o.body || '';
                                 for (const pat of userPatterns) {
+                                    let patternAppliedForThisBody = false;
+                                    const alternatesUsed: string[] = [];
                                     try {
                                         let re: RegExp | null = null;
                                         try { re = new RegExp(pat, 'g'); } catch (e) { re = null; }
@@ -367,20 +433,39 @@ export class DigestGenerator {
                                             // Replace common shorthand escapes with explicit classes to improve matching
                                             let alt = pat.replace(/\\w/g, '[A-Za-z0-9_]');
                                             alt = alt.replace(/\\d/g, '[0-9]');
-                                            // Also handle cases where backslashes were dropped (e.g., 'w+' instead of '\\w+')
                                             alt = alt.replace(/w\+/g, '[A-Za-z0-9_]+');
                                             alt = alt.replace(/d\+/g, '[0-9]+');
-                                            try { re = new RegExp(alt, 'g'); } catch (e) { re = null; }
+                                            try { re = new RegExp(alt, 'g'); alternatesUsed.push('shorthand-expansion'); } catch (e) { re = null; }
                                         }
                                         if (re && re.test(body)) {
                                             body = body.replace(re, (config as any).redactionPlaceholder || '[REDACTED]');
                                             fallbackApplied = true;
+                                            patternAppliedForThisBody = true;
                                         }
-                                    } catch (e) { }
+                                    } catch (e) { try { errorChannel.appendLine('Error processing file during generate loop: ' + String(e)); } catch {} }
+                                    // Record per-pattern report (merge later)
+                                    const existing = userPatternReport.find(p => p.pattern === pat);
+                                    if (!existing) {
+                                        userPatternReport.push({ pattern: String(pat), applied: patternAppliedForThisBody, alternatesUsed });
+                                    } else if (patternAppliedForThisBody) {
+                                        existing.applied = true;
+                                        for (const a of alternatesUsed) { if (!existing.alternatesUsed.includes(a)) { existing.alternatesUsed.push(a); } }
+                                    }
                                 }
                                 return { ...o, body };
                             });
-                            if (fallbackApplied) { result.outputObjects = replaced; (result as any).redactionApplied = true; }
+                            if (fallbackApplied) { result.outputObjects = replaced; (result as any).redactionApplied = true; try { if (!result.warnings) { result.warnings = []; } result.warnings.push('Redaction applied'); } catch (e) {} }
+                        }
+                        // Attach dry-run/report info for user-provided patterns so callers can inspect what was applied
+                        if (!(result as any).redactionReport) { (result as any).redactionReport = {}; }
+                        (result as any).redactionReport.userPatternReport = (result as any).redactionReport.userPatternReport ? (result as any).redactionReport.userPatternReport : [];
+                        if (Array.isArray((config as any).redactionPatterns)) {
+                            // ensure every user pattern is represented in the report even if not applied
+                            for (const pat of (config as any).redactionPatterns) {
+                                if (!(result as any).redactionReport.userPatternReport.find((p: any) => p.pattern === pat)) {
+                                    (result as any).redactionReport.userPatternReport.push({ pattern: String(pat), applied: false, alternatesUsed: [] });
+                                }
+                            }
                         }
                     } catch (e) {}
                 }
@@ -392,66 +477,76 @@ export class DigestGenerator {
                     if (outputFormat === 'json') {
                         const canonical2 = { summary, tree, files: result.outputObjects, warnings };
                         const rebuilt = JSON.stringify(canonical2, null, 2);
-                        try {
-                            const finalRedact = redactSecrets(rebuilt, redactionCfg as any);
-                            result.content = finalRedact.content;
-                            content = result.content;
+                        // If showRedacted was requested, skip any further redaction passes
+                        if ((redactionCfg as any).showRedacted) {
+                            result.content = rebuilt;
+                            content = rebuilt;
+                        } else {
+                            // First, attempt redactSecrets on the rebuilt JSON
+                            try {
+                                const finalRedact = redactSecrets(rebuilt, redactionCfg as any);
+                                result.content = finalRedact && finalRedact.applied ? finalRedact.content : rebuilt;
+                                content = result.content;
                                 if (finalRedact && finalRedact.applied) {
                                     (result as any).redactionApplied = true;
                                 }
-                        } catch (e) {
-                            result.content = rebuilt;
-                            content = rebuilt;
-                        }
-                        // Extra fallback: aggressively apply user-provided patterns (with sensible alternates)
-                        // directly to the rebuilt JSON string. This helps catch secrets embedded inside
-                        // nested JSON strings (e.g., notebook cell source) when earlier passes miss them.
-                        try {
-                            const userPatterns = Array.isArray((config as any).redactionPatterns) ? (config as any).redactionPatterns : [];
-                            if (userPatterns.length > 0) {
-                                let fallbackApplied = false;
-                                let working = String(result.content || '');
-                                for (const pat of userPatterns) {
-                                    if (!pat || typeof pat !== 'string') { continue; }
-                                    const candidates: RegExp[] = [];
-                                    try {
-                                        // prefer compiling the raw pattern as-is
-                                        candidates.push(new RegExp(pat, 'g'));
-                                    } catch (e) { /* ignore */ }
-                                    try {
-                                        // common alternate: convert \w and \d to explicit classes
-                                        let alt = pat.replace(/\\w/g, '[A-Za-z0-9_]').replace(/\\d/g, '[0-9]');
-                                        // handle cases where backslashes were lost (w+ -> [A-Za-z0-9_]+)
-                                        alt = alt.replace(/w\+/g, '[A-Za-z0-9_]+').replace(/d\+/g, '[0-9]+');
-                                        candidates.push(new RegExp(alt, 'g'));
-                                    } catch (e) { /* ignore */ }
-                                    try {
-                                        // also try a looser literal-based match if the pattern contains an obvious key-like prefix
-                                        const m = pat.match(/([a-zA-Z0-9_\-]+\s*[:=]\s*)/);
-                                        if (m) {
-                                            const prefix = m[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                                            const loose = new RegExp(prefix + '[A-Za-z0-9_\\-]{4,}', 'g');
-                                            candidates.push(loose);
-                                        }
-                                    } catch (e) { /* ignore */ }
-
-                                    for (const r of candidates) {
-                                        try {
-                                            if (!r) { continue; }
-                                            if (r.test(working)) {
-                                                working = working.replace(r, (config as any).redactionPlaceholder || '[REDACTED]');
-                                                fallbackApplied = true;
-                                            }
-                                        } catch (e) { /* ignore individual regex failures */ }
-                                    }
-                                }
-                                if (fallbackApplied) {
-                                    result.content = working;
-                                    content = working;
-                                    (result as any).redactionApplied = true;
-                                }
+                            } catch (e) {
+                                // If redactSecrets failed, still keep rebuilt content and continue with user-pattern fallbacks
+                                result.content = rebuilt;
+                                content = rebuilt;
                             }
-                        } catch (e) { /* swallow final fallback errors */ }
+                        }
+
+                        // Extra fallback: aggressively apply user-provided patterns directly to the rebuilt JSON string.
+                        const userPatterns = Array.isArray((config as any).redactionPatterns) ? (config as any).redactionPatterns : [];
+                        if (userPatterns.length > 0) {
+                            let working = String(result.content || '');
+                            let fallbackApplied = false;
+                            const finalPatternReport: { pattern: string; applied: boolean; alternatesUsed: string[] }[] = [];
+                            for (const pat of userPatterns) {
+                                if (!pat || typeof pat !== 'string') {
+                                    finalPatternReport.push({ pattern: String(pat), applied: false, alternatesUsed: [] });
+                                    continue;
+                                }
+                                const candidates: { re: RegExp | null; tag: string }[] = [];
+                                try { candidates.push({ re: new RegExp(pat, 'g'), tag: 'raw' }); } catch (e) { candidates.push({ re: null, tag: 'raw' }); }
+                                try {
+                                    let alt = pat.replace(/\\w/g, '[A-Za-z0-9_]').replace(/\\d/g, '[0-9]');
+                                    alt = alt.replace(/w\+/g, '[A-Za-z0-9_]+').replace(/d\+/g, '[0-9]+');
+                                    candidates.push({ re: new RegExp(alt, 'g'), tag: 'shorthand-expansion' });
+                                } catch (e) { candidates.push({ re: null, tag: 'shorthand-expansion' }); }
+                                try {
+                                    const m = pat.match(/([a-zA-Z0-9_\-]+\s*[:=]\s*)/);
+                                    if (m) {
+                                        const prefix = m[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                                        const loose = new RegExp(prefix + '[A-Za-z0-9_\\-]{4,}', 'g');
+                                        candidates.push({ re: loose, tag: 'loose-prefix' });
+                                    }
+                                } catch (e) { /* ignore */ }
+
+                                let patternApplied = false;
+                                const alternatesUsed: string[] = [];
+                                for (const c of candidates) {
+                                    try {
+                                        if (!c.re) { continue; }
+                                        if (c.re.test(working)) {
+                                            working = working.replace(c.re, (config as any).redactionPlaceholder || '[REDACTED]');
+                                            fallbackApplied = true;
+                                            patternApplied = true;
+                                            alternatesUsed.push(c.tag);
+                                        }
+                                    } catch (e) { /* ignore individual regex failures */ }
+                                }
+                                finalPatternReport.push({ pattern: String(pat), applied: patternApplied, alternatesUsed });
+                            }
+                            if (fallbackApplied) {
+                                result.content = working;
+                                content = working;
+                                (result as any).redactionApplied = true;
+                            }
+                            if (!(result as any).redactionReport) { (result as any).redactionReport = {}; }
+                            (result as any).redactionReport.finalPatternReport = finalPatternReport;
+                        }
                     }
                 } catch (e) {}
             }
@@ -461,11 +556,14 @@ export class DigestGenerator {
             (result as any).redactionApplied = false;
         }
 
-        // DEBUG: show parsed file bodies from final content for tests/debugging
+        // Guarded diagnostic: report counts, never raw content
         try {
             if (outputFormat === 'json') {
                 const parsedFinal = JSON.parse(result.content as string);
-                try { console.debug('[DigestGenerator] final parsed files bodies:', parsedFinal.files.map((f: any) => f.body)); } catch (e) {}
+                try {
+                    const diag = this.tokenAnalyzer && (this.tokenAnalyzer as any).diagnostics && (this.tokenAnalyzer as any).diagnostics.info;
+                    if (diag) { diag('final.parsedFiles', { count: Array.isArray(parsedFinal.files) ? parsedFinal.files.length : 0, redactionApplied: !!(result as any).redactionApplied }); }
+                } catch (e) {}
             }
         } catch (e) {}
 

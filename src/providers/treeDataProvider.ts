@@ -45,11 +45,15 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
     private totalSize: number = 0;
     private lastScanStats: any;
     private directoryCache: DirectoryCache;
+    private diagnostics: Diagnostics;
     private scanning: boolean = false;
     // Simple cancellation token for scan operations
     private scanToken: { isCancellationRequested?: boolean } | null = null;
     // Per-directory debounce timers to coalesce rapid FS events
     private debounceTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+    // While a full workspace scan is in progress, coalesce directory hydration
+    // requests here so many watcher events don't queue up many expensive scans.
+    private pendingHydrations: Set<string> = new Set();
     private selectionManager: SelectionManager;
 
     constructor(folder: vscode.WorkspaceFolder, services: any) {
@@ -65,7 +69,8 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
         const watcher = (vscode.workspace && typeof (vscode.workspace as any).createFileSystemWatcher === 'function')
             ? (vscode.workspace as any).createFileSystemWatcher('**/*')
             : null;
-        const path = require('path');
+    const path = require('path');
+    this.diagnostics = services && services.diagnostics ? services.diagnostics : new Diagnostics('info');
         const handleChange = (uri: vscode.Uri) => {
             const dir = path.dirname(uri.fsPath);
 
@@ -73,11 +78,19 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
             const key = String(dir || this.workspaceRoot || 'root');
             const runNow = async () => {
                 // If the dir equals workspace root, perform a full refresh
-                    if (dir === this.workspaceRoot) {
-                        // Respect any existing cancellation token: refresh will create a fresh token
-                        try { await this.refresh(); } catch (e) { /* swallow */ }
-                        return;
-                    }
+                        if (dir === this.workspaceRoot) {
+                            // Respect any existing cancellation token: refresh will create a fresh token
+                            try { await this.refresh(); } catch (e) { try { this.diagnostics && this.diagnostics.warn ? this.diagnostics.warn('refresh failed in watcher', e) : console.warn('refresh failed in watcher', e); } catch {} }
+                            return;
+                        }
+
+                // If a full workspace scan is in progress, coalesce this hydration
+                // request and process it after the scan completes to avoid queuing
+                // many individual directory scans behind the workspace mutex.
+                if (this.scanning) {
+                    try { this.pendingHydrations.add(dir); } catch (e) { /* swallow */ }
+                    return;
+                }
 
                 // Find parent node in tree
                 let parentNode: FileNode | undefined;
@@ -203,6 +216,15 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
     }
 
     setSelectionByRelPaths(relPaths: string[]): void {
+        // Delegate selection setting to the centralized SelectionManager so there's
+        // a single implementation for marking nodes and keeping selectedRelPaths
+        // deterministic. SelectionManager will trigger onChange/preview updates.
+        if (this.selectionManager && typeof this.selectionManager.setSelectionByRelPaths === 'function') {
+            this.selectionManager.setSelectionByRelPaths(relPaths || []);
+            return;
+        }
+        // Fallback: if SelectionManager isn't available (defensive), fall back to
+        // the previous behavior to ensure callers still work.
         this.selectedRelPaths = [];
         const markSelection = (node: FileNode) => {
             node.isSelected = relPaths.includes(node.relPath);
@@ -275,7 +297,46 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
             try {
                 await this.scanWorkspace(this.scanToken);
             } finally {
+                // Clear the token regardless of scan success so subsequent hydrations
+                // do not accidentally reuse a stale token. We'll process any
+                // coalesced hydration requests after the scan below.
                 this.scanToken = null;
+            }
+
+            // Process any directory hydration requests that were coalesced while the
+            // full workspace scan was running. We handle these sequentially using
+            // the workspace mutex to avoid races with other scans.
+            if (this.pendingHydrations.size > 0) {
+                const pending = Array.from(this.pendingHydrations);
+                // Clear the set early so new watcher events are accumulated separately
+                this.pendingHydrations.clear();
+                const config = this.loadConfig();
+                for (const dirPath of pending) {
+                    try {
+                        // Find parent node in the freshly-scanned tree
+                        const findNode = (nodes: FileNode[]): FileNode | undefined => {
+                            for (const node of nodes) {
+                                if (node.path === dirPath && node.type === 'directory') { return node; }
+                                if (node.children) { const f = findNode(node.children); if (f) { return f; } }
+                            }
+                            return undefined;
+                        };
+                        const parentNode = findNode(this.rootNodes);
+                        if (!parentNode) { continue; }
+                        const m = getMutex(this.workspaceRoot || this.workspaceFolder.uri.fsPath);
+                        const relRelease = await m.lock();
+                        try {
+                            const children = await this.fileScanner.scanDirectory(parentNode.path, config, undefined);
+                            parentNode.children = children;
+                            this.directoryCache.set(parentNode.path, children);
+                            this._onDidChangeTreeData.fire(parentNode);
+                        } finally {
+                            try { relRelease(); } catch (e) { /* swallow */ }
+                        }
+                    } catch (e) {
+                        try { this.diagnostics && this.diagnostics.warn ? this.diagnostics.warn('pending hydration failed', e) : console.warn('pending hydration failed', e); } catch {}
+                    }
+                }
             }
             this.scanning = false;
             this._onDidChangeTreeData.fire(undefined);
@@ -398,11 +459,19 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
                     if (matched) {
                         const extracted = extractNodeByRelPath(this.rootNodes, f.relPath);
                         if (extracted) {
-                            // Normalize depth for top-level group children
-                            extracted.depth = 1;
-                            children.push(extracted);
-                            alreadyTaken.add(f.relPath);
-                        }
+                                // Normalize depth for top-level group children and their descendants
+                                const normalizeDepth = (node: FileNode, baseDepth: number) => {
+                                    node.depth = baseDepth;
+                                    if (node.children && node.children.length > 0) {
+                                        for (const c of node.children) {
+                                            normalizeDepth(c, baseDepth + 1);
+                                        }
+                                    }
+                                };
+                                normalizeDepth(extracted, 1);
+                                children.push(extracted);
+                                alreadyTaken.add(f.relPath);
+                            }
                     }
                 }
             }
@@ -614,7 +683,7 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
                         this.directoryCache.set(element.path, children);
                         this._onDidChangeTreeData.fire(element);
                     } catch (e) {
-                        // swallow; keep UI responsive
+                        try { this.diagnostics && this.diagnostics.warn ? this.diagnostics.warn('scanDirectory failed', e) : console.warn('scanDirectory failed', e); } catch {}
                     } finally {
                         try { relRelease(); } catch (e) { }
                     }
@@ -649,7 +718,16 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
         if ((element as any).virtualType === 'welcomeAction') {
             const act = (element as any).action || '';
             const item = new vscode.TreeItem(element.name, vscode.TreeItemCollapsibleState.None);
-            item.iconPath = new vscode.ThemeIcon('gear');
+            // Map icons per action for better UX
+            const iconMap: Record<string, string> = {
+                openDashboard: 'rocket',
+                generate: 'play',
+                ingest: 'cloud',
+                clearCache: 'trash',
+                settings: 'gear'
+            };
+            const icon = iconMap[act] || 'gear';
+            item.iconPath = new vscode.ThemeIcon(icon);
             item.contextValue = ContextValues.file;
             // Map friendly action names to extension command IDs
             const cmdMap: Record<string, string> = {

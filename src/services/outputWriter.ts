@@ -22,7 +22,7 @@ export class OutputWriter {
             const uri = await vscode.window.showSaveDialog({ filters: { [config.outputFormat]: [config.outputFormat] } });
             if (uri) {
                 const fs = require('fs');
-                let stream;
+                let stream: import('fs').WriteStream | undefined;
                 let canceled = false;
                 // Allow configurable streaming threshold and chunk size via settings
                 const streamingThreshold = typeof config.streamingThresholdBytes === 'number' ? config.streamingThresholdBytes : 64 * 1024;
@@ -34,21 +34,78 @@ export class OutputWriter {
                     }
                 });
                 try {
-                    stream = fs.createWriteStream(uri.fsPath, { encoding: 'utf8' });
-                        // Decide whether to stream progressively based on threshold
-                        const byteLen = Buffer.byteLength(output || '', 'utf8');
+                    stream = fs.createWriteStream(uri.fsPath);
+                    // Decide whether to stream progressively based on threshold
+                    const buf = Buffer.from(output || '', 'utf8');
+                    const byteLen = buf.length;
+                    let bytesWritten = 0;
+                    const writeOrAwaitDrain = (data: Buffer | string) => {
+                        return new Promise<void>((resolve) => {
+                            const w = stream!;
+                            const ok = w.write(data);
+                            if (ok) { resolve(); } else {
+                                try {
+                                    if (typeof w.once === 'function') {
+                                        w.once('drain', () => resolve());
+                                    } else if (typeof (w as any).on === 'function') {
+                                        const handler = () => {
+                                            try { (w as any).removeListener && (w as any).removeListener('drain', handler); } catch {}
+                                            resolve();
+                                        };
+                                        (w as any).on('drain', handler);
+                                    } else {
+                                        // Stream mock doesn't expose drain events; fall back.
+                                        resolve();
+                                    }
+                                } catch {
+                                    // Defensive fallback for exotic mocks
+                                    resolve();
+                                }
+                            }
+                        });
+                    };
+
                     if (byteLen <= streamingThreshold) {
-                        stream.write(output);
+                        // Write full buffer at once
+                        await writeOrAwaitDrain(buf);
+                        bytesWritten = byteLen;
                     } else {
-                        for (let i = 0; i < output.length; i += chunkSize) {
+                        // chunkSize is interpreted as bytes
+                        const chunkBytes = typeof config.chunkSize === 'number' ? config.chunkSize : chunkSize;
+                        for (let offset = 0; offset < byteLen; offset += chunkBytes) {
                             if (canceled) { break; }
-                            stream.write(output.slice(i, i + chunkSize));
+                            const slice = buf.slice(offset, Math.min(offset + chunkBytes, byteLen));
+                            await writeOrAwaitDrain(slice);
+                            bytesWritten += slice.length;
                             // Yield to event loop between chunks
                             await new Promise(res => setTimeout(res, 0));
                         }
                     }
+
                     if (canceled) {
-                        stream.write('\n---\nDigest canceled. Output may be incomplete.');
+                        // Avoid appending a textual cancellation footer to machine-readable
+                        // formats (e.g., JSON) which would corrupt the file. For such
+                        // formats, write a small companion .partial file to indicate
+                        // the write was cancelled.
+                        const format = config && config.outputFormat ? String(config.outputFormat).toLowerCase() : '';
+                        const partialPath = uri.fsPath + '.partial';
+                        const meta = {
+                            originalPath: uri.fsPath,
+                            bytesWritten: bytesWritten,
+                            totalBytes: byteLen,
+                            timestamp: new Date().toISOString(),
+                        };
+                        try {
+                            if (format === 'json') {
+                                fs.writeFileSync(partialPath, JSON.stringify(meta, null, 2), 'utf8');
+                            } else {
+                                // For human formats, append human footer and also write metadata companion file.
+                                await writeOrAwaitDrain(Buffer.from('\n---\nDigest canceled. Output may be incomplete.', 'utf8'));
+                                fs.writeFileSync(partialPath, JSON.stringify(meta, null, 2), 'utf8');
+                            }
+                        } catch (e) {
+                            // ignore errors creating companion file or writing footer
+                        }
                     }
                 } finally {
                     if (stream) { stream.end(); }

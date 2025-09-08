@@ -35,14 +35,30 @@ export function listAnalyzers() {
 // To enable tiktoken-based token estimation, install a compatible adapter:
 //   npm install optional-tiktoken-adapter
 // The adapter must export an 'estimateTokens(content, cfg)' function.
-try {
-    // Lazy require an optional tokenizer, if user installed it
-    // Use a dynamic require hidden from webpack's static analysis so the optional
-    // adapter isn't treated as a hard dependency during bundling.
-    const dynamicRequire: NodeRequire = eval('require');
-    const { estimateTokens } = dynamicRequire('optional-tiktoken-adapter');
-    registerTokenizer('tiktoken', (content, cfg) => estimateTokens(content, cfg));
-} catch {}
+// Try to dynamically import an optional tiktoken adapter. Using dynamic import
+// avoids eval() and plays nicer with bundlers and static analysis.
+// Provide an explicit initialization hook and a ready-promise so callers can
+// await optional tokenizer registration if they need to (avoids implicit race
+// when consumers try to read a tokenizer synchronously).
+export const optionalTokenizersReady: Promise<void> = (async function tryRegisterOptionalTiktoken() {
+    try {
+        // Attempt a runtime dynamic import; this will succeed only if the package
+        // is installed in the runtime environment. We guard to avoid crashing.
+        // @ts-ignore: optional runtime dependency may not have types or be installed
+        const mod = await import('optional-tiktoken-adapter');
+        if (mod && typeof mod.estimateTokens === 'function') {
+            registerTokenizer('tiktoken', (content, cfg) => mod.estimateTokens(content, cfg));
+        }
+    } catch (e) {
+        // ignore missing optional dependency
+    }
+})();
+
+// Convenience init function callers can await if they want deterministic
+// optional adapter availability at runtime.
+export async function initOptionalTokenizers(): Promise<void> {
+    return optionalTokenizersReady;
+}
 const fileHandlers: Array<{
     name: string;
     predicate: (node: FileNode) => boolean;

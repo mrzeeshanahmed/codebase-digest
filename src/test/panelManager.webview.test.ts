@@ -62,17 +62,19 @@ describe('View registration and WebviewView HTML', () => {
     // provide a temporary mock function to capture the call.
     const originalRegister: any = (vscode.window as any).registerWebviewViewProvider;
     let calledWithId: string | null = null;
-    (vscode.window as any).registerWebviewViewProvider = (id: string, provider: any, opts?: any) => {
-      calledWithId = id;
-      return { dispose: () => {} } as any;
-    };
+    try {
+      (vscode.window as any).registerWebviewViewProvider = (id: string, provider: any, opts?: any) => {
+        calledWithId = id;
+        return { dispose: () => {} } as any;
+      };
 
-    // Call registration - our mock will capture the id
-    registerCodebaseView(context as any, fakeExtUri, treeProvider as any);
-    expect(calledWithId).toBe('codebaseDigestDashboard');
-
-    // restore original if it existed
-    (vscode.window as any).registerWebviewViewProvider = originalRegister;
+      // Call registration - our mock will capture the id
+      registerCodebaseView(context as any, fakeExtUri, treeProvider as any);
+      expect(calledWithId).toBe('codebaseDigestDashboard');
+    } finally {
+      // restore original if it existed
+      (vscode.window as any).registerWebviewViewProvider = originalRegister;
+    }
   });
 
   it('setWebviewHtml injects CSP and rewrites URIs for a WebviewView.webview', () => {
@@ -112,12 +114,13 @@ describe('View registration and WebviewView HTML', () => {
       get: jest.fn((k: string, d: any) => { if (k === 'filterPresets') { return storedPresets; } return d; })
     } as any;
     const originalGetConfig = (vscode.workspace as any).getConfiguration;
-  (vscode.workspace as any).getConfiguration = jest.fn(() => cfgMock);
   const originalConfigTarget = (vscode as any).ConfigurationTarget;
-  (vscode as any).ConfigurationTarget = { Workspace: 1, WorkspaceFolder: 2, Global: 3 } as any;
   const originalExecute = (vscode.commands as any).executeCommand;
-  (vscode.commands as any).executeCommand = jest.fn();
   const originalUriFile = (vscode.Uri as any).file;
+  try {
+  (vscode.workspace as any).getConfiguration = jest.fn(() => cfgMock);
+  (vscode as any).ConfigurationTarget = { Workspace: 1, WorkspaceFolder: 2, Global: 3 } as any;
+  (vscode.commands as any).executeCommand = jest.fn();
   (vscode.Uri as any).file = (p: string) => ({ fsPath: p });
 
     const treeProvider: any = { refresh: jest.fn(), workspaceRoot: '' };
@@ -146,11 +149,13 @@ describe('View registration and WebviewView HTML', () => {
     expect(fallbackCalled).toBeTruthy();
   }
 
-    // restore
+    } finally {
+  // restore
   (vscode.workspace as any).getConfiguration = originalGetConfig;
   (vscode as any).ConfigurationTarget = originalConfigTarget;
   (vscode.commands as any).executeCommand = originalExecute;
   (vscode.Uri as any).file = originalUriFile;
+    }
   });
 
   it('receives generationResult error messages (webview toast path)', async () => {

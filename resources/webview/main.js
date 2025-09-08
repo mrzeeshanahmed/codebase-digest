@@ -7,7 +7,7 @@ let overrideDisableRedaction = false;
 let pendingOverrideUsed = false;
 // Visual row height / basic list state
 const ITEM_HEIGHT = 28; // The height of each file row in pixels
-let filesCache = [];
+// filesCache was unused; remove to reduce memory footprint
 let selectedSet = new Set();
 let pendingPersistedSelection = null;
 let pendingPersistedFocusIndex = undefined;
@@ -41,29 +41,104 @@ function node(id) {
 }
 
 function postAction(actionType, payload) {
-    const msg = Object.assign({ type: 'action', actionType }, payload || {});
-    if (currentFolderPath) { msg.folderPath = currentFolderPath; }
-    vscode.postMessage(msg);
+    const base = Object.assign({ type: 'action', actionType }, payload || {});
+    if (currentFolderPath) { base.folderPath = currentFolderPath; }
+    try { vscode.postMessage(sanitizePayload(base)); } catch (e) { console.warn('postAction postMessage failed', e); }
 }
 
 function postConfig(action, payload) {
-    const msg = Object.assign({ type: 'config', action }, payload || {});
-    if (currentFolderPath) { msg.folderPath = currentFolderPath; }
-    vscode.postMessage(msg);
+    const base = Object.assign({ type: 'config', action }, payload || {});
+    if (currentFolderPath) { base.folderPath = currentFolderPath; }
+    try { vscode.postMessage(sanitizePayload(base)); } catch (e) { console.warn('postConfig postMessage failed', e); }
+}
+
+// Sanitize payloads sent from the webview to the extension host
+function sanitizePayload(obj) {
+    try {
+        const copy = {};
+        for (const k of Object.keys(obj || {})) {
+            const v = obj[k];
+            // Allow simple scalars and arrays of scalars only
+            if (v === null || v === undefined) { copy[k] = v; continue; }
+            if (typeof v === 'string') {
+                // trim and remove control characters
+                copy[k] = v.trim().replace(/[\x00-\x1F\x7F]/g, '');
+                // clamp length
+                if (copy[k].length > 2000) { copy[k] = copy[k].slice(0, 2000); }
+                continue;
+            }
+            if (typeof v === 'number' || typeof v === 'boolean') { copy[k] = v; continue; }
+            if (Array.isArray(v)) {
+                copy[k] = v.map(x => (typeof x === 'string' ? x.trim().replace(/[\x00-\x1F\x7F]/g, '') : String(x))).slice(0, 100);
+                continue;
+            }
+            // For objects, try to shallow-serialize simple key:scalar entries
+            if (typeof v === 'object') {
+                const o = {};
+                for (const kk of Object.keys(v)) {
+                    const vv = v[kk];
+                    if (vv === null || vv === undefined) { o[kk] = vv; }
+                    else if (typeof vv === 'string') { o[kk] = vv.trim().replace(/[\x00-\x1F\x7F]/g, '').slice(0, 500); }
+                    else if (typeof vv === 'number' || typeof vv === 'boolean') { o[kk] = vv; }
+                }
+                copy[k] = o;
+                continue;
+            }
+            // fallback stringify
+            copy[k] = String(v).slice(0, 500);
+        }
+        return copy;
+    } catch (e) { return obj; }
+}
+
+// Modal focus-trap & restore helpers
+const __focusState = { lastFocused: null };
+function openModal(element) {
+    try {
+        __focusState.lastFocused = document.activeElement;
+        element.hidden = false;
+        // focus first control
+        setTimeout(() => { const first = element.querySelector('input,button,select,textarea,[tabindex]'); if (first && typeof first.focus === 'function') { first.focus(); } }, 0);
+        // basic trap: capture Tab key and keep focus inside modal
+        element.addEventListener('keydown', modalKeyHandler);
+    } catch (e) {}
+}
+function closeModal(element) {
+    try {
+        element.hidden = true;
+        element.removeEventListener('keydown', modalKeyHandler);
+        if (__focusState.lastFocused && typeof __focusState.lastFocused.focus === 'function') { __focusState.lastFocused.focus(); }
+    } catch (e) {}
+}
+function modalKeyHandler(e) {
+    if (e.key !== 'Tab') { return; }
+    const modal = e.currentTarget;
+    const focusable = Array.from(modal.querySelectorAll('input,button,select,textarea,a[href],[tabindex]:not([tabindex="-1"])')).filter((el) => !el.disabled && el.offsetParent !== null);
+    if (focusable.length === 0) { e.preventDefault(); return; }
+    const idx = focusable.indexOf(document.activeElement);
+    if (e.shiftKey) {
+        if (idx <= 0) { focusable[focusable.length - 1].focus(); e.preventDefault(); }
+    } else {
+        if (idx === focusable.length - 1) { focusable[0].focus(); e.preventDefault(); }
+    }
 }
 
 function renderFileList(state) {
     const fileListRoot = document.getElementById('file-list');
     if (!fileListRoot) { return; }
 
-    fileListRoot.innerHTML = ''; // Clear previous content
+    // Clear previous content without using innerHTML for safety
+    while (fileListRoot.firstChild) { fileListRoot.removeChild(fileListRoot.firstChild); }
 
     const fileTree = state.fileTree || {};
     // Use selectedPaths from the state, which is an array of strings
     const selectedPaths = new Set(state.selectedPaths || []);
 
     if (Object.keys(fileTree).length === 0) {
-        fileListRoot.innerHTML = '<div class="file-row-message">No files to display.</div>';
+    const msg = document.createElement('div');
+    msg.className = 'file-row-message';
+    msg.textContent = 'No files to display.';
+    fileListRoot.appendChild(msg);
         return;
     }
 
@@ -83,6 +158,29 @@ function renderFileList(state) {
         });
         postAction('setSelection', { relPaths: newSelectedPaths });
     };
+
+    // Helper: update ancestor folder checkbox indeterminate/checked state based on descendants
+    function updateAncestorStates(startLi) {
+        try {
+            let current = startLi;
+            while (current) {
+                const parentUl = current.parentElement;
+                if (!parentUl) { break; }
+                const parentLi = parentUl.closest('li.folder-item');
+                if (!parentLi) { break; }
+                const descendantCheckboxes = parentLi.querySelectorAll('input.file-checkbox');
+                let total = 0, checked = 0;
+                descendantCheckboxes.forEach(cb => { total++; if (cb.checked) { checked++; } });
+                const parentCb = parentLi.querySelector('input.file-checkbox');
+                if (parentCb) {
+                    if (checked === 0) { parentCb.checked = false; parentCb.indeterminate = false; }
+                    else if (checked === total) { parentCb.checked = true; parentCb.indeterminate = false; }
+                    else { parentCb.checked = false; parentCb.indeterminate = true; }
+                }
+                current = parentLi;
+            }
+        } catch (e) { /* ignore DOM traversal errors */ }
+    }
 
     // Recursive function to build the tree HTML and attach listeners
     function createTreeHtml(node, pathPrefix = '') {
@@ -123,8 +221,13 @@ function renderFileList(state) {
                     const descendantCheckboxes = li.querySelectorAll('.file-checkbox');
                     descendantCheckboxes.forEach(descCb => {
                         descCb.checked = isChecked;
+                        try { descCb.indeterminate = false; } catch (e) {}
                     });
+                    // After toggling descendants, update ancestor folders
+                    try { updateAncestorStates(li); } catch (e) {}
                 }
+                // For leaf changes, also update ancestor state so parent indeterminate toggles correctly
+                try { updateAncestorStates(li); } catch (e) {}
                 handleSelectionChange();
             });
             
@@ -156,6 +259,23 @@ function renderFileList(state) {
     }
 
     fileListRoot.appendChild(createTreeHtml(fileTree));
+    // After initial render, ensure folder checkboxes reflect tri-state based on current selections
+    try {
+        const folderItems = fileListRoot.querySelectorAll('li.folder-item');
+        folderItems.forEach(fi => {
+            try {
+                const descendantCheckboxes = fi.querySelectorAll('input.file-checkbox');
+                let total = 0, checked = 0;
+                descendantCheckboxes.forEach(cb => { total++; if (cb.checked) { checked++; } });
+                const parentCb = fi.querySelector('input.file-checkbox');
+                if (parentCb) {
+                    if (checked === 0) { parentCb.checked = false; parentCb.indeterminate = false; }
+                    else if (checked === total) { parentCb.checked = true; parentCb.indeterminate = false; }
+                    else { parentCb.checked = false; parentCb.indeterminate = true; }
+                }
+            } catch (e) {}
+        });
+    } catch (e) {}
 }
 
 // Lightweight message router: forward a few key message types to the UI functions
@@ -206,7 +326,7 @@ window.addEventListener('message', event => {
                 postAction('setSelection', { relPaths: pendingPersistedSelection });
                 try {
                     const persist = { selectedFiles: pendingPersistedSelection, focusIndex: pendingPersistedFocusIndex };
-                    vscode.postMessage({ type: 'persistState', state: persist });
+                                    try { vscode.postMessage(sanitizePayload({ type: 'persistState', state: persist })); } catch (e) { console.warn('persistState postMessage failed', e); }
                 } catch (e) {}
                 pendingPersistedSelection = null;
                 pendingPersistedFocusIndex = undefined;
@@ -355,16 +475,17 @@ function renderPreviewDelta(delta) {
 
         const overLimit = delta && delta.tokenEstimate !== undefined && delta.contextLimit !== undefined && delta.tokenEstimate > delta.contextLimit;
 
-    chipsTarget.innerHTML = chips
-            .map(function (c) {
-                return (
-                    '<div class="status-chip' + (overLimit ? ' over-limit' : '') + '">' +
-                        '<span class="label">' + c.label + '</span>' +
-                        '<span class="value">' + c.value + '</span>' +
-                    '</div>'
-                );
-            })
-            .join('');
+        // Build chips DOM without innerHTML
+        while (chipsTarget.firstChild) { chipsTarget.removeChild(chipsTarget.firstChild); }
+        for (let i = 0; i < chips.length; i++) {
+            const c = chips[i];
+            const chip = document.createElement('div');
+            chip.className = 'status-chip' + (overLimit ? ' over-limit' : '');
+            const lab = document.createElement('span'); lab.className = 'label'; lab.textContent = c.label;
+            const val = document.createElement('span'); val.className = 'value'; val.textContent = c.value;
+            chip.appendChild(lab); chip.appendChild(val);
+            chipsTarget.appendChild(chip);
+        }
 
         // Persistent accessible banner when token estimate exceeds context limit
         try {
@@ -426,10 +547,17 @@ function handleProgress(e) {
             container.classList.remove('indeterminate');
             bar.style.width = (e.percent || 0) + '%';
             bar.setAttribute('aria-valuenow', String(Math.round(e.percent || 0)));
+            // Accessible text for assistive tech
+            try { container.setAttribute('aria-busy', 'true'); } catch (ex) {}
+            try { bar.setAttribute('aria-valuetext', `${Math.round(e.percent || 0)}%`); } catch (ex) {}
+            try { const s = document.getElementById('progress-status'); if (s) { s.textContent = `Progress ${Math.round(e.percent || 0)}%`; } } catch (ex) {}
         } else {
             container.classList.add('indeterminate');
             bar.style.width = '40%';
             bar.removeAttribute('aria-valuenow');
+            try { container.setAttribute('aria-busy', 'true'); } catch (ex) {}
+            try { bar.removeAttribute('aria-valuetext'); } catch (ex) {}
+            try { const s = document.getElementById('progress-status'); if (s) { s.textContent = e.message || 'Working'; } } catch (ex) {}
         }
         showToast(e.message || (e.op + ' started'));
         // If a write operation starts, reveal the Cancel write affordance
@@ -438,15 +566,23 @@ function handleProgress(e) {
         container.classList.remove('indeterminate');
         bar.style.width = (e.percent || 0) + '%';
         bar.setAttribute('aria-valuenow', String(Math.round(e.percent || 0)));
+    try { bar.setAttribute('aria-valuetext', `${Math.round(e.percent || 0)}%`); } catch (ex) {}
+    try { const s = document.getElementById('progress-status'); if (s) { s.textContent = `Progress ${Math.round(e.percent || 0)}%`; } } catch (ex) {}
     } else if (e.mode === 'end') {
         container.classList.remove('indeterminate');
         bar.style.width = '100%';
         bar.setAttribute('aria-valuenow', '100');
+    try { bar.setAttribute('aria-valuetext', 'Complete'); } catch (ex) {}
+    try { const s = document.getElementById('progress-status'); if (s) { s.textContent = 'Complete'; } } catch (ex) {}
         setTimeout(() => { bar.style.width = '0%'; }, 600);
         showToast(e.message || (e.op + ' finished'), 'success');
     // hide cancel affordance when write ends
     try { if (e.op === 'write') { const cw = nodes.cancelWriteBtn || document.getElementById('btn-cancel-write'); if (cw) { cw.hidden = true; cw.setAttribute('aria-hidden', 'true'); } } } catch (ex) {}
     }
+    // Clear busy when no longer active (end or if determinate but percent at 100)
+    try {
+        if (e.mode === 'end' || (e.determinate && Number(e.percent) === 100)) { const c = progressContainer(); if (c) { c.setAttribute('aria-busy', 'false'); } }
+    } catch (ex) {}
 }
 
 // Pause/Resume UI wiring
@@ -579,11 +715,14 @@ window.onload = function() {
                 if (settingsEl) { settingsEl.hidden = false; }
                 // Request latest config from the extension for the settings UI
                 postAction('configRequest');
+                // focus first input in settings for keyboard users
+                try { setTimeout(() => { const first = settingsEl && settingsEl.querySelector ? settingsEl.querySelector('input,select,textarea,button') : null; if (first && typeof first.focus === 'function') { first.focus(); } }, 0); } catch (e) {}
                 return;
             }
             if (action === 'ingestRemote') {
                 const m = document.getElementById('ingestModal');
                 if (m) { m.hidden = false; }
+                try { setTimeout(() => { const repo = document.getElementById('ingest-repo'); if (repo && typeof repo.focus === 'function') { repo.focus(); } }, 0); } catch (e) {}
                 return;
             }
             // One-shot toggle button is not part of data-action; handle explicit button
@@ -614,6 +753,58 @@ window.onload = function() {
             sendCmd(action);
         });
     }
+    // Also delegate clicks from the top action-bar so buttons placed outside
+    // the #toolbar (for layout reasons) still invoke data-action handlers.
+    try {
+        const actionBarEl = document.querySelector('.action-bar');
+        if (actionBarEl) {
+            actionBarEl.addEventListener('click', (ev) => {
+                const btn = ev.target && (ev.target.closest ? ev.target.closest('button') : null);
+                if (!btn) { return; }
+                const action = btn.getAttribute('data-action');
+                if (!action) { return; }
+                // special-case generation so we include transient overrides like the toolbar does
+                if (action === 'generateDigest') {
+                    ev.preventDefault(); ev.stopPropagation();
+                    const payload = {};
+                    if (overrideDisableRedaction) {
+                        payload.overrides = { showRedacted: true };
+                        pendingOverrideUsed = true;
+                    }
+                    postAction(action, payload);
+                    return;
+                }
+                // fallback to normal command routing
+                sendCmd(action);
+            });
+        }
+    } catch (e) { /* swallow */ }
+    // Header buttons live outside the toolbar node; wire them explicitly so
+    // clicking the header ingest/settings buttons opens the corresponding modals.
+    try {
+        const headerIngest = document.getElementById('btn-ingest-remote');
+        if (headerIngest) {
+            headerIngest.addEventListener('click', (ev) => {
+                ev.preventDefault(); ev.stopPropagation();
+                const m = document.getElementById('ingestModal');
+                if (m) { m.hidden = false; }
+                try { setTimeout(() => { const repo = document.getElementById('ingest-repo'); if (repo && typeof repo.focus === 'function') { repo.focus(); } }, 0); } catch (e) {}
+            });
+        }
+    } catch (e) { /* swallow header ingest wiring errors */ }
+    try {
+        const headerSettings = document.getElementById('openSettings');
+        if (headerSettings) {
+            headerSettings.addEventListener('click', (ev) => {
+                ev.preventDefault(); ev.stopPropagation();
+                const settingsEl = document.getElementById('settings');
+                if (settingsEl) { settingsEl.hidden = false; }
+                // Request latest config from the extension for the settings UI
+                postAction('configRequest');
+                try { setTimeout(() => { const first = settingsEl && settingsEl.querySelector ? settingsEl.querySelector('input,select,textarea,button') : null; if (first && typeof first.focus === 'function') { first.focus(); } }, 0); } catch (e) {}
+            });
+        }
+    } catch (e) { /* swallow header settings wiring errors */ }
     // Also wire the explicit pause button if present (some DOM variants
     // may render a dedicated pause button without data-action wiring).
     try {
@@ -712,6 +903,27 @@ window.onload = function() {
     if (nodes.ingestSpinner) { nodes.ingestSpinner.hidden = false; nodes.ingestSpinner.removeAttribute('aria-hidden'); }
     if (nodes.ingestPreviewText) { nodes.ingestPreviewText.textContent = 'Starting ingest...'; nodes.ingestPreviewText.classList.add('loading-placeholder'); }
     });
+    // also wire the top-right close buttons for the two modals
+    document.getElementById('ingest-close')?.addEventListener('click', () => { const m = document.getElementById('ingestModal'); if (m) { m.hidden = true; } });
+    document.getElementById('settings-close')?.addEventListener('click', () => { const m = document.getElementById('settings'); if (m) { m.hidden = true; } });
+
+    // clicking the overlay should cancel/close the modal as well
+    document.getElementById('ingest-cancel-overlay')?.addEventListener('click', () => { const m = document.getElementById('ingestModal'); if (m) { m.hidden = true; } });
+    document.getElementById('settings-cancel-overlay')?.addEventListener('click', () => { const m = document.getElementById('settings'); if (m) { m.hidden = true; } });
+
+    // close modals on Escape key
+    document.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Escape') {
+            try {
+                const im = document.getElementById('ingestModal');
+                const se = document.getElementById('settings');
+                if (im && !im.hidden) { im.hidden = true; }
+                if (se && !se.hidden) { se.hidden = true; }
+                // also close preset menu if open
+                try { if (nodes.presetBtn) { nodes.presetBtn.setAttribute('aria-expanded', 'false'); } if (nodes.presetMenu) { nodes.presetMenu.setAttribute('aria-hidden', 'true'); nodes.presetMenu.setAttribute('hidden', ''); } } catch (e) {}
+            } catch (e) { /* swallow */ }
+        }
+    });
 };
 
 function populateSettings(settings) {
@@ -736,11 +948,13 @@ function populateSettings(settings) {
     // thresholds may be provided normalized (flat) or as thresholds object
     const cfgThresholds = settings.thresholds || {};
     const maxFilesVal = (typeof settings.maxFiles !== 'undefined') ? settings.maxFiles : (cfgThresholds.maxFiles || defaults.maxFiles);
+    // maxTotalSizeVal is stored in bytes in settings; convert to MB for UI
     const maxTotalSizeVal = (typeof settings.maxTotalSizeBytes !== 'undefined') ? settings.maxTotalSizeBytes : (cfgThresholds.maxTotalSizeBytes || defaults.maxTotalSizeBytes);
     const tokenLimitVal = (typeof settings.tokenLimit !== 'undefined') ? settings.tokenLimit : (cfgThresholds.tokenLimit || defaults.tokenLimit);
     if (maxFilesNumber) { maxFilesNumber.value = String(maxFilesVal); }
     if (maxFilesRange) { maxFilesRange.value = String(Math.max(100, Math.min(50000, maxFilesVal))); }
-    if (maxTotalSizeNumber) { maxTotalSizeNumber.value = String(maxTotalSizeVal); }
+    // Display the number input in MB for user clarity
+    if (maxTotalSizeNumber) { maxTotalSizeNumber.value = String(Math.max(1, Math.round(maxTotalSizeVal / (1024 * 1024)))); }
     // Range uses MB for ergonomics
     if (maxTotalSizeRange) { maxTotalSizeRange.value = String(Math.max(1, Math.min(4096, Math.round(maxTotalSizeVal / (1024 * 1024))))); }
     if (tokenLimitNumber) { tokenLimitNumber.value = String(tokenLimitVal); }
@@ -753,7 +967,8 @@ function populateSettings(settings) {
         numberEl.addEventListener('change', () => { const nv = Number(numberEl.value) || 0; rangeEl.value = String(toNumber(nv)); });
     }
     wireRangeNumber(maxFilesRange, maxFilesNumber, v=>Math.max(100, Math.min(50000, v)), v=>Math.max(100, Math.min(50000, v)));
-    wireRangeNumber(maxTotalSizeRange, maxTotalSizeNumber, v=>Math.max(1, Math.min(4096, Math.round(v / (1024*1024)))), v=>v * (1024*1024));
+    // Keep both range and number in MB; persist as bytes when saving
+    wireRangeNumber(maxTotalSizeRange, maxTotalSizeNumber, v => Math.max(1, Math.min(4096, v)), v => Math.max(1, Math.min(4096, v)));
     wireRangeNumber(tokenLimitRange, tokenLimitNumber, v=>Math.max(256, Math.min(200000, v)), v=>Math.max(256, Math.min(200000, v)));
     const presetsEl = getEl('presets'); if (presetsEl) { presetsEl.value = Array.isArray(settings.presets) ? settings.presets.join(',') : (settings.presets || ''); }
 
@@ -784,7 +999,9 @@ function populateSettings(settings) {
             const redactionPlaceholder = (redactionPlaceholderEl && redactionPlaceholderEl.value) || undefined;
             // Read new limit controls
             const maxFiles = Number((document.getElementById('maxFilesNumber') || {}).value) || defaults.maxFiles;
-            const maxTotalSizeBytes = Number((document.getElementById('maxTotalSizeNumber') || {}).value) || defaults.maxTotalSizeBytes;
+            // maxTotalSizeNumber is presented to users in MB; convert to bytes for storage
+            const maxTotalSizeMB = Number((document.getElementById('maxTotalSizeNumber') || {}).value) || Math.round(defaults.maxTotalSizeBytes / (1024 * 1024));
+            const maxTotalSizeBytes = Math.max(1, Math.min(4096, Math.round(maxTotalSizeMB))) * (1024 * 1024);
             const tokenLimit = Number((document.getElementById('tokenLimitNumber') || {}).value) || defaults.tokenLimit;
             // Persist flattened threshold keys for simpler runtime access
             changes.maxFiles = maxFiles;

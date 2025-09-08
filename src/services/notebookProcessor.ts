@@ -114,8 +114,9 @@ export class NotebookProcessor {
     static toText(nb: ParsedNotebook, cfg: NotebookConfig & { notebookIncludeNonTextOutputs?: boolean, notebookNonTextOutputMaxBytes?: number }, relPath?: string, format?: 'markdown' | 'text'): string {
         if (!nb || !Array.isArray(nb.cells)) { return ''; }
         const lines: string[] = [];
-        const rel = relPath ?? '[notebook]';
-        const fmt = format ?? 'markdown';
+    const rel = relPath ?? '[notebook]';
+    const fmt = format ?? 'markdown';
+    const FENCE_MARKER = '__CODE_FENCE_TRIPLE__';
         lines.push(`# Jupyter Notebook: ${rel}\n`);
         let cellNum = 1;
         for (const cell of nb.cells) {
@@ -128,7 +129,8 @@ export class NotebookProcessor {
             }
             if (cell.type === 'code' && cfg.includeCodeCells) {
                 if (fmt === 'markdown') {
-                    lines.push(`\n\n${cfg.codeFenceLanguage || 'python'}\n${cell.source.trim()}\n`);
+                    // Use standard markdown fenced code blocks (triple backticks).
+                    lines.push(`\n\n${FENCE_MARKER}${cfg.codeFenceLanguage || 'python'}\n${cell.source.trim()}\n${FENCE_MARKER}`);
                 } else {
                     lines.push(`\n---\nCode Cell:\n${cell.source.trim()}\n`);
                 }
@@ -140,7 +142,8 @@ export class NotebookProcessor {
                             const label = outStr.substring(8, outStr.indexOf(']'));
                             const base64Content = outStr.substring(outStr.indexOf(']') + 1);
                             if (fmt === 'markdown') {
-                                lines.push(`\n\nbase64\n# Type: ${label}\n${base64Content}\n`);
+                                // Represent base64 blobs inside fenced blocks for readability.
+                                lines.push(`\n\n${FENCE_MARKER}base64\n# Type: ${label}\n${base64Content}\n${FENCE_MARKER}`);
                             } else {
                                 lines.push(`\n---\nBase64 Output (${label}):\n${base64Content}\n`);
                             }
@@ -161,8 +164,12 @@ export class NotebookProcessor {
             }
             cellNum++;
         }
-        // Replace any nonstandard fence markers with triple backticks
-        return lines.join('').replace(/[]{3}/g, '```');
+    // Use a unique constant marker for fence placeholders while assembling
+    // the output to avoid inserting raw backticks into intermediate
+    // strings (which can be brittle when post-processing). Replace the
+    // marker with actual triple-backticks once the document is assembled.
+        const doc = lines.join('');
+        return doc.replace(new RegExp(FENCE_MARKER, 'g'), '```');
     }
 
     /**

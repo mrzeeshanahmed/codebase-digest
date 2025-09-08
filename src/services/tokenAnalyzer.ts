@@ -23,10 +23,13 @@ export class TokenAnalyzer {
         // Use plugin if model is 'tiktoken' and plugin is available
         if (model === 'tiktoken') {
             try {
-                const { getTokenizer } = require('../plugins/index');
-                const tokenizer = getTokenizer('tiktoken');
-                if (typeof tokenizer === 'function') {
-                    return tokenizer(content, {});
+                // Prefer a synchronous require so callers that run in hot paths
+                // don't need to await an init promise. If optional adapter isn't
+                // present it'll throw and be ignored.
+                const plugins = require('../plugins/index');
+                if (plugins && typeof plugins.getTokenizer === 'function') {
+                    const tokenizer = plugins.getTokenizer('tiktoken');
+                    if (typeof tokenizer === 'function') { return tokenizer(content, {}); }
                 }
             } catch {}
         }

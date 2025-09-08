@@ -79,14 +79,16 @@ export class ContentProcessor {
             }
             return { content, isBinary: false };
         } catch (e) {
-            // Propagate typed FileReadError to allow the digest generator to
-            // collect it in result.errors and surface a single aggregated
-            // error section. For other errors, return empty content to allow
-            // generation to continue silently.
-        if (e instanceof internalErrors.FileReadError) {
-            throw e;
+            // Propagate typed FileReadError so the digest generator can
+            // collect it in per-file errors and present an aggregated report.
+            // For any other unexpected error, promote it to a FileReadError
+            // instead of silently swallowing the failure.
+            if (e instanceof internalErrors.FileReadError) {
+                throw e;
             }
-            return { content: '', isBinary: false };
+            // Ensure we throw a typed FileReadError so callers can distinguish
+            // read failures from other runtime errors and record them.
+            throw new internalErrors.FileReadError(filePath, String(e));
         }
     }
 

@@ -30,8 +30,8 @@ describe('OutputWriter streaming and cancel', () => {
     // Trigger cancellation shortly after write starts
   const writer = new OutputWriter();
     const largeOutput = 'X'.repeat(200000);
-    // Schedule cancel after a tick
-    setTimeout(() => emitProgress({ op: 'write', mode: 'cancel' }), 0);
+  // Schedule cancel after a short delay to avoid race conditions on slow CI
+  setTimeout(() => emitProgress({ op: 'write', mode: 'cancel' }), 20);
 
     await writer.write(largeOutput, { outputWriteLocation: 'file', outputFormat: 'text', streamingThresholdBytes: 1024, chunkSize: 65536 });
     expect(written).toContain('Digest canceled. Output may be incomplete.');

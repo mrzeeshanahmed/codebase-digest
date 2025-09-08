@@ -3,10 +3,13 @@ import * as path from 'path';
 import { CodebaseDigestTreeProvider } from './treeDataProvider';
 import { onProgress } from './eventBus';
 import { setWebviewHtml, wireWebviewMessages } from './webviewHelpers';
+import { Diagnostics } from '../utils/diagnostics';
+const diagnostics = new Diagnostics('debug');
 
 const panels: Map<string, CodebaseDigestPanel> = new Map();
 let registeredDisposable: vscode.Disposable | undefined;
-const activeViews: Set<vscode.WebviewView> = new Set();
+// Track active sidebar views and their associated folderPath so broadcasts can be scoped.
+const activeViews: Map<vscode.WebviewView, string> = new Map();
 
 export class CodebaseDigestPanel {
     private panel?: vscode.WebviewPanel;
@@ -19,8 +22,12 @@ export class CodebaseDigestPanel {
     // - new CodebaseDigestPanel(context, extensionUri, treeProvider, folderPath)
     // - legacy: new CodebaseDigestPanel(extensionUri, treeProvider, folderPath)
     constructor(contextOrExtensionUri: any, extensionUriOrTreeProvider?: any, treeProviderOrFolderPath?: any, folderPathArg?: any) {
-        // Detect whether the first argument is an ExtensionContext (has workspaceState/subscriptions)
-        if (contextOrExtensionUri && typeof contextOrExtensionUri === 'object' && ('workspaceState' in contextOrExtensionUri || 'subscriptions' in contextOrExtensionUri)) {
+        // Detect whether the first argument is an ExtensionContext by duck-typing useful members.
+        // Some test harnesses may provide partial contexts; prefer checking for 'subscriptions' (array)
+        // and workspaceState having 'get' as a function to be robust across environments.
+        if (contextOrExtensionUri && typeof contextOrExtensionUri === 'object'
+            && Array.isArray((contextOrExtensionUri as any).subscriptions)
+            && (contextOrExtensionUri as any).workspaceState && typeof (contextOrExtensionUri as any).workspaceState.get === 'function') {
             this.context = contextOrExtensionUri as vscode.ExtensionContext;
             this.extensionUri = extensionUriOrTreeProvider as vscode.Uri;
             this.treeProvider = treeProviderOrFolderPath as CodebaseDigestTreeProvider;
@@ -45,7 +52,7 @@ export class CodebaseDigestPanel {
         });
     this.setHtml(this.panel.webview);
     // Send current configuration to webview immediately so settings UI is populated
-    try { this.postConfig(); } catch (e) { /* swallow */ }
+    try { this.postConfig(); } catch (e) { try { diagnostics.error('postConfig failed', String((e && ((e as any).stack || (e as any).message)) || e)); } catch {} }
         // Wire message routing via shared helper so panel and view remain consistent
     wireWebviewMessages(this.panel.webview, this.treeProvider, this.folderPath, async (changes: Record<string, any>) => {
             await this.applyConfigChanges(changes);
@@ -60,31 +67,31 @@ export class CodebaseDigestPanel {
     this.treeProvider.setPreviewUpdater(() => debouncedPostDelta());
     // Forward progress events to the webview
     const disposeProgress = onProgress(e => {
-        if (this.panel) {
-            this.panel.webview.postMessage({ type: 'progress', event: e });
+                if (this.panel) {
+            try { this.panel.webview.postMessage({ type: 'progress', event: e }); } catch (e) { try { diagnostics.warn('postMessage progress failed', e); } catch {} }
         }
     });
     // Post an immediate preview delta when scans start or end so chips update promptly
     const scanProgressDisp = onProgress((ev: any) => {
-        try {
+                try {
             // Only update preview chips when a scan completes (end) to avoid noisy updates on start
-            if (ev && ev.op === 'scan' && ev.mode === 'end') {
-                try { this.postPreviewDelta(); } catch (inner) { /* ignore */ }
+                if (ev && ev.op === 'scan' && ev.mode === 'end') {
+                try { this.postPreviewDelta(); } catch (inner) { try { diagnostics.warn('postPreviewDelta failed', inner); } catch {} }
             }
-        } catch (ex) { /* ignore */ }
+        } catch (ex) { try { diagnostics.error('scanProgress dispatch failed', ex); } catch {} }
     });
     // Send initial full state only if a scan has already populated data; otherwise wait for scan completion to avoid empty first-paint
     try {
         const previewNow = this.treeProvider.getPreviewData();
         if (previewNow && typeof previewNow.totalFiles === 'number' && previewNow.totalFiles > 0) {
-            this.postPreviewState();
+            try { this.postPreviewState(); } catch (e) { try { diagnostics.warn('postPreviewState failed', e); } catch {} }
         }
-    } catch (e) { /* ignore */ }
+    } catch (e) { try { diagnostics.warn('getting previewNow failed', e); } catch {} }
     // Periodic heartbeat to refresh stats every 5s
     const interval = setInterval(() => this.postPreviewDelta(), 5000);
     this.panel.onDidDispose(() => { clearInterval(interval); });
-    this.panel.onDidDispose(() => { disposeProgress(); });
-    this.panel.onDidDispose(() => { try { scanProgressDisp(); } catch (e) { /* ignore */ } });
+    this.panel.onDidDispose(() => { try { disposeProgress(); } catch (e) { try { diagnostics.warn('disposeProgress failed', e); } catch {} } });
+    this.panel.onDidDispose(() => { try { scanProgressDisp(); } catch (e) { try { diagnostics.warn('scanProgressDisp failed', e); } catch {} } });
     }
 
         private async postConfig() {
@@ -232,8 +239,8 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                 webviewView.webview.postMessage(payload);
             } catch (e) { /* ignore */ }
 
-            // track active view so we can broadcast messages to it later
-            try { activeViews.add(webviewView); } catch (e) {}
+            // track active view so we can broadcast messages to it later (store advertised folderPath)
+            try { activeViews.set(webviewView, treeProvider['workspaceRoot'] || ''); } catch (e) {}
 
             // Use shared wiring helper for sidebar messages as well
             wireWebviewMessages(webviewView.webview, treeProvider, treeProvider['workspaceRoot'] || '', async (changes: Record<string, any>) => {
@@ -286,7 +293,7 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                 let lastEvent: any = null;
                 const ms = 200; // minimum interval between posts
                 const send = (ev: any) => {
-                    try { webviewView.webview.postMessage({ type: 'progress', event: ev }); } catch (e) { /* swallow */ }
+                    try { webviewView.webview.postMessage({ type: 'progress', event: ev }); } catch (e) { try { console.warn('codebasePanel: post progress failed', e); } catch {} }
                 };
                 const disposeProgress = onProgress((ev) => {
                     const now = Date.now();
@@ -307,7 +314,7 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                 });
                 // Ensure disposal when the view is closed
                 webviewView.onDidDispose(() => {
-                    try { disposeProgress(); } catch (e) { /* ignore */ }
+                    try { disposeProgress(); } catch (e) { try { console.warn('codebasePanel: disposeProgress failed', e); } catch {} }
                     if (pending) { clearTimeout(pending); pending = null; }
                 });
             })();
@@ -317,7 +324,7 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                 const preview = treeProvider.getPreviewData();
                 const delta = { selectedCount: preview.selectedCount, totalFiles: preview.totalFiles, selectedSize: preview.selectedSize, tokenEstimate: preview.tokenEstimate, contextLimit: preview.contextLimit, fileTree: preview.fileTree, selectedPaths: Array.isArray(preview.selectedPaths) ? preview.selectedPaths : [] };
                 webviewView.webview.postMessage({ type: 'previewDelta', delta });
-            } catch (e) { /* ignore */ }
+            } catch (e) { try { console.warn('codebasePanel: post previewDelta failed', e); } catch {} }
 
             // Hook into treeProvider progress to post preview deltas when scans start/end
             const scanProgressDisp = onProgress((ev: any) => {
@@ -341,7 +348,7 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
             }, 5000);
             webviewView.onDidDispose(() => clearInterval(interval));
             webviewView.onDidDispose(() => { try { scanProgressDisp(); } catch (e) {} });
-            webviewView.onDidDispose(() => { try { activeViews.delete(webviewView); } catch (e) {} });
+                webviewView.onDidDispose(() => { try { activeViews.delete(webviewView); } catch (e) {} });
         }
     };
     try {
@@ -365,11 +372,12 @@ export function broadcastGenerationResult(result: any, folderPath?: string) {
             }
         } catch (e) { /* ignore */ }
     }
-    // Post to active sidebar views
-    for (const vw of activeViews) {
+    // Post to active sidebar views (filter by folderPath when provided)
+    for (const [vw, vwFolder] of activeViews.entries()) {
         try {
-            // If folderPath is provided, only send to views that advertised that folderPath in their initial config message
-            vw.webview.postMessage({ type: 'generationResult', result });
+            if (!folderPath || vwFolder === folderPath) {
+                vw.webview.postMessage({ type: 'generationResult', result });
+            }
         } catch (e) { /* ignore */ }
     }
 }
@@ -387,10 +395,12 @@ export function broadcastPreviewDelta(delta: any, folderPath?: string) {
         }
     } catch (e) { /* ignore */ }
     try {
-        // Post to active sidebar views (best-effort, no folder filtering available here)
-        for (const vw of activeViews) {
+        // Post to active sidebar views, filtered by folderPath when provided
+        for (const [vw, vwFolder] of activeViews.entries()) {
             try {
-                vw.webview.postMessage({ type: 'previewDelta', delta });
+                if (!folderPath || vwFolder === folderPath) {
+                    vw.webview.postMessage({ type: 'previewDelta', delta });
+                }
             } catch (e) { /* ignore */ }
         }
     } catch (e) { /* ignore */ }

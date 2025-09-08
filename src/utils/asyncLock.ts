@@ -20,12 +20,32 @@ export class Mutex {
     }
 
     private _release() {
-        const next = this._waiters.shift();
-        if (next) {
-            // call next to resolve its promise and transfer lock
-            try { next(); } catch (e) { /* swallow */ }
-        } else {
-            this._locked = false;
+        // Attempt to hand off the lock to the next queued waiter. If a waiter
+        // callback throws synchronously we log and try the next waiter. We keep
+        // the lock logically occupied while there are remaining waiters so new
+        // callers can't acquire it out-of-order. Only when the queue is empty
+        // do we mark the mutex as unlocked.
+        while (true) {
+            const next = this._waiters.shift();
+            if (!next) {
+                // No queued waiters: release the lock
+                this._locked = false;
+                return;
+            }
+            try {
+                // Calling the waiter will resolve its promise and the waiter
+                // callback is responsible for setting _locked = true when it
+                // becomes the holder.
+                next();
+                // Successful handoff — the lock is now owned by the waiter.
+                return;
+            } catch (e) {
+                try { console.warn('asyncLock: next() callback failed', e); } catch {}
+                // Continue the loop and try the next waiter. Do not change
+                // this._locked here — the lock remains logically held until a
+                // waiter successfully takes it or the queue is exhausted.
+                continue;
+            }
         }
     }
 }

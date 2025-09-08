@@ -7,23 +7,118 @@ import * as path from 'path';
 export function setWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri) {
     const fs = require('fs');
     const indexPath = path.join(extensionUri.fsPath, 'resources', 'webview', 'index.html');
-    let html = fs.readFileSync(indexPath, 'utf8');
+    let html: string;
+    try {
+        html = fs.readFileSync(indexPath, 'utf8');
+    } catch (e) {
+        // Fail open with a minimal HTML so the extension doesn't crash the host if resources are missing
+        try {
+            webview.html = `<html><body><h2>Extension resource missing</h2><pre>${String(e)}</pre></body></html>`;
+        } catch (_) {
+            // best-effort: if even assigning html fails, swallow to avoid extension crash
+        }
+        return;
+    }
+    // Rewrite <link> tags but skip absolute, data, or already-webview URIs
     html = html.replace(/<link\s+[^>]*href="([^"]+)"[^>]*>/g, (m: string, href: string) => {
-        const uri = webview.asWebviewUri(vscode.Uri.file(path.join(extensionUri.fsPath, 'resources', 'webview', href)));
-        return m.replace(href, uri.toString());
+        try {
+            if (/^(https?:|data:|vscode-resource:|vscode-webview-resource:)/i.test(href) || href.indexOf(webview.cspSource) !== -1) {
+                return m;
+            }
+            const uri = webview.asWebviewUri(vscode.Uri.file(path.join(extensionUri.fsPath, 'resources', 'webview', href)));
+            return m.replace(href, uri.toString());
+        } catch (e) { return m; }
     });
+
+    // Rewrite <script src=> tags but skip absolute, data, or already-webview URIs
     html = html.replace(/<script\s+[^>]*src="([^"]+)"[^>]*>/g, (m: string, src: string) => {
-        const uri = webview.asWebviewUri(vscode.Uri.file(path.join(extensionUri.fsPath, 'resources', 'webview', src)));
-        return m.replace(src, uri.toString());
+        try {
+            if (/^(https?:|data:|vscode-resource:|vscode-webview-resource:)/i.test(src) || src.indexOf(webview.cspSource) !== -1) {
+                return m;
+            }
+            const uri = webview.asWebviewUri(vscode.Uri.file(path.join(extensionUri.fsPath, 'resources', 'webview', src)));
+            return m.replace(src, uri.toString());
+        } catch (e) { return m; }
     });
-    // Rewrite image src attributes to use the webview asWebviewUri so resources are loaded from the local webview root
-    html = html.replace(/<img\s+[^>]*src="([^"]+)"[^>]*>/g, (m: string, src: string) => {
-        const uri = webview.asWebviewUri(vscode.Uri.file(path.join(extensionUri.fsPath, 'resources', 'webview', src)));
-        return m.replace(src, uri.toString());
+    // Rewrite image src attributes to use the webview asWebviewUri so resources are loaded from the local webview root.
+    // Match single- or double-quoted src attributes and self-closing tags consistently.
+    html = html.replace(/<img\s+[^>]*src=(['"])(.*?)\1[^>]*\/?>/gi, (m: string, quote: string, src: string) => {
+        try {
+            // Pass through absolute, data, or already-webview URIs unchanged
+            if (/^(https?:|data:|vscode-resource:|vscode-webview-resource:)/i.test(src) || src.indexOf(webview.cspSource) !== -1) {
+                return m;
+            }
+
+            // Normalize slashes for matching (handle Windows backslashes)
+            const normalized = src.replace(/\\/g, '/');
+
+            let resolved: string;
+            // Detect patterns like ../icons/... or ../../icons/... and map to resources/icons/...
+            const iconsMatch = normalized.match(/^(?:\.\.\/)+icons(?:\/(.*))?$/i);
+            if (iconsMatch) {
+                const rel = iconsMatch[1] || '';
+                resolved = path.join(extensionUri.fsPath, 'resources', 'icons', rel);
+            } else {
+                // Default: resolve relative to resources/webview
+                resolved = path.join(extensionUri.fsPath, 'resources', 'webview', normalized);
+            }
+            const uri = webview.asWebviewUri(vscode.Uri.file(resolved));
+            // Replace only the src attribute value, preserving the original quoting and other attributes
+            return m.replace(new RegExp(`src=${quote}${escapeRegExp(src)}${quote}`), `src=${quote}${uri.toString()}${quote}`);
+        } catch (e) {
+            // If rewriting fails, leave the tag unchanged to avoid breaking the page
+            return m;
+        }
     });
+
+    // Helper to escape regex metacharacters for safe replacement
+    function escapeRegExp(s: string) {
+        return s.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&');
+    }
+    // Remove any existing CSP meta tags (including those our helper may have injected previously).
     html = html.replace(/<meta[^>]+http-equiv=['"]?Content-Security-Policy['"]?[^>]*>/gi, '');
-    const cspMeta = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src ${webview.cspSource}; style-src ${webview.cspSource}; img-src ${webview.cspSource};">`;
-    html = html.replace(/<head[^>]*>/i, (match: string) => `${match}${cspMeta}`);
+    // Ensure there is only one <head> opening tag: keep the first and remove duplicates to avoid malformed HTML
+    const headMatches = [] as {match:string, idx:number}[];
+    let hMatch: RegExpExecArray | null;
+    const headRe = /<head\b[^>]*>/gi;
+    while ((hMatch = headRe.exec(html)) !== null) { headMatches.push({match: hMatch[0], idx: hMatch.index}); }
+    if (headMatches.length > 1) {
+        // preserve first occurrence, remove others
+        const firstIdx = headMatches[0].idx;
+        html = html.replace(/<head\b[^>]*>/gi, (m:string, offset:number) => offset === firstIdx ? m : '<!-- duplicate <head> removed -->');
+    }
+
+    // Generate a nonce for any inline <style> or <script> we might need to allow.
+    // CSP nonces are base64; using crypto for secure randomness.
+    try {
+        const crypto = require('crypto');
+        const nonce = crypto.randomBytes(16).toString('base64');
+        // Attach nonce attribute to any inline <style> tags so they are allowed by the CSP nonce.
+        html = html.replace(/<style(\s[^>]*)?>/gi, (m: string, attrs: string) => {
+            // if nonce already present, leave unchanged
+            if (attrs && /nonce\s*=/.test(attrs)) { return m; }
+            const rest = attrs || '';
+            return `<style${rest} nonce="${nonce}">`;
+        });
+        // Attach nonce to any <script> tags (inline or with src). Scripts with src are already allowed via cspSource.
+        html = html.replace(/<script(\s[^>]*)?>/gi, (m: string, attrs: string) => {
+            if (attrs && /nonce\s*=/.test(attrs)) { return m; }
+            const rest = attrs || '';
+            return `<script${rest} nonce="${nonce}">`;
+        });
+
+    const cspMeta = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src ${webview.cspSource} 'nonce-${nonce}'; style-src ${webview.cspSource} 'nonce-${nonce}'; img-src ${webview.cspSource} data:;">`;
+        // Inject CSP only if there isn't already one (idempotent across repeated calls)
+        if (!/Content-Security-Policy/i.test(html)) {
+            html = html.replace(/<head[^>]*>/i, (match: string) => `${match}${cspMeta}`);
+        }
+    } catch (e) {
+        // If crypto isn't available for any reason, fall back to prior strict CSP without nonce.
+    const cspMeta = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src ${webview.cspSource}; style-src ${webview.cspSource}; img-src ${webview.cspSource} data:;">`;
+        if (!/Content-Security-Policy/i.test(html)) {
+            html = html.replace(/<head[^>]*>/i, (match: string) => `${match}${cspMeta}`);
+        }
+    }
     webview.html = html;
 }
 
@@ -35,25 +130,44 @@ export function wireWebviewMessages(webview: vscode.Webview, treeProvider: any, 
             const key = `codebaseDigest:webviewState:${folderPath || 'global'}`;
             const stored = context.workspaceState.get(key);
             if (stored) {
-                try { webview.postMessage({ type: 'restoredState', state: stored }); } catch (e) { /* swallow */ }
+                try { webview.postMessage({ type: 'restoredState', state: stored }); } catch (e) { try { console.warn('webviewHelpers: post restoredState failed', stringifyError(e)); } catch {} }
             }
         }
-    } catch (e) { /* ignore workspaceState errors */ }
+    } catch (e) { try { console.warn('webviewHelpers: workspaceState.update failed', stringifyError(e)); } catch {} }
+
+    // Note: Webview doesn't provide a standard onDidDispose API here. We rely on
+    // capped retries and clearing timers when selection is successfully applied
+    // to avoid infinite background retries. Host providers can augment disposal
+    // handling if they expose a panel/window lifecycle to clear timers earlier.
 
     webview.onDidReceiveMessage((msg: any) => processWebviewMessage(msg, webview, treeProvider, folderPath, onConfigSet, onGetState, context));
 }
 
+function stringifyError(e: any): string {
+    try {
+        if (!e) { return String(e); }
+        if (typeof e === 'string') { return e; }
+        if (e && typeof e === 'object') { return String((e.stack || e.message) || JSON.stringify(e)); }
+        return String(e);
+    } catch (_) { try { return String(e); } catch { return '[unserializable error]'; } }
+}
+
 export async function processWebviewMessage(msg: any, webview: vscode.Webview, treeProvider: any, folderPath: string, onConfigSet: (changes: Record<string, any>) => Promise<void>, onGetState?: () => void, context?: vscode.ExtensionContext) {
+    // Basic validation: ensure msg is an object
+    if (!msg || typeof msg !== 'object') { return; }
+    // Whitelist top-level message types we handle to avoid accidental/hostile payloads
+    const allowedTypes = new Set(['getState', 'persistState', 'configRequest', 'config', 'action']);
+    if (!allowedTypes.has(msg.type)) { return; }
     if (msg.type === 'getState') {
         if (onGetState) { onGetState(); }
         return;
     }
     // Allow webview to persist lightweight UI state (e.g., last-selected files)
-    if (msg.type === 'persistState' && msg.state && context) {
+        if (msg.type === 'persistState' && msg.state && context) {
         try {
             const key = `codebaseDigest:webviewState:${folderPath || 'global'}`;
             context.workspaceState.update(key, msg.state);
-        } catch (e) { /* swallow */ }
+    } catch (e) { try { console.warn('webviewHelpers: workspaceState.update failed', stringifyError(e)); } catch {} }
         return;
     }
     if (msg.type === 'configRequest') {
@@ -66,7 +180,8 @@ export async function processWebviewMessage(msg: any, webview: vscode.Webview, t
         const maxTotalSizeBytes = cfg.get('maxTotalSizeBytes', thresholds.maxTotalSizeBytes || thresholdsDefault.maxTotalSizeBytes) as number;
         const tokenLimit = cfg.get('tokenLimit', thresholds.tokenLimit || thresholdsDefault.tokenLimit) as number;
 
-        webview.postMessage({ type: 'config', folderPath: folder, settings: {
+        try {
+            webview.postMessage({ type: 'config', folderPath: folder, settings: {
             // normalized key names (preferred)
             respectGitignore: cfg.get('respectGitignore', cfg.get('gitignore', true)),
             presets: cfg.get('presets', []),
@@ -83,12 +198,27 @@ export async function processWebviewMessage(msg: any, webview: vscode.Webview, t
             showRedacted: cfg.get('showRedacted', false),
             redactionPatterns: cfg.get('redactionPatterns', []),
             redactionPlaceholder: cfg.get('redactionPlaceholder', '[REDACTED]')
-        }});
+            }});
+    } catch (e) { try { console.warn('webviewHelpers: post config failed', stringifyError(e)); } catch {} }
         return;
     }
     if (msg.type === 'config' && msg.action === 'set' && msg.changes) {
-        // delegate persistence to caller
-        (async () => { try { await onConfigSet(msg.changes); } catch (e) { /* swallow */ } })();
+        // Sanitize incoming changes: only allow known keys and simple scalar types
+        const safeKeys = ['respectGitignore','outputFormat','tokenModel','binaryFilePolicy','maxFiles','maxTotalSizeBytes','tokenLimit','presets','showRedacted','redactionPatterns','redactionPlaceholder'];
+        const safeChanges: Record<string, any> = {};
+            try {
+                for (const k of Object.keys(msg.changes || {})) {
+                if (!safeKeys.includes(k)) { continue; }
+                const v = msg.changes[k];
+                // Basic type checks
+                if (v === null || v === undefined) { safeChanges[k] = v; continue; }
+                if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') { safeChanges[k] = v; }
+                else if (Array.isArray(v)) { safeChanges[k] = v.slice(0, 100).map(x => (typeof x === 'string' ? x : String(x))); }
+                // ignore objects and functions
+            }
+            // delegate persistence to caller with sanitized payload
+            (async () => { try { await onConfigSet(safeChanges); } catch (e) { try { console.warn('webviewHelpers: onConfigSet failed', stringifyError(e)); } catch {} } })();
+        } catch (e) { /* swallow malformed changes */ }
         return;
     }
     if (msg.type === 'action') {
@@ -115,12 +245,12 @@ export async function processWebviewMessage(msg: any, webview: vscode.Webview, t
             try {
                 const cfg = vscode.workspace.getConfiguration('codebaseDigest', vscode.Uri.file(targetFolder || ''));
                 await cfg.update('filterPresets', [preset], vscode.ConfigurationTarget.Workspace);
-                try { if (treeProvider && typeof treeProvider.refresh === 'function') { treeProvider.refresh(); } } catch (e) { /* swallow */ }
-                try { webview.postMessage({ type: 'config', folderPath: targetFolder, settings: { filterPresets: cfg.get('filterPresets', []) } }); } catch (e) { /* swallow */ }
+                try { if (treeProvider && typeof treeProvider.refresh === 'function') { treeProvider.refresh(); } } catch (e) { try { console.warn('webviewHelpers: treeProvider.refresh failed', stringifyError(e)); } catch {} }
+                try { webview.postMessage({ type: 'config', folderPath: targetFolder, settings: { filterPresets: cfg.get('filterPresets', []) } }); } catch (e) { try { console.warn('webviewHelpers: post config failed', stringifyError(e)); } catch {} }
                 return;
             } catch (err) {
                 // fallback to command if direct persistence fails
-                try { await vscode.commands.executeCommand('codebaseDigest.applyPreset', targetFolder, preset); } catch (e) { /* swallow */ }
+                try { await vscode.commands.executeCommand('codebaseDigest.applyPreset', targetFolder, preset); } catch (e) { try { console.warn('webviewHelpers: applyPreset executeCommand failed', stringifyError(e)); } catch {} }
                 return;
             }
         }
@@ -141,9 +271,9 @@ export async function processWebviewMessage(msg: any, webview: vscode.Webview, t
         }
         if (msg.actionType === 'ingestRemote' && msg.repo) {
             const params = { repo: msg.repo, ref: msg.ref, subpath: msg.subpath, includeSubmodules: !!msg.includeSubmodules };
-            vscode.commands.executeCommand('codebaseDigest.ingestRemoteRepoProgrammatic', params).then((result: any) => {
-                try { webview.postMessage({ type: 'ingestPreview', payload: result }); } catch (e) { /* swallow */ }
-            }, (err: any) => { try { webview.postMessage({ type: 'ingestError', error: String(err) }); } catch (e) { /* swallow */ } });
+                vscode.commands.executeCommand('codebaseDigest.ingestRemoteRepoProgrammatic', params).then((result: any) => {
+                try { webview.postMessage({ type: 'ingestPreview', payload: result }); } catch (e) { try { console.warn('webviewHelpers: post ingestPreview failed', stringifyError(e)); } catch {} }
+            }, (err: any) => { try { webview.postMessage({ type: 'ingestError', error: String(err) }); } catch (e) { try { console.warn('webviewHelpers: post ingestError failed', stringifyError(e)); } catch {} } });
             return;
         }
 
@@ -159,15 +289,26 @@ export async function processWebviewMessage(msg: any, webview: vscode.Webview, t
                 const hasRoots = Array.isArray((treeProvider as any).rootNodes) ? ((treeProvider as any).rootNodes.length > 0) : (typeof totalFiles === 'number' ? totalFiles > 0 : undefined);
                 if (!hasRoots) {
                     // schedule a re-request of state for the webview to retry applying
-                    // persisted selection. Use a simple backoff with limited retries
-                    // to avoid infinite scheduling.
-                    const retryKey = '__cbd_sel_retry_count';
-                    const prev = (webview as any)[retryKey] || 0;
-                    if (prev < 6) {
-                        (webview as any)[retryKey] = prev + 1;
-                        setTimeout(() => {
-                            try { webview.postMessage({ type: 'getState' }); } catch (e) { /* swallow */ }
-                        }, 500 * (prev + 1));
+                    // persisted selection. Use a capped exponential backoff and store
+                    // the timer id on the webview so we don't schedule multiple timers
+                    // and so it can be implicitly cancelled if the webview is disposed.
+                    const retryCountKey = '__cbd_sel_retry_count';
+                    const retryTimerKey = '__cbd_sel_retry_timer';
+                    const prev = (webview as any)[retryCountKey] || 0;
+                    const maxRetries = 6;
+                    if (prev < maxRetries) {
+                        const next = prev + 1;
+                        (webview as any)[retryCountKey] = next;
+                        // exponential backoff base 2, min 500ms, capped at 5s
+                        const delay = Math.min(500 * Math.pow(2, next - 1), 5000);
+                        // clear any previously scheduled timer to avoid duplicates
+                        try { const prevTimer = (webview as any)[retryTimerKey]; if (prevTimer) { clearTimeout(prevTimer); } } catch (e) {}
+                        const tid = setTimeout(() => {
+                            try { webview.postMessage({ type: 'getState' }); } catch (e) { try { console.warn('webviewHelpers: post getState failed', stringifyError(e)); } catch {} }
+                            // clear stored timer id after it ran
+                            try { delete (webview as any)[retryTimerKey]; } catch (e) {}
+                        }, delay);
+                        try { (webview as any)[retryTimerKey] = tid; } catch (e) {}
                     }
                     // Defer setting selection until nodes exist
                     return;
@@ -176,7 +317,9 @@ export async function processWebviewMessage(msg: any, webview: vscode.Webview, t
 
             // provider appears to have roots; apply selection immediately
             treeProvider.setSelectionByRelPaths(msg.relPaths);
-            try { const preview = treeProvider.getPreviewData(); webview.postMessage({ type: 'state', state: preview }); } catch (e) { /* swallow */ }
+            // clear any scheduled retries now that selection has been applied
+            try { const retryTimerKey = '__cbd_sel_retry_timer'; const retryCountKey = '__cbd_sel_retry_count'; const prevTimer = (webview as any)[retryTimerKey]; if (prevTimer) { clearTimeout(prevTimer); delete (webview as any)[retryTimerKey]; } (webview as any)[retryCountKey] = 0; } catch (e) {}
+            try { const preview = treeProvider.getPreviewData(); webview.postMessage({ type: 'state', state: preview }); } catch (e) { try { console.warn('webviewHelpers: post state failed', stringifyError(e)); } catch {} }
             return;
         }
         if (msg.actionType === 'toggleExpand' && typeof msg.relPath === 'string') {

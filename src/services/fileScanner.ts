@@ -15,6 +15,8 @@ export class FileScanner {
     public lastStats?: TraversalStats;
     private gitignoreService: any;
     private diagnostics: any;
+    // Per-config runtime state to avoid mutating user/VSCode config objects which may be frozen/proxied
+    private runtimeState: WeakMap<any, { _overrides?: any, _warnedThresholds?: any }> = new WeakMap();
 
     constructor(gitignoreService: any, diagnostics: any) {
         this.gitignoreService = gitignoreService;
@@ -65,11 +67,41 @@ export class FileScanner {
         const matchesInclude = includePatterns.length === 0 ? true : includePatterns.some(p => minimatch(relPosix, p, { dot: true, nocase: false, matchBase: false }));
         const matchesExcludePattern = excludePatterns.some(p => minimatch(relPosix, p, { dot: true, nocase: false, matchBase: false }));
         const gitignoreIgnored = !!cfg.respectGitignore && this.gitignoreService.isIgnored(relPath, isDir);
+
+        // New semantics: for files, includePatterns (when present) override excludes/gitignore.
         if (!isDir) {
-            if (!matchesInclude || matchesExcludePattern || gitignoreIgnored) { stats.skippedByIgnore++; return true; }
+            if (includePatterns && includePatterns.length > 0) {
+                // If include patterns exist, only include files that match an include
+                if (!matchesInclude) { stats.skippedByIgnore++; return true; }
+                // If the file is gitignored, respect gitignore (do not override)
+                if (gitignoreIgnored) { stats.skippedByIgnore++; return true; }
+                // match found and not gitignored: include even if excluded by excludePatterns
+                return false;
+            }
+            // No include patterns: original semantics (exclude or gitignore cause skip)
+            if (matchesExcludePattern || gitignoreIgnored) { stats.skippedByIgnore++; return true; }
         } else {
+            // Directories: preserve original behavior for exclude patterns.
+            // Additionally: if a directory is gitignored and there are NO explicit negation
+            // patterns that reference this directory or any descendant, we can safely skip
+            // recursing into it to save IO. If any explicit negation exists that targets
+            // this dir or a child, we must recurse so the negation can take effect.
             if (matchesExcludePattern) { stats.skippedByIgnore++; return true; }
-            // allow recursion into gitignored directories to honor negations
+            if (gitignoreIgnored) {
+                try {
+                    const negs: string[] = typeof this.gitignoreService.listExplicitNegations === 'function' ? this.gitignoreService.listExplicitNegations() : [];
+                    const dirKey = String(relPosix || '').replace(/^\/+|\/+$/g, '');
+                    const hasNegation = negs.some(n => {
+                        const nn = String(n || '').replace(/^\/+|\/+$/g, '');
+                        if (!nn) { return false; }
+                        if (dirKey === '') { return true; } // conservatively assume root may be affected
+                        return nn === dirKey || nn.startsWith(dirKey + '/');
+                    });
+                    if (!hasNegation) { stats.skippedByIgnore++; return true; }
+                } catch (e) {
+                    // On any error while querying negations, be conservative and do not skip so negations are honoured.
+                }
+            }
         }
         return false;
     }
@@ -119,9 +151,11 @@ export class FileScanner {
         try { if (stats.totalFiles % 50 === 0) { emitProgress({ op: 'scan', mode: 'progress', determinate: true, percent: Math.min(100, Math.floor(sizePercent * 100)), message: 'Scanning (size)', totalFiles: stats.totalFiles, totalSize: stats.totalSize }); } } catch (e) {}
 
         if (sizePercent >= 1) {
-            const overrides = (cfg as any)._overrides || {};
+            const state = this.runtimeState.get(cfg) || {};
+            const overrides = state._overrides || {};
             if (overrides.allowSizeOnce) {
-                (cfg as any)._overrides = { ...overrides, allowSizeOnce: false };
+                state._overrides = { ...overrides, allowSizeOnce: false };
+                this.runtimeState.set(cfg, state);
             } else {
                 stats.skippedByTotalLimit++;
                 if (!stats.warnings.some(w => w.startsWith('Skipped file due to total size limit'))) {
@@ -131,23 +165,27 @@ export class FileScanner {
                 return { continueScan: false };
             }
         } else if (sizePercent >= 0.8) {
-            const warned = (cfg as any)._warnedThresholds && (cfg as any)._warnedThresholds.size;
+            const state = this.runtimeState.get(cfg) || {};
+            const warned = state._warnedThresholds && state._warnedThresholds.size;
             if (!warned) {
-                (cfg as any)._warnedThresholds = { ...(cfg as any)._warnedThresholds, size: true };
+                state._warnedThresholds = { ...(state._warnedThresholds || {}), size: true };
+                this.runtimeState.set(cfg, state);
                 const promptsEnabled = !!(cfg as any).promptsOnThresholds;
                 const isJest = !!process.env.JEST_WORKER_ID;
                 if (isJest || !promptsEnabled) {
                     if (!stats.warnings.some(w => w.startsWith('Approaching total size limit'))) {
                         stats.warnings.push(`Approaching total size limit: ${(sizePercent * 100).toFixed(0)}%`);
                     }
-                    (cfg as any)._overrides = { ...(cfg as any)._overrides, allowSizeOnce: true };
+                    state._overrides = { ...(state._overrides || {}), allowSizeOnce: true };
+                    this.runtimeState.set(cfg, state);
                 } else {
                     const pick = await vscode.window.showQuickPick([
                         { label: 'Override once and continue', id: 'override' },
                         { label: 'Cancel scan', id: 'cancel' }
                     ], { placeHolder: `Scanning would use ${(sizePercent * 100).toFixed(0)}% of maxTotalSizeBytes. Choose an action.`, ignoreFocusOut: true });
                     if (pick && pick.id === 'override') {
-                        (cfg as any)._overrides = { ...(cfg as any)._overrides, allowSizeOnce: true };
+                        state._overrides = { ...(state._overrides || {}), allowSizeOnce: true };
+                        this.runtimeState.set(cfg, state);
                     } else {
                         throw new Error('Cancelled');
                     }
@@ -160,29 +198,34 @@ export class FileScanner {
         try { if (stats.totalFiles % 50 === 0) { emitProgress({ op: 'scan', mode: 'progress', determinate: true, percent: Math.min(100, Math.floor(filePercent * 100)), message: 'Scanning (files)', totalFiles: stats.totalFiles, totalSize: stats.totalSize }); } } catch (e) {}
 
         if (stats.totalFiles >= cfg.maxFiles) {
-            const overrides = (cfg as any)._overrides || {};
+            const state = this.runtimeState.get(cfg) || {};
+            const overrides = state._overrides || {};
             if (overrides.allowFilesOnce) {
-                (cfg as any)._overrides = { ...overrides, allowFilesOnce: false };
+                state._overrides = { ...overrides, allowFilesOnce: false };
+                this.runtimeState.set(cfg, state);
                 return { continueScan: true };
             } else {
                 if (filePercent >= 0.8) {
-                    const warned = (cfg as any)._warnedThresholds && (cfg as any)._warnedThresholds.files;
+                    const warned = state._warnedThresholds && state._warnedThresholds.files;
                     if (!warned) {
-                        (cfg as any)._warnedThresholds = { ...(cfg as any)._warnedThresholds, files: true };
+                        state._warnedThresholds = { ...(state._warnedThresholds || {}), files: true };
+                        this.runtimeState.set(cfg, state);
                         const promptsEnabled = !!(cfg as any).promptsOnThresholds;
                         const isJest = !!process.env.JEST_WORKER_ID;
                         if (isJest || !promptsEnabled) {
                             if (!stats.warnings.some(w => w.startsWith('Approaching file count'))) {
                                 stats.warnings.push(`Approaching file count limit: ${(filePercent * 100).toFixed(0)}%`);
                             }
-                            (cfg as any)._overrides = { ...(cfg as any)._overrides, allowFilesOnce: true };
+                            state._overrides = { ...(state._overrides || {}), allowFilesOnce: true };
+                            this.runtimeState.set(cfg, state);
                         } else {
                             const pick = await vscode.window.showQuickPick([
                                 { label: 'Override once and continue', id: 'override' },
                                 { label: 'Cancel scan', id: 'cancel' }
                             ], { placeHolder: `Scanning has reached ${(filePercent * 100).toFixed(0)}% of maxFiles. Choose an action.`, ignoreFocusOut: true });
                             if (pick && pick.id === 'override') {
-                                (cfg as any)._overrides = { ...(cfg as any)._overrides, allowFilesOnce: true };
+                                state._overrides = { ...(state._overrides || {}), allowFilesOnce: true };
+                                this.runtimeState.set(cfg, state);
                             } else {
                                 throw new Error('Cancelled');
                             }
@@ -257,7 +300,7 @@ export class FileScanner {
         if (stats.totalFiles % 100 === 0) {
             try {
                 emitProgress({ op: 'scan', mode: 'progress', determinate: true, percent: 0, message: 'Scanning...', totalFiles: stats.totalFiles, totalSize: stats.totalSize });
-            } catch (e) { }
+            } catch (e) { try { this.diagnostics && this.diagnostics.warn ? this.diagnostics.warn('readDir failed', e) : console.warn('readDir failed', e); } catch {} }
         }
     }
 
@@ -303,7 +346,7 @@ export class FileScanner {
     // For scanning, strip user-provided negation patterns (starting with '!') so glob matching works as expected
     const scanCfg = { ...mergedCfg, excludePatterns: Array.from((mergedCfg.excludePatterns || []).filter((p: string) => !(typeof p === 'string' && p.startsWith('!')))) } as any;
     // DEBUG: log merged exclude/include patterns
-    try { console.debug('[FileScanner.scanRoot] mergedCfg.excludePatterns=', mergedCfg.excludePatterns, 'includePatterns=', mergedCfg.includePatterns); } catch (e) {}
+    try { console.debug('[FileScanner.scanRoot] mergedCfg.excludePatterns=', mergedCfg.excludePatterns, 'includePatterns=', mergedCfg.includePatterns); } catch (e) { try { this.diagnostics && this.diagnostics.debug && this.diagnostics.debug('scanRoot debug failed', String(e)); } catch {} }
         const start = Date.now();
     const nodes = await this.scanDir(rootPath, rootPath, 0, scanCfg, stats, token);
         stats.durationMs = Date.now() - start;
@@ -319,7 +362,7 @@ export class FileScanner {
                     if (Array.isArray((mergedCfg as any).excludePatterns) && (mergedCfg as any).excludePatterns.some((p: string) => p === '!' + n || p === n)) {
                         continue;
                     }
-                } catch (e) { }
+                } catch (e) { try { this.diagnostics && this.diagnostics.warn && this.diagnostics.warn('negation check failed', e); } catch {} }
                 const candidate = path.join(rootPath, n);
                 try {
                     if (fs.existsSync(candidate)) {
@@ -330,11 +373,11 @@ export class FileScanner {
                             const excludes: string[] = Array.isArray((mergedCfg as any).excludePatterns) ? (mergedCfg as any).excludePatterns : [];
                             const posExcludes = excludes.filter(p => typeof p === 'string' && !p.startsWith('!'));
                             if (posExcludes.some(p => {
-                                try { return minimatch(rel, p, { dot: true, nocase: false, matchBase: false }); } catch { return false; }
+                                try { return minimatch(rel, p, { dot: true, nocase: false, matchBase: false }); } catch (err) { return false; }
                             })) {
                                 continue;
                             }
-                        } catch (e) { }
+                        } catch (e) { try { this.diagnostics && this.diagnostics.warn && this.diagnostics.warn('exclude match failed', e); } catch {} }
                         // Ensure it exists in the hierarchical nodes; if absent, inject minimal node at correct place
                         const lstat = await fsPromises.lstat(candidate);
                         const inject: any = { path: candidate, relPath: rel, name: path.basename(candidate), type: lstat.isDirectory() ? 'directory' : 'file', size: lstat.size, mtime: lstat.mtime, depth: 0, isSelected: false, isBinary: false };
@@ -357,7 +400,7 @@ export class FileScanner {
                             parentList.push(inject);
                         }
                     }
-                } catch (e) { }
+                } catch (e) { try { this.diagnostics && this.diagnostics.warn && this.diagnostics.warn('inject negation candidate failed', e); } catch {} }
             }
         } catch (e) { }
         // Dedupe warnings but preserve first-occurrence detail: keep order and unique by prefix key
@@ -369,7 +412,7 @@ export class FileScanner {
         }
     // Replace stats.warnings with deduped list
     stats.warnings = deduped;
-    try { console.debug('[FileScanner.scanRoot] returning nodes count=', nodes.length, 'nodes=', nodes.map((n: any) => n.relPath || n.name)); } catch (e) {}
+    try { console.debug('[FileScanner.scanRoot] returning nodes count=', nodes.length, 'nodes=', nodes.map((n: any) => n.relPath || n.name)); } catch (e) { try { this.diagnostics && this.diagnostics.debug && this.diagnostics.debug('scanRoot returning debug failed', String(e)); } catch {} }
     return nodes;
     }
 

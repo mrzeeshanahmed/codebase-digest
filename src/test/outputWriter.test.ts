@@ -28,12 +28,18 @@ describe('OutputWriter progressive save', () => {
     const writer = new OutputWriter();
     try {
       const largeOutput = 'A'.repeat(200000);
-      // Start write in background and cancel shortly after
+      // Synchronize cancellation after first chunk is written
+      let firstChunkWritten = false;
+      fakeStream.write = (chunk: any) => {
+        written += String(chunk);
+        if (!firstChunkWritten) {
+          firstChunkWritten = true;
+          emitProgress({ op: 'write', mode: 'cancel' } as import('../providers/eventBus').ProgressEvent);
+        }
+        return true; // signal immediate success to the writer
+      };
       const writePromise = (writer as any).write(largeOutput, { outputWriteLocation: 'file', outputFormat: 'text', chunkSize: 65536, streamingThresholdBytes: 1 });
-      // Wait one tick then emit cancel
-      await new Promise(res => setTimeout(res, 0));
-      emitProgress({ op: 'write', mode: 'cancel' } as any);
-      await writePromise;
+  await writePromise;
     } finally {
       // restore
       fsModule.createWriteStream = origCreateWriteStream;

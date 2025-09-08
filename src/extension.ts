@@ -34,7 +34,7 @@ import { WorkspaceManager } from './services/workspaceManager';
 // DEPRECATED: PreviewPanel import removed.
 
 export function activate(context: vscode.ExtensionContext) {
-	try { console.log('[codebase-digest] activate() called'); } catch (e) {}
+try { console.log('[codebase-digest] activate() called'); } catch (e) { try { console.debug('extension.activate log failed', e); } catch {} }
 	// Ensure the sidebar view has a provider as early as possible so VS Code doesn't report "no data provider"
 	try {
 		const { registerCodebaseView } = require('./providers/codebasePanel');
@@ -128,14 +128,14 @@ export function activate(context: vscode.ExtensionContext) {
 	return undefined;
 	}
 	const workspaceFolders = vscode.workspace.workspaceFolders;
-	try { console.log('[codebase-digest] workspaceFolders=', workspaceFolders && workspaceFolders.map(f => f.uri.fsPath)); } catch (e) {}
+	try { console.log('[codebase-digest] workspaceFolders=', workspaceFolders && workspaceFolders.map(f => f.uri.fsPath)); } catch (e) { try { console.debug('extension.workspaceFolders log failed', e); } catch {} }
 	const workspaceManager = new WorkspaceManager(workspaceFolders);
 	// Create a tree provider per folder
 	const treeProviders: Map<string, CodebaseDigestTreeProvider> = new Map();
 
 	if (workspaceFolders && workspaceFolders.length > 0) {
 		for (const folder of workspaceFolders) {
-			try { console.log('[codebase-digest] registering provider for folder', folder.uri.fsPath); } catch (e) {}
+			try { console.log('[codebase-digest] registering provider for folder', folder.uri.fsPath); } catch (e) { try { console.debug('extension.register provider log failed', e); } catch {} }
 			const services = workspaceManager.getBundleForFolder(folder);
 			if (!services) { continue; }
 			const treeProvider = new CodebaseDigestTreeProvider(folder, services);
@@ -525,6 +525,8 @@ export function activate(context: vscode.ExtensionContext) {
 	}
 	for (const [folderPath, treeProvider] of treeProviders.entries()) {
 	(treeProvider as any).viewTitleSetter = () => updateCounts(folderPath);
+	// Ensure provider has access to the shared status bar item for UI updates
+	try { (treeProvider as any).statusBarItem = statusBar; } catch (e) { /* ignore */ }
 	treeProvider.setPreviewUpdater(() => updateCounts(folderPath));
 	treeProvider.updateViewTitle();
 	updateCounts(folderPath);

@@ -12,7 +12,13 @@ export interface SpawnOptions {
  */
 export function spawnGitPromise(args: string[], opts?: SpawnOptions): Promise<{ stdout: string; stderr: string }>{
     return new Promise((resolve, reject) => {
-        const proc = spawn('git', args, opts as any);
+        // Basic validation: ensure args is an array of simple tokens (no control characters or shell metacharacters)
+        if (!Array.isArray(args)) { return reject(new Error('Invalid git args')); }
+        for (const a of args) {
+            if (typeof a !== 'string') { return reject(new Error('Invalid git arg type')); }
+            if (/[*`$<>|;&\\\n\r]/.test(a)) { return reject(new Error('Suspicious characters in git args')); }
+        }
+        const proc = spawn('git', args, Object.assign({}, opts || {}, { shell: false }) as any);
         let out = '';
         let err = '';
         if (proc.stdout) {
@@ -48,8 +54,37 @@ export async function safeFetch(input: any, init?: any): Promise<any> {
         return res;
     } catch (e: any) {
         const msg = scrubTokens(String(e && e.message ? e.message : e));
-        throw new Error(msg);
+        // Avoid leaking raw header values. If caller provided init/headers include a scrubbed summary.
+        try {
+            const safeHdrs = scrubHeaders(init);
+            const detail = safeHdrs ? ` [headers: ${safeHdrs}]` : '';
+            throw new Error(msg + detail);
+        } catch (_) {
+            throw new Error(msg);
+        }
     }
+}
+
+/**
+ * Produce a scrubbed, one-line summary of request headers suitable for diagnostics.
+ * Header values are passed through scrubTokens to remove tokens before including.
+ */
+export function scrubHeaders(init?: any): string {
+    try {
+        if (!init || !init.headers) { return ''; }
+        const headers = init.headers as any;
+        const parts: string[] = [];
+        if (typeof headers.forEach === 'function') {
+            try {
+                headers.forEach((v: any, k: string) => { parts.push(`${k}: ${scrubTokens(String(v))}`); });
+            } catch (_) { /* ignore iteration errors */ }
+        } else if (typeof headers === 'object') {
+            for (const k of Object.keys(headers)) {
+                try { parts.push(`${k}: ${scrubTokens(String((headers as any)[k]))}`); } catch (_) { parts.push(k + ': [unavailable]'); }
+            }
+        }
+        return parts.join(', ');
+    } catch (_) { return ''; }
 }
 
 export default { spawnGitPromise, safeFetch };

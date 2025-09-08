@@ -16,7 +16,16 @@ export function computePreviewState(rootNodes: FileNode[], selectedFiles: FileNo
     // This avoids heavy I/O while producing meaningful counts for the UI.
     let tokenEstimate = 0;
     if (selectedFiles.length === 0) {
-        tokenEstimate = 0;
+        // No explicit selection: fall back to a workspace-level heuristic so the UI
+        // (preview delta / banner) can show a meaningful token estimate.
+        // Prefer the fileScanner's lastStats.totalSize (accurate) when available,
+        // otherwise leave as 0.
+        const totalSize = fileScanner?.lastStats?.totalSize;
+        if (typeof totalSize === 'number' && totalSize > 0) {
+            tokenEstimate = Math.ceil(totalSize / 4);
+        } else {
+            tokenEstimate = 0;
+        }
     } else {
         for (const f of selectedFiles) {
             if (typeof f.size === 'number' && f.size > 0) {

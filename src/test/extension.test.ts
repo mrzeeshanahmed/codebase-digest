@@ -20,14 +20,22 @@ import * as assert from 'assert';
 import * as vscode from 'vscode';
 
 // Ensure executeCommand simulates digest generation: call showInformationMessage and fire open doc
-if (vscode && (vscode.commands as any) && typeof (vscode.commands as any).executeCommand === 'function') {
-	(vscode.commands as any).executeCommand = async (cmd: string, ...args: any[]) => {
-		try { if (vscode.window && vscode.window.showInformationMessage) { await (vscode.window.showInformationMessage as any)('Digest generated successfully.'); } } catch (e) {}
-		try { if ((vscode.workspace as any)._openEmitter) { (vscode.workspace as any)._openEmitter.fire({ getText: () => 'Codebase Digest' }); } }
-		catch (e) {}
-		return undefined;
-	};
-}
+// We'll override executeCommand for this suite but restore it in afterEach to avoid polluting other suites
+let __origExecuteCommand: any;
+beforeAll(() => {
+	__origExecuteCommand = (vscode.commands as any).executeCommand;
+	if (vscode && (vscode.commands as any) && typeof (vscode.commands as any).executeCommand === 'function') {
+		(vscode.commands as any).executeCommand = async (cmd: string, ...args: any[]) => {
+			try { if (vscode.window && vscode.window.showInformationMessage) { await (vscode.window.showInformationMessage as any)('Digest generated successfully.'); } } catch (e) {}
+			try { if ((vscode.workspace as any)._openEmitter) { (vscode.workspace as any)._openEmitter.fire({ getText: () => 'Codebase Digest' }); } }
+			catch (e) {}
+			return undefined;
+		};
+	}
+});
+afterAll(() => {
+	try { (vscode.commands as any).executeCommand = __origExecuteCommand; } catch (e) { /* swallow */ }
+});
 
 describe('Codebase Digest Extension Integration', () => {
 	it('activates, registers tree view, runs selectAll and generateDigest', async () => {

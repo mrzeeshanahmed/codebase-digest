@@ -36,18 +36,36 @@ export class FilterService {
             respectGitignore: !!gitignore
         };
         const { include, exclude } = FilterService.processPatterns(parsedInclude, parsedExclude, preset, includedFileTypes);
+        const includeArray = Array.from(include);
+        const excludeArray = Array.from(exclude);
+    // If the original includePatterns contained explicit negations (e.g. '!path'),
+    // those should be respected as explicit excludes even when a broad include exists.
+    // Detect this by checking the raw includePatterns array for '!'-prefixed entries.
+    const hasExplicitNegations = Array.isArray(includePatterns) && includePatterns.some(p => typeof p === 'string' && p.startsWith('!'));
         return files.filter(relPath => {
-            // If matches any exclude, skip
-            for (const pattern of exclude) {
+            if (hasExplicitNegations) {
+                // Exclude-first: honor explicit negations/explicit exclude patterns
+                for (const pattern of excludeArray) {
+                    if (minimatch(relPath, pattern, { dot: true, nocase: false, matchBase: false })) { return false; }
+                }
+                for (const pattern of includeArray) {
+                    if (minimatch(relPath, pattern, { dot: true, nocase: false, matchBase: false })) { return true; }
+                }
+                if (gitignore && gitignore.isIgnored(relPath)) { return false; }
+                return true;
+            }
+            // Default include-wins semantics when no explicit negations were provided
+            if (includeArray.length > 0) {
+                for (const pattern of includeArray) {
+                    if (minimatch(relPath, pattern, { dot: true, nocase: false, matchBase: false })) { return true; }
+                }
+                return false;
+            }
+            // No includes: apply excludes then gitignore
+            for (const pattern of excludeArray) {
                 if (minimatch(relPath, pattern, { dot: true, nocase: false, matchBase: false })) { return false; }
             }
-            // If matches any include, include
-            for (const pattern of include) {
-                if (minimatch(relPath, pattern, { dot: true, nocase: false, matchBase: false })) { return true; }
-            }
-            // If gitignore is present and matches, skip
             if (gitignore && gitignore.isIgnored(relPath)) { return false; }
-            // Otherwise include
             return true;
         });
     }

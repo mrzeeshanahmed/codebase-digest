@@ -241,3 +241,12 @@ You can author your README using Visual Studio Code. Here are some useful editor
 * [Markdown Syntax Reference](https://help.github.com/articles/markdown-basics/)
 
 **Enjoy!**
+
+## Remote ingest temporary directory lifecycle
+
+When performing a programmatic remote ingest (for example via the `codebaseDigest.ingestRemoteRepoProgrammatic` command), the extension clones the repository into a temporary directory and scans files from that location.
+
+- By default the temporary directory is cleaned up before the command returns. The returned `output` and `preview` payloads contain concatenated content produced in-memory — callers should not rely on the temp directory remaining on disk.
+- If you need to retain the clone for manual inspection or further processing, pass the optional `keepTmpDir: true` parameter to `ingestRemoteRepoProgrammatic`. When `keepTmpDir` is set, the command will return the temporary path as `localPath` and will NOT delete it; you become responsible for calling `githubService.cleanup(localPath)` when finished.
+
+This behavior avoids leaking sensitive temp files by default while providing an opt-in path for debugging or manual workflows.

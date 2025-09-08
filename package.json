@@ -7,10 +7,7 @@
     "vscode": "^1.103.0"
   },
   "activationEvents": [
-    "onView:codebaseDigestDashboard",
-    "onCommand:codebaseDigest.openDashboardPanel",
-    "onCommand:codebaseDigest.generateDigest",
-    "onCommand:codebaseDigest.focusView"
+    "onView:codebaseDigestDashboard"
   ],
   "categories": [
     "Other"
@@ -44,6 +41,14 @@
       ]
     },
   "commands": [
+    {
+      "command": "codebaseDigest.estimateTokens",
+      "title": "Estimate Tokens"
+    },
+    {
+      "command": "codebaseDigest.toggleExpand",
+      "title": "Toggle Expand"
+    },
     {
       "command": "codebaseDigest.tokenCount",
       "title": "Show Token Count"
@@ -109,6 +114,22 @@
       "title": "Open Dashboard"
     },
     {
+      "command": "codebaseDigest.openSettings",
+      "title": "Open Codebase Digest Settings"
+    },
+    {
+      "command": "codebaseDigest.applyPreset",
+      "title": "Apply Filter Preset"
+    },
+    {
+      "command": "codebaseDigest.pauseScan",
+      "title": "Pause Scan"
+    },
+    {
+      "command": "codebaseDigest.resumeScan",
+      "title": "Resume Scan"
+    },
+    {
       "command": "codebaseDigest.openDashboardPanel",
       "title": "Codebase Digest: Open as Panel"
     },
@@ -119,14 +140,9 @@
     {
       "command": "codebaseDigest.disableRedactionForNextRun",
       "title": "Disable redaction for next Generate"
-    },
-    {
-      "command": "codebaseDigest.estimateTokens",
-      "title": "Estimate Tokens",
-      "category": "Codebase Digest"
     }
   ],
-    "keybindings": [
+  "keybindings": [
       {
         "command": "codebaseDigest.generateDigest",
         "key": "ctrl+alt+g",

@@ -25,6 +25,9 @@ import * as errorsUtil from '../utils/errors';
 import { emitProgress } from './eventBus';
 import { broadcastGenerationResult } from './codebasePanel';
 import { getMutex } from '../utils/asyncLock';
+import * as fs from 'fs';
+import * as fsp from 'fs/promises';
+import * as path from 'path';
 
 /**
  * Generate a digest from selected files and config.
@@ -51,7 +54,7 @@ export async function generateDigest(
     if (!services) {
         // Log and show error consistently, then broadcast to any webviews
         errorsUtil.showUserError('No services found for workspace folder.', workspaceFolder.uri.fsPath);
-        try { broadcastGenerationResult({ error: 'No services found for workspace folder.' }, workspacePath); } catch (e) { /* swallow */ }
+        try { broadcastGenerationResult({ error: 'No services found for workspace folder.' }, workspacePath); } catch (e) { try { console.warn('digestProvider: broadcastGenerationResult failed', e); } catch {} }
         return;
     }
     const config: DigestConfig = vscode.workspace.getConfiguration('codebaseDigest', workspaceFolder.uri) as any;
@@ -87,7 +90,7 @@ export async function generateDigest(
             diagnostics?.error && diagnostics.error('Remote repo ingest failed: ' + details);
             // Log to output channel and show an error; broadcast to webview
             errorsUtil.showUserError('Remote repo ingest failed.', details, diagnostics);
-            try { broadcastGenerationResult({ error: 'Remote repo ingest failed.' }, workspacePath); } catch (e) { /* swallow */ }
+                try { broadcastGenerationResult({ error: 'Remote repo ingest failed.' }, workspacePath); } catch (e) { try { console.warn('digestProvider: broadcastGenerationResult failed', e); } catch {} }
             return;
         }
     } else {
@@ -131,15 +134,13 @@ export async function generateDigest(
         outputSeparatorsHeader: config.outputSeparatorsHeader || '',
     });
     // Step 3: check cache
-    const fs = require('fs');
-    const fsp = require('fs/promises');
     let cacheDir = config.cacheDir;
     if (!cacheDir || typeof cacheDir !== 'string') {
     // Use workspaceFolder storage path or fallback
-    cacheDir = require('path').join(workspaceFolder.uri.fsPath, '.codebase-digest-cache');
+    cacheDir = path.join(workspaceFolder.uri.fsPath, '.codebase-digest-cache');
     }
-    const cachePath = require('path').join(cacheDir, cacheKey + '.json');
-    const cacheOutPath = require('path').join(cacheDir, cacheKey + '.out');
+    const cachePath = path.join(cacheDir, cacheKey + '.json');
+    const cacheOutPath = path.join(cacheDir, cacheKey + '.out');
     if (config.cacheEnabled) {
         try {
             await fsp.mkdir(cacheDir, { recursive: true });
@@ -286,7 +287,7 @@ export async function generateDigest(
     try {
         broadcastGenerationResult(finalResult, workspaceFolder.uri.fsPath);
     } catch (e) {
-        diagnostics.warn && diagnostics.warn('Failed to broadcast generation result: ' + String(e));
+        try { diagnostics.warn && diagnostics.warn('Failed to broadcast generation result'); } catch {}
     }
 
     return finalResult;

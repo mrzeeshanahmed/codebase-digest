@@ -5,6 +5,12 @@ on:
     branches: [ main, master ]
   pull_request:
     branches: [ '*' ]
+  workflow_dispatch:
+    inputs:
+      fail_on_exceed:
+        description: 'If true, fail the job when bundle exceeds threshold'
+        required: false
+        default: 'false'
 
 jobs:
   build:
@@ -25,6 +31,8 @@ jobs:
         env:
           # Default threshold can be overridden by repository secrets or workflow inputs
           BUNDLE_SIZE_THRESHOLD: ${{ secrets.BUNDLE_SIZE_THRESHOLD || 409600 }}
+          # Fail on exceed when explicitly requested via workflow input or on push to main/master
+          BUNDLE_FAIL_ON_EXCEED: ${{ (github.event_name == 'workflow_dispatch' && (github.event.inputs.fail_on_exceed == 'true')) || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')) }}
         run: |
           node ./scripts/checkBundleSize.js
         continue-on-error: false

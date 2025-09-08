@@ -44,9 +44,21 @@ async function interactiveIngestFlow() {
     }
 }
 
-export async function ingestRemoteRepoProgrammatic(params: { repo: string, ref?: any, subpath?: string, includeSubmodules?: boolean }) : Promise<{ output?: string, preview?: any } | void> {
+/**
+ * Programmatic ingest of a remote GitHub repo.
+ *
+ * Lifecycle / tmp dir contract:
+ * - This function clones/pulls the remote repository into a temporary directory and scans files
+ *   from that temp location. By default the temporary directory is cleaned up before this
+ *   function returns. The returned `output`/`preview` payload contains concatenated content
+ *   produced in-memory so callers should NOT rely on the temp directory remaining on disk.
+ * - If callers need to keep the temp dir around for manual inspection or further processing,
+ *   pass `keepTmpDir: true` in `params`. When `keepTmpDir` is true the caller becomes
+ *   responsible for calling the service cleanup utility (`githubService.cleanup`) when done.
+ */
+export async function ingestRemoteRepoProgrammatic(params: { repo: string, ref?: any, subpath?: string, includeSubmodules?: boolean, keepTmpDir?: boolean }) : Promise<{ output?: string, preview?: any } | void> {
     // This function performs the ingest and returns a preview string that can be shown in the dashboard webview.
-    const { repo, ref, subpath, includeSubmodules } = params;
+    const { repo, ref, subpath, includeSubmodules, keepTmpDir } = params as any;
     const formatters = new Formatters();
     const config: DigestConfig = vscode.workspace.getConfiguration('codebaseDigest') as any;
     let tmpDir: string | undefined;
@@ -90,8 +102,14 @@ export async function ingestRemoteRepoProgrammatic(params: { repo: string, ref?:
         const tree = config.includeTree ? (typeof config.includeTree === 'string' && config.includeTree === 'minimal' ? formatters.buildSelectedTree(files) : formatters.buildTree(files, true)) : '';
         const output = config.outputFormat === 'json' ? JSON.stringify({ summary: remoteSummary + summary, tree, files: contentChunks }, null, 2) : [remoteSummary + summary, tree, ...contentChunks].join(config.outputSeparatorsHeader || '\n---\n');
         emitProgress({ op: 'generate', mode: 'end', determinate: false, message: 'Ingest complete' });
-        // Return small preview payload to caller (dashboard)
-        return { output, preview: { summary: remoteSummary + summary, tree, tokenEstimate, totalFiles: stats.totalFiles, totalSize: stats.totalSize } };
+        // Return small preview payload to caller (dashboard). If caller requested the
+        // temporary clone to be retained, return the localPath so caller can inspect it.
+        const previewPayload = { summary: remoteSummary + summary, tree, tokenEstimate, totalFiles: stats.totalFiles, totalSize: stats.totalSize };
+        if (keepTmpDir) {
+            // Caller requested to keep the temp dir: return localPath location and preview.
+            return { output, preview: previewPayload, localPath: tmpDir } as any;
+        }
+        return { output, preview: previewPayload };
     } catch (err: any) {
         emitProgress({ op: 'generate', mode: 'end', determinate: false, message: 'Ingest failed' });
         if (String(err).includes('rate limit') || String(err).includes('auth')) {
@@ -103,6 +121,11 @@ export async function ingestRemoteRepoProgrammatic(params: { repo: string, ref?:
         // expect a graceful return rather than a duplicate error being surfaced.
         return;
     } finally {
-        if (tmpDir) { await cleanupRemoteTmp(tmpDir); }
+        // Only cleanup the temporary dir if the caller did not request it to be kept.
+        try {
+            if (tmpDir && !keepTmpDir) { await cleanupRemoteTmp(tmpDir); }
+        } catch (e) {
+            // best-effort cleanup; do not mask original errors
+        }
     }
 }
