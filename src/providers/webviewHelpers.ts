@@ -6,14 +6,24 @@ import * as path from 'path';
  */
 export function setWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri) {
     const fs = require('fs');
-    const indexPath = path.join(extensionUri.fsPath, 'resources', 'webview', 'index.html');
-    let html: string;
-    try {
-        html = fs.readFileSync(indexPath, 'utf8');
-    } catch (e) {
+    // Try multiple locations where index.html may exist in development and packaged builds.
+    const indexCandidates = [
+        path.join(extensionUri.fsPath, 'resources', 'webview', 'index.html'),
+        path.join(extensionUri.fsPath, 'dist', 'resources', 'webview', 'index.html'),
+        path.join(extensionUri.fsPath, 'out', 'resources', 'webview', 'index.html')
+    ];
+    let html: string | undefined;
+    let indexPath: string | undefined;
+    for (const p of indexCandidates) {
+        try { if (fs.existsSync(p)) { indexPath = p; break; } } catch (e) { /* ignore */ }
+    }
+    if (indexPath) {
+        try { html = fs.readFileSync(indexPath, 'utf8'); } catch (e) { html = undefined; }
+    }
+    if (!html) {
         // Fail open with a minimal HTML so the extension doesn't crash the host if resources are missing
         try {
-            webview.html = `<html><body><h2>Extension resource missing</h2><pre>${String(e)}</pre></body></html>`;
+            webview.html = `<html><body><h2>Extension resource missing</h2><pre>Webview index.html not found in expected locations.</pre></body></html>`;
         } catch (_) {
             // best-effort: if even assigning html fails, swallow to avoid extension crash
         }
@@ -25,7 +35,9 @@ export function setWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri
             if (/^(https?:|data:|vscode-resource:|vscode-webview-resource:)/i.test(href) || href.indexOf(webview.cspSource) !== -1) {
                 return m;
             }
-            const uri = webview.asWebviewUri(vscode.Uri.file(path.join(extensionUri.fsPath, 'resources', 'webview', href)));
+            const resolved = resolveResourcePath(href, extensionUri);
+            if (!resolved) { return m; }
+            const uri = webview.asWebviewUri(vscode.Uri.file(resolved));
             return m.replace(href, uri.toString());
         } catch (e) { return m; }
     });
@@ -36,7 +48,9 @@ export function setWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri
             if (/^(https?:|data:|vscode-resource:|vscode-webview-resource:)/i.test(src) || src.indexOf(webview.cspSource) !== -1) {
                 return m;
             }
-            const uri = webview.asWebviewUri(vscode.Uri.file(path.join(extensionUri.fsPath, 'resources', 'webview', src)));
+            const resolved = resolveResourcePath(src, extensionUri);
+            if (!resolved) { return m; }
+            const uri = webview.asWebviewUri(vscode.Uri.file(resolved));
             return m.replace(src, uri.toString());
         } catch (e) { return m; }
     });
@@ -52,16 +66,17 @@ export function setWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri
             // Normalize slashes for matching (handle Windows backslashes)
             const normalized = src.replace(/\\/g, '/');
 
-            let resolved: string;
             // Detect patterns like ../icons/... or ../../icons/... and map to resources/icons/...
             const iconsMatch = normalized.match(/^(?:\.\.\/)+icons(?:\/(.*))?$/i);
+            let resolved: string | undefined;
             if (iconsMatch) {
                 const rel = iconsMatch[1] || '';
-                resolved = path.join(extensionUri.fsPath, 'resources', 'icons', rel);
+                resolved = findExisting([path.join(extensionUri.fsPath, 'resources', 'icons', rel), path.join(extensionUri.fsPath, 'dist', 'resources', 'icons', rel)]);
             } else {
-                // Default: resolve relative to resources/webview
-                resolved = path.join(extensionUri.fsPath, 'resources', 'webview', normalized);
+                // Default: resolve relative to resources/webview (search both root and dist)
+                resolved = findExisting([path.join(extensionUri.fsPath, 'resources', 'webview', normalized), path.join(extensionUri.fsPath, 'dist', 'resources', 'webview', normalized)]);
             }
+            if (!resolved) { return m; }
             const uri = webview.asWebviewUri(vscode.Uri.file(resolved));
             // Replace only the src attribute value, preserving the original quoting and other attributes
             return m.replace(new RegExp(`src=${quote}${escapeRegExp(src)}${quote}`), `src=${quote}${uri.toString()}${quote}`);
@@ -73,7 +88,35 @@ export function setWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri
 
     // Helper to escape regex metacharacters for safe replacement
     function escapeRegExp(s: string) {
-        return s.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&');
+        // Escape regex metacharacters. Use canonical character class that
+        // includes a single escaped backslash: /[.*+?^${}()|[\]\\]/g
+        return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+    
+    // Resolve a resource href/src relative to the extension and dist locations.
+    function resolveResourcePath(href: string, extensionUri: vscode.Uri): string | undefined {
+        // Normalize common authoring prefixes so callers may reference assets as
+        // "resources/..." or "dist/resources/..." or relative paths like "../icons/...".
+        let normalized = href.replace(/\\/g, '/');
+        // strip leading ./ or ../
+        normalized = normalized.replace(/^\.{1,2}\//, '');
+        // strip leading 'resources/' or 'dist/resources/' if present
+        normalized = normalized.replace(/^dist\/resources\//i, '');
+        normalized = normalized.replace(/^resources\//i, '');
+        // prefer webview folder, but check dist fallback
+        return findExisting([
+            path.join(extensionUri.fsPath, 'resources', 'webview', normalized),
+            path.join(extensionUri.fsPath, 'dist', 'resources', 'webview', normalized),
+            path.join(extensionUri.fsPath, 'resources', 'icons', normalized),
+            path.join(extensionUri.fsPath, 'dist', 'resources', 'icons', normalized)
+        ]);
+    }
+
+    function findExisting(cands: string[]): string | undefined {
+        for (const c of cands) {
+            try { if (fs.existsSync(c)) { return c; } } catch (e) { /* ignore */ }
+        }
+        return undefined;
     }
     // Remove any existing CSP meta tags (including those our helper may have injected previously).
     html = html.replace(/<meta[^>]+http-equiv=['"]?Content-Security-Policy['"]?[^>]*>/gi, '');
@@ -140,7 +183,16 @@ export function wireWebviewMessages(webview: vscode.Webview, treeProvider: any, 
     // to avoid infinite background retries. Host providers can augment disposal
     // handling if they expose a panel/window lifecycle to clear timers earlier.
 
-    webview.onDidReceiveMessage((msg: any) => processWebviewMessage(msg, webview, treeProvider, folderPath, onConfigSet, onGetState, context));
+    // Register the message listener and ensure it is disposed when the extension/context is disposed.
+    try {
+        const disp = webview.onDidReceiveMessage((msg: any) => processWebviewMessage(msg, webview, treeProvider, folderPath, onConfigSet, onGetState, context));
+        // If a context is provided, attach the disposable so VS Code will dispose it on deactivation.
+        if (context && Array.isArray((context as any).subscriptions)) {
+            try { (context as any).subscriptions.push(disp); } catch (e) { /* ignore push errors */ }
+        }
+    } catch (e) {
+        // Best-effort: if registering the listener fails, swallow to avoid crashing the extension
+    }
 }
 
 function stringifyError(e: any): string {
@@ -278,48 +330,20 @@ export async function processWebviewMessage(msg: any, webview: vscode.Webview, t
         }
 
         if (msg.actionType === 'setSelection' && Array.isArray(msg.relPaths)) {
-            // If the provider has no populated root nodes yet (e.g., before first scan),
-            // applying selection is a no-op. Detect that and instead schedule a
-            // re-request of state so the webview can apply its persisted selection
-            // once scanning completes and nodes exist.
+            // Apply selection only when provider appears to have roots.
+            // The webview side implements replay/retry logic; avoid scheduling
+            // additional retries here to prevent duplicate attempts and UI churn.
             try {
-                // treeProvider may expose rootNodes, getRoots, or getPreviewData
                 const preview = (typeof treeProvider.getPreviewData === 'function') ? treeProvider.getPreviewData() : null;
                 const totalFiles = preview && typeof preview.totalFiles === 'number' ? preview.totalFiles : undefined;
                 const hasRoots = Array.isArray((treeProvider as any).rootNodes) ? ((treeProvider as any).rootNodes.length > 0) : (typeof totalFiles === 'number' ? totalFiles > 0 : undefined);
-                if (!hasRoots) {
-                    // schedule a re-request of state for the webview to retry applying
-                    // persisted selection. Use a capped exponential backoff and store
-                    // the timer id on the webview so we don't schedule multiple timers
-                    // and so it can be implicitly cancelled if the webview is disposed.
-                    const retryCountKey = '__cbd_sel_retry_count';
-                    const retryTimerKey = '__cbd_sel_retry_timer';
-                    const prev = (webview as any)[retryCountKey] || 0;
-                    const maxRetries = 6;
-                    if (prev < maxRetries) {
-                        const next = prev + 1;
-                        (webview as any)[retryCountKey] = next;
-                        // exponential backoff base 2, min 500ms, capped at 5s
-                        const delay = Math.min(500 * Math.pow(2, next - 1), 5000);
-                        // clear any previously scheduled timer to avoid duplicates
-                        try { const prevTimer = (webview as any)[retryTimerKey]; if (prevTimer) { clearTimeout(prevTimer); } } catch (e) {}
-                        const tid = setTimeout(() => {
-                            try { webview.postMessage({ type: 'getState' }); } catch (e) { try { console.warn('webviewHelpers: post getState failed', stringifyError(e)); } catch {} }
-                            // clear stored timer id after it ran
-                            try { delete (webview as any)[retryTimerKey]; } catch (e) {}
-                        }, delay);
-                        try { (webview as any)[retryTimerKey] = tid; } catch (e) {}
-                    }
-                    // Defer setting selection until nodes exist
-                    return;
-                }
-            } catch (e) { /* swallow detection errors and fall back to immediate set */ }
+                if (!hasRoots) { return; }
+            } catch (e) { /* swallow detection errors */ }
 
-            // provider appears to have roots; apply selection immediately
-            treeProvider.setSelectionByRelPaths(msg.relPaths);
-            // clear any scheduled retries now that selection has been applied
-            try { const retryTimerKey = '__cbd_sel_retry_timer'; const retryCountKey = '__cbd_sel_retry_count'; const prevTimer = (webview as any)[retryTimerKey]; if (prevTimer) { clearTimeout(prevTimer); delete (webview as any)[retryTimerKey]; } (webview as any)[retryCountKey] = 0; } catch (e) {}
-            try { const preview = treeProvider.getPreviewData(); webview.postMessage({ type: 'state', state: preview }); } catch (e) { try { console.warn('webviewHelpers: post state failed', stringifyError(e)); } catch {} }
+            try {
+                treeProvider.setSelectionByRelPaths(msg.relPaths);
+            } catch (e) { /* ignore provider errors */ }
+            try { const preview = typeof treeProvider.getPreviewData === 'function' ? treeProvider.getPreviewData() : null; if (preview) { webview.postMessage({ type: 'state', state: preview }); } } catch (e) { try { console.warn('webviewHelpers: post state failed', stringifyError(e)); } catch {} }
             return;
         }
         if (msg.actionType === 'toggleExpand' && typeof msg.relPath === 'string') {

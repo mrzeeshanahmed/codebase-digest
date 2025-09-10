@@ -15,24 +15,29 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Job-level env so the bundle check logic is evaluated once per job.
+    env:
+      # Default threshold can be overridden by repository secrets or workflow inputs
+      BUNDLE_SIZE_THRESHOLD: ${{ secrets.BUNDLE_SIZE_THRESHOLD || 409600 }}
+
     steps:
       - uses: actions/checkout@v4
       - name: Use Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '18'
+          cache: 'npm'
+      - name: Normalize CI env flags
+        # Write a stable 'true' / 'false' string into GITHUB_ENV so the Node script can do an
+        # explicit string comparison. This avoids subtle expression differences across runners.
+        run: |
+          echo "BUNDLE_FAIL_ON_EXCEED=$([[ '${{ github.event_name }}' == 'workflow_dispatch' && '${{ github.event.inputs.fail_on_exceed }}' == 'true' ]] || [[ '${{ github.event_name }}' == 'push' && ( '${{ github.ref }}' == 'refs/heads/main' || '${{ github.ref }}' == 'refs/heads/master' ) ]] && echo true || echo false)" >> $GITHUB_ENV
       - name: Install dependencies
         run: |
-          npm ci
+          npm ci --ignore-scripts
       - name: Build extension
         run: |
           npm run compile
       - name: Check bundle size
-        env:
-          # Default threshold can be overridden by repository secrets or workflow inputs
-          BUNDLE_SIZE_THRESHOLD: ${{ secrets.BUNDLE_SIZE_THRESHOLD || 409600 }}
-          # Fail on exceed when explicitly requested via workflow input or on push to main/master
-          BUNDLE_FAIL_ON_EXCEED: ${{ (github.event_name == 'workflow_dispatch' && (github.event.inputs.fail_on_exceed == 'true')) || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')) }}
         run: |
           node ./scripts/checkBundleSize.js
-        continue-on-error: false

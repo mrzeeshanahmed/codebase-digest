@@ -11,6 +11,7 @@ import { analyzeImports } from './dependencyAnalyzer';
 import * as vscode from 'vscode';
 import { emitProgress } from '../providers/eventBus';
 import { redactSecrets } from '../utils/redactSecrets';
+import { Formatters } from '../utils/formatters';
 
 
 export class DigestGenerator {
@@ -177,10 +178,31 @@ export class DigestGenerator {
             return { index, header, body, token: fileTokenEstimate, relPath: file.relPath, imports };
         });
 
-        // Optional cancellation token (config may provide one in future)
-        const token: CancellationToken | undefined = undefined;
-    const concurrency = (config as any).concurrentFileReads || 8;
-            const results = await runPool(tasks, concurrency, token);
+        // Optional cancellation token: observe progress events for a generate.cancel
+        // event so callers can cancel generation via the shared event bus. The
+        // token is passed to runPool so workers stop early and the pool rejects
+        // with an error when cancellation is requested.
+        let tokenObj: CancellationToken = { isCancellationRequested: false };
+        let unsubToken: (() => void) | undefined;
+        try {
+            unsubToken = require('../providers/eventBus').onProgress((ev: any) => {
+                try {
+                    if (ev && ev.op === 'generate' && ev.mode === 'cancel') {
+                        tokenObj.isCancellationRequested = true;
+                    }
+                } catch (e) { /* swallow */ }
+            });
+        } catch (e) {
+            // If event bus isn't available for some reason, continue without cancellation support
+            tokenObj = { isCancellationRequested: false };
+        }
+        const concurrency = (config as any).concurrentFileReads || 8;
+        let results;
+        try {
+            results = await runPool(tasks, concurrency, tokenObj);
+        } finally {
+            try { if (typeof unsubToken === 'function') { unsubToken(); } } catch (e) { }
+        }
 
     // Aggregate results in order
         const analysisMap: Record<string, any> = {};
@@ -272,7 +294,7 @@ export class DigestGenerator {
             }
         }
 
-        // Add token limit warning if configured
+    // Add token limit warning if configured
         const contextLimit = config.contextLimit || config.tokenLimit;
         const tokenLimitWarning = typeof (this.tokenAnalyzer as any).warnIfExceedsLimit === 'function'
             ? (this.tokenAnalyzer as any).warnIfExceedsLimit(tokenEstimate, contextLimit)
@@ -281,6 +303,34 @@ export class DigestGenerator {
             // Ensure deduplication with existing warnings
             if (!warnings.includes(tokenLimitWarning)) {
                 warnings.push(tokenLimitWarning);
+            }
+        }
+        // For human-readable formats (text/markdown) ensure the summary and
+        // ASCII tree are prepended to the output content so the user sees
+        // an immediate overview at the top of the generated file.
+        if (outputFormat !== 'json') {
+            try {
+                const fm = new Formatters();
+                let headerBlock = '';
+                if (typeof summary === 'string' && summary.length > 0) {
+                    headerBlock += summary;
+                }
+                if (tree && tree.length > 0) {
+                    // For markdown, fence the tree for nicer rendering; for text,
+                    // just append the raw ASCII tree.
+                    if (outputFormat === 'markdown') {
+                        headerBlock += '\n\n' + fm.fence(tree, '.txt', 'markdown');
+                    } else {
+                        headerBlock += '\n\n' + tree;
+                    }
+                }
+                if (headerBlock.length > 0) {
+                    // Insert as the first chunk so finalizer will put separators
+                    // after this block as usual.
+                    outputChunks.unshift(headerBlock + '\n');
+                }
+            } catch (e) {
+                // Non-fatal: if building the header block fails, continue without it
             }
         }
         // Assemble content string for DigestResult.

@@ -39,7 +39,25 @@ export async function showUserError(err: Error, fallbackMessage?: string) {
         return { action: 'skip' };
     }
     // Generic fallback
-    const pick = await vscode.window.showErrorMessage(fallbackMessage || err.message || 'An error occurred', 'OK');
+    const message = fallbackMessage || err.message || 'An error occurred';
+    // Special-case missing-Git guidance: offer Install and PATH diagnostics
+    if (String(message).toLowerCase().includes('git not found') || String(message).toLowerCase().includes('git not found:')) {
+        const install = 'Install Git';
+        const showPath = 'Show PATH';
+        const pick = await vscode.window.showErrorMessage(message, install, showPath, 'OK');
+        if (pick === install) {
+            try { await vscode.env.openExternal(vscode.Uri.parse('https://git-scm.com/downloads')); } catch (_) {}
+            return { action: 'install' };
+        }
+        if (pick === showPath) {
+            const ch = vscode.window.createOutputChannel('Codebase Digest Diagnostics');
+            try { ch.appendLine(`PATH=${process.env.PATH || ''}`); } catch (_) {}
+            ch.show(true);
+            return { action: 'showPath' };
+        }
+        return { action: 'ok' };
+    }
+    const pick = await vscode.window.showErrorMessage(message, 'OK');
     return { action: 'ok' };
 }
 

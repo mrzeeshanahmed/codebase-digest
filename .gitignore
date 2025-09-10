@@ -4,10 +4,14 @@ node_modules
 .vscode-test/
 *.vsix
 
+# Tool build output
+out-tools
+
 # Local build and test artifacts
 /out/
 /node_modules/
 /.vscode-test/
+*.partial
 
 # Editor and OS
 .vscode/

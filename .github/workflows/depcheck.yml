@@ -1,0 +1,33 @@
+name: Dependency Drift
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ '*' ]
+  schedule:
+    - cron: '0 3 * * 1' # weekly check every Monday at 03:00
+
+jobs:
+  depcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+      - name: Install dev dependencies
+        run: |
+          npm ci --ignore-scripts
+      - name: Run depcheck
+        run: |
+          npx depcheck --json > depcheck-report.json || true
+          cat depcheck-report.json
+          node -e "const r=require('./depcheck-report.json'); if ((r.dependencies && Object.keys(r.dependencies).length>0) || (r.devDependencies && Object.keys(r.devDependencies).length>0)) { console.error('Depcheck found unused deps'); process.exit(1); } else { console.log('No unused deps found'); }"
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: depcheck-report
+          path: depcheck-report.json

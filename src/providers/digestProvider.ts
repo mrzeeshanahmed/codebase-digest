@@ -171,12 +171,25 @@ export async function generateDigest(
     }
     // Step 4: generate digest
     // Generate digest and sum token estimates
-    const digest = await digestGenerator.generate(files, {
+    let digest;
+    try {
+        digest = await digestGenerator.generate(files, {
         ...config,
         ...overrides,
         tokenModel,
         tokenDivisorOverrides
     }, [], runtimeConfig.outputFormat || config.outputFormat);
+    } catch (err: any) {
+        // If generation was canceled via the event bus, ensure partial artifacts are removed and inform the user
+        const details = String(err || 'Generation failed');
+        try { diagnostics && diagnostics.error && diagnostics.error('Generation failed or canceled: ' + details); } catch (e) {}
+        try { errorsUtil.showUserError('Digest generation failed or canceled.', details, diagnostics as any); } catch (e) {}
+        // If cache out file was partially written, attempt to remove it to avoid leaving .out artifacts
+        try { if (fs.existsSync(cacheOutPath)) { await fsp.unlink(cacheOutPath).catch(() => {}); } } catch (e) {}
+        // Broadcast cancellation to webviews
+        try { broadcastGenerationResult({ error: 'Generation failed or canceled.' }, workspacePath); } catch (e) {}
+        return;
+    }
     // Generator may have completed - emit end
     emitProgress({ op: 'generate', mode: 'end', determinate: false, message: 'Digest generation complete' });
     // Compute total token estimate (sum of file estimates)

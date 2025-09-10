@@ -29,8 +29,8 @@ describe('OutputWriter streaming and cancel', () => {
 
     // Trigger cancellation shortly after write starts
   const writer = new OutputWriter();
-    const largeOutput = 'X'.repeat(200000);
-  // Schedule cancel after a short delay to avoid race conditions on slow CI
+    // Increase output size to exceed streamingThresholdBytes (1024) and trigger streaming/cancellation
+    const largeOutput = 'X'.repeat(2000); // Ensure we exceed streamingThresholdBytes  // Schedule cancel after a short delay to avoid race conditions on slow CI
   setTimeout(() => emitProgress({ op: 'write', mode: 'cancel' }), 20);
 
     await writer.write(largeOutput, { outputWriteLocation: 'file', outputFormat: 'text', streamingThresholdBytes: 1024, chunkSize: 65536 });

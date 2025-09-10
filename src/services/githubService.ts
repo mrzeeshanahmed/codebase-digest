@@ -125,17 +125,29 @@ export async function resolveRefToSha(ownerRepo: string, ref?: { tag?: string; b
     } catch (lsErr: any) {
         // Scrub any tokens or repo/ref values before throwing up to callers. Provide an actionable message.
         const safeRef = scrubTokens(refName);
-        const msg = `Could not resolve reference ${safeRef} via git ls-remote. Ensure the repository and ref are correct and you have network/access permissions.`;
+        const rawDetails = lsErr && (lsErr.details || lsErr.message) ? String(lsErr.details || lsErr.message) : String(lsErr || '');
+        const scrubbedDetails = scrubTokens(rawDetails);
+        // Detect common platform/tooling issues and give more helpful guidance
+        const lower = (scrubbedDetails || '').toLowerCase();
+        if (lower.includes('enoent') || lower.includes('spawn git') || lower.includes('not found')) {
+            const msg = 'Git executable not found or not available on PATH. Install Git and ensure `git --version` works from your shell.';
+            const err = new Error(msg);
+            try { (err as any).details = scrubbedDetails; } catch (_) {}
+            throw err;
+        }
+        // Generic actionable message for resolution failures
+        const suggestions = ['Ensure the repository and ref exist', 'For private repositories ensure your GitHub authentication token has appropriate scopes (repo)', 'Check network/firewall/proxy settings', `Try running: git ls-remote ${scrubTokens(token ? 'https://<redacted>@github.com/' + owner + '/' + repo + '.git' : 'https://github.com/' + owner + '/' + repo + '.git')} ${safeRef}`];
+        const msg = `Could not resolve reference ${safeRef} via git ls-remote. ${suggestions.join('; ')}.`;
         const err = new Error(msg);
-        // Attach original error details (scrubbed) on a non-sensitive property for diagnostics
-        try { (err as any).details = scrubTokens(String(lsErr && lsErr.message ? lsErr.message : lsErr)); } catch (e) { /* ignore */ }
+        try { (err as any).details = scrubbedDetails; } catch (_) {}
         throw err;
     }
 }
 
-export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?: string, tmpDir?: string, opts?: { skipSparse?: boolean, skipFilter?: boolean }): Promise<string> {
+export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?: string, tmpDir?: string, opts?: { skipSparse?: boolean, skipFilter?: boolean }, authToken?: string): Promise<string> {
     const [owner, repo] = ownerRepo.split('/');
-    const token = await authenticate();
+    // Optional token passed from caller; if provided, use it for authenticated clone via GIT_ASKPASS
+    const providedToken = authToken;
     // Use GIT_ASKPASS to avoid embedding token in command args. The askpass
     // helper is written into the clone directory so it can read a token from
     // an environment variable. We recreate the helper if the dir is re-made
@@ -158,7 +170,9 @@ export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?
             // but ensure we scrub outputs. This should be rare.
             // Note: we still prefer the askpass approach.
         }
-        env = { ...env, GIT_ASKPASS: askpassPath, GIT_ASKPASS_TOKEN: token };
+        if (providedToken) {
+            env = { ...env, GIT_ASKPASS: askpassPath, GIT_ASKPASS_TOKEN: providedToken };
+        }
     };
     // Create askpass helper before any clone attempt
     writeAskpass();
@@ -168,7 +182,20 @@ export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?
         // Step 1: git clone
         // Pick clone args; allow opts.skipFilter to disable the blob filter if requested
     const baseCloneArgs = opts && opts.skipFilter ? ['clone','--no-checkout','--depth','1','--single-branch',url,dir] : ['clone','--no-checkout','--depth','1','--filter=blob:none','--single-branch',url,dir];
-    await spawnGitPromise(baseCloneArgs, { env }).then(() => {}).catch((e) => { throw e; });
+    try {
+        await spawnGitPromise(baseCloneArgs, { env }).then(() => {});
+    } catch (cloneErr: any) {
+        const details = scrubTokens(String(cloneErr && (cloneErr.details || cloneErr.message) ? (cloneErr.details || cloneErr.message) : cloneErr || ''));
+        const lower = (details || '').toLowerCase();
+        if (lower.includes('enoent') || lower.includes('spawn git') || lower.includes('not found')) {
+            // Provide clearer guidance for missing Git executable
+            const msg = 'Git not found: please install Git and ensure it is available on your PATH. Visit https://git-scm.com/downloads, install Git, then restart Visual Studio Code and retry. Verify by running `git --version` in your terminal.';
+            const err = new Error(msg);
+            try { (err as any).details = details; } catch (_) {}
+            throw err;
+        }
+        throw cloneErr;
+    }
         // Step 2: sparse-checkout if subpath and not explicitly skipped
         if (subpath && !(opts && opts.skipSparse)) {
             try {
@@ -220,7 +247,19 @@ export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?
         throw err;
     }
     // Step 3: git checkout
-    await spawnGitPromise(['checkout', shaOrRef], { cwd: dir, env }).then(() => {});
+    try {
+        await spawnGitPromise(['checkout', shaOrRef], { cwd: dir, env }).then(() => {});
+    } catch (checkoutErr: any) {
+        const details = scrubTokens(String(checkoutErr && (checkoutErr.details || checkoutErr.message) ? (checkoutErr.details || checkoutErr.message) : checkoutErr || ''));
+        const lower = (details || '').toLowerCase();
+        if (lower.includes('enoent') || lower.includes('spawn git') || lower.includes('not found')) {
+            const msg = 'Git not found: please install Git and ensure it is available on your PATH. Visit https://git-scm.com/downloads, install Git, then restart Visual Studio Code and retry. Verify by running `git --version` in your terminal.';
+            const err = new Error(msg);
+            try { (err as any).details = details; } catch (_) {}
+            throw err;
+        }
+        throw checkoutErr;
+    }
     return dir;
 }
 
@@ -253,13 +292,56 @@ export async function ingestRemoteRepo(urlOrSlug: string, options?: { ref?: { ta
         if (urlOrSlug.startsWith('https://')) {
             const m = urlOrSlug.match(/github.com\/([^\/]+\/[^\/]+)(?:\/|$)/);
             if (!m) {
-                await interactiveMessages.showUserError(new Error(scrubTokens('Invalid GitHub URL')), scrubTokens(urlOrSlug));
-                throw new Error(scrubTokens('Invalid GitHub URL'));
+                await interactiveMessages.showUserError(new Error(scrubTokens('Invalid GitHub URL or owner/repo slug')), scrubTokens(urlOrSlug));
+                throw new Error(scrubTokens('Invalid GitHub URL or owner/repo slug'));
             }
             ownerRepo = m[1];
         }
-        const token = await authenticate();
+        // Determine repository visibility first. If the repository is public we can
+        // bypass authentication entirely. If private, only allow ingest when the
+        // authenticated user is the repo owner.
+        let token: string | undefined = undefined;
         let resolved: { sha: string; branch?: string; tag?: string; commit?: string } = { sha: '' };
+        try {
+            // Unauthenticated request to check repo visibility
+            const repoResp = await safeFetch(`https://api.github.com/repos/${ownerRepo}`);
+            if (repoResp && repoResp.ok) {
+                const repoInfo = await repoResp.json();
+                if (!repoInfo.private) {
+                    // Public repo — do not request auth, proceed unauthenticated
+                    token = undefined;
+                } else {
+                    // Private repo — require authentication and verify ownership
+                    const sessionToken = await authenticate();
+                    // Fetch repository info using authenticated request to ensure access
+                    const [repoOwner, repoName] = ownerRepo.split('/');
+                    const repoInfoAuth = await githubApiRequest(`/repos/${repoOwner}/${repoName}`, sessionToken);
+                    // Fetch authenticated user
+                    const userInfo = await githubApiRequest('/user', sessionToken);
+                    const authLogin = userInfo && userInfo.login ? String(userInfo.login) : null;
+                    const repoOwnerLogin = repoInfoAuth && repoInfoAuth.owner && repoInfoAuth.owner.login ? String(repoInfoAuth.owner.login) : null;
+                    if (!authLogin || !repoOwnerLogin || authLogin !== repoOwnerLogin) {
+                        throw new Error('Access denied: the authenticated GitHub account does not own this private repository.');
+                    }
+                    token = sessionToken;
+                }
+            } else {
+                // If we couldn't determine visibility (network/rate-limit), fall back
+                // to attempting authentication so the later resolveRefToSha can use
+                // the API path if possible.
+                token = await authenticate();
+            }
+        } catch (visErr: any) {
+            // If checking visibility failed due to network/auth or other transient
+            // issues, fall back to requesting authentication so we can proceed.
+            try {
+                token = await authenticate();
+            } catch (authErr) {
+                // Re-throw original visibility error if authentication fails too
+                if (visErr && visErr.message) { visErr.message = scrubTokens(String(visErr.message)); }
+                throw visErr;
+            }
+        }
         if (options?.ref) {
             if (options.ref.branch) { refType = 'branch'; refValue = options.ref.branch; }
             if (options.ref.tag) { refType = 'tag'; refValue = options.ref.tag; }
@@ -271,10 +353,13 @@ export async function ingestRemoteRepo(urlOrSlug: string, options?: { ref?: { ta
         } catch (err: any) {
             // Ensure message is scrubbed before user display
             if (err && err.message) { err.message = scrubTokens(String(err.message)); }
-            if (err instanceof internalErrors.RateLimitError || err instanceof internalErrors.GitAuthError) {
+            if (err instanceof internalErrors.RateLimitError) {
                 await interactiveMessages.showUserError(err, scrubTokens(String(err.message)));
+            } else if (err instanceof internalErrors.GitAuthError) {
+                // Suggest signing in when auth errors occur
+                await interactiveMessages.showUserError(err, scrubTokens('Authentication required to access this repository.')); 
             } else {
-                await interactiveMessages.showUserError(new Error(scrubTokens('Remote repo ingest failed.')), scrubTokens(String(err)));
+                await interactiveMessages.showUserError(new Error(scrubTokens('Remote repository ingest failed.')), scrubTokens(String(err)));
             }
             throw err;
         }
@@ -284,7 +369,7 @@ export async function ingestRemoteRepo(urlOrSlug: string, options?: { ref?: { ta
         resolved.commit = options?.ref?.commit;
         tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `${ownerRepo.replace('/', '-')}-`));
         try {
-            localPath = await partialClone(ownerRepo, sha, options?.subpath, tmpDir);
+            localPath = await partialClone(ownerRepo, sha, options?.subpath, tmpDir, undefined, token);
         } catch (err: any) {
             if (err && err.message) { err.message = scrubTokens(String(err.message)); }
             await interactiveMessages.showUserError(new Error(scrubTokens('Git clone or checkout failed.')), scrubTokens(String(err)));

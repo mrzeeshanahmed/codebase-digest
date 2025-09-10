@@ -27,7 +27,7 @@ async function interactiveIngestFlow() {
     let repo = repoInput.trim();
     const urlMatch = repo.match(/github\.com\/([^\/]+)\/([^\/\?#]+)(?:[\/\?#]|$)/);
     if (urlMatch) { repo = `${urlMatch[1]}/${urlMatch[2]}`; }
-    else if (!/^[^\/]+\/[^\/]+$/.test(repo)) { interactiveMessages.showUserError(new Error('Invalid repo format. Please enter a valid GitHub URL or owner/repo slug.')); return; }
+    else if (!/^[^\/]+\/[^\/]+$/.test(repo)) { interactiveMessages.showUserError(new Error('Invalid repository format. Enter a GitHub URL or owner/repo slug (e.g. owner/repo).')); return; }
 
     const refType = await vscode.window.showQuickPick([{ label: 'Branch', value: 'branch' },{ label: 'Tag', value: 'tag' },{ label: 'Commit', value: 'commit' },{ label: 'None', value: 'none' }], { placeHolder: 'Specify a branch, tag, or commit (optional)' });
     let ref: any = {};
@@ -112,10 +112,13 @@ export async function ingestRemoteRepoProgrammatic(params: { repo: string, ref?:
         return { output, preview: previewPayload };
     } catch (err: any) {
         emitProgress({ op: 'generate', mode: 'end', determinate: false, message: 'Ingest failed' });
-        if (String(err).includes('rate limit') || String(err).includes('auth')) {
-            interactiveMessages.showUserError(new Error('GitHub authentication failed or rate-limited. Please sign in using VS Code’s GitHub auth provider (View > Accounts > Sign in with GitHub).'), String(err));
+        const errStr = String(err || '');
+        if (errStr.toLowerCase().includes('rate limit')) {
+            interactiveMessages.showUserError(new Error('GitHub API rate limit reached. Try again later or use an authenticated session.'), String(err));
+        } else if (errStr.toLowerCase().includes('auth') || errStr.toLowerCase().includes('authentication')) {
+            interactiveMessages.showUserError(new Error('Authentication required. Sign in via VS Code (Accounts > Sign in with GitHub) and retry.'), String(err));
         } else {
-            interactiveMessages.showUserError(new Error('Remote repo ingest failed.'), String(err));
+            interactiveMessages.showUserError(new Error('Remote repository ingest failed.'), String(err));
         }
         // Do not re-throw: we already displayed an error to the user and callers (including interactive flows)
         // expect a graceful return rather than a duplicate error being surfaced.

@@ -8,11 +8,13 @@ let pendingOverrideUsed = false;
 // Visual row height / basic list state
 const ITEM_HEIGHT = 28; // The height of each file row in pixels
 // filesCache was unused; remove to reduce memory footprint
-let selectedSet = new Set();
+// (previously had an unused selectedSet which was confusing)
 let pendingPersistedSelection = null;
 let pendingPersistedFocusIndex = undefined;
 // Pause state (moved up so message handlers can reference it safely)
 let paused = false;
+// Track expanded folder paths so we can restore UI state after re-renders
+const expandedPaths = new Set();
 
 // Lightweight DOM cache for frequently accessed nodes to avoid repeated queries
 const nodes = {
@@ -54,6 +56,10 @@ function postConfig(action, payload) {
 
 // Sanitize payloads sent from the webview to the extension host
 function sanitizePayload(obj) {
+    // NOTE: This sanitizer shallowly serializes objects and preserves nested arrays of
+    // simple scalars at one level only. Deeply nested objects/arrays will be stringified
+    // or truncated; this is intentional to avoid sending large or complex structures
+    // from the webview to the extension host.
     try {
         const copy = {};
         for (const k of Object.keys(obj || {})) {
@@ -69,7 +75,7 @@ function sanitizePayload(obj) {
             }
             if (typeof v === 'number' || typeof v === 'boolean') { copy[k] = v; continue; }
             if (Array.isArray(v)) {
-                copy[k] = v.map(x => (typeof x === 'string' ? x.trim().replace(/[\x00-\x1F\x7F]/g, '') : String(x))).slice(0, 100);
+                copy[k] = v.map(x => (typeof x === 'string' ? x.trim().replace(/[\x00-\x1F\x7F]/g, '') : String(x)));
                 continue;
             }
             // For objects, try to shallow-serialize simple key:scalar entries
@@ -79,7 +85,10 @@ function sanitizePayload(obj) {
                     const vv = v[kk];
                     if (vv === null || vv === undefined) { o[kk] = vv; }
                     else if (typeof vv === 'string') { o[kk] = vv.trim().replace(/[\x00-\x1F\x7F]/g, '').slice(0, 500); }
-                    else if (typeof vv === 'number' || typeof vv === 'boolean') { o[kk] = vv; }
+                    else if (Array.isArray(vv)) {
+                        // Preserve simple arrays of scalars nested inside objects (shallow only)
+                        o[kk] = vv.map(x => (typeof x === 'string' ? x.trim().replace(/[\x00-\x1F\x7F]/g, '').slice(0, 500) : (typeof x === 'number' || typeof x === 'boolean') ? x : String(x)));
+                    } else if (typeof vv === 'number' || typeof vv === 'boolean') { o[kk] = vv; }
                 }
                 copy[k] = o;
                 continue;
@@ -111,9 +120,32 @@ function closeModal(element) {
     } catch (e) {}
 }
 function modalKeyHandler(e) {
+    // Allow Escape to close the modal locally (keeps behaviour consistent with global handler
+    // but scoped to the active modal so focus restore works reliably).
+    if (e.key === 'Escape') {
+        try {
+            const modal = e.currentTarget;
+            modal.hidden = true;
+            modal.removeEventListener('keydown', modalKeyHandler);
+            if (__focusState.lastFocused && typeof __focusState.lastFocused.focus === 'function') { __focusState.lastFocused.focus(); }
+        } catch (ex) { /* swallow */ }
+        return;
+    }
     if (e.key !== 'Tab') { return; }
     const modal = e.currentTarget;
-    const focusable = Array.from(modal.querySelectorAll('input,button,select,textarea,a[href],[tabindex]:not([tabindex="-1"])')).filter((el) => !el.disabled && el.offsetParent !== null);
+    // Exclude any overlay elements from the focusable list (some DOM variants render the
+    // overlay inside the modal wrapper and it could be picked up by queries). Also exclude
+    // elements that are effectively hidden or disabled.
+    const focusable = Array.from(modal.querySelectorAll('input,button,select,textarea,a[href],[tabindex]:not([tabindex="-1"])')).filter((el) => {
+        if (!el) { return false; }
+        if (el.disabled) { return false; }
+        if (el.offsetParent === null) { return false; }
+        // exclude overlay/backdrop elements which may be focusable in some browsers
+        if (el.classList && el.classList.contains('modal-overlay')) { return false; }
+        // exclude any element that is inside an overlay element
+        if (el.closest && el.closest('.modal-overlay')) { return false; }
+        return true;
+    });
     if (focusable.length === 0) { e.preventDefault(); return; }
     const idx = focusable.indexOf(document.activeElement);
     if (e.shiftKey) {
@@ -121,6 +153,28 @@ function modalKeyHandler(e) {
     } else {
         if (idx === focusable.length - 1) { focusable[0].focus(); e.preventDefault(); }
     }
+}
+
+// Debounce wrapper for renderFileList to avoid double-render churn when 'state' and 'previewDelta' arrive quickly.
+function debounce(fn, wait) {
+    let tid = null;
+    let lastArgs = null;
+    return function() {
+        lastArgs = arguments;
+        if (tid) { clearTimeout(tid); }
+        tid = setTimeout(() => { tid = null; fn.apply(this, lastArgs); }, wait);
+    };
+}
+
+// Shared byte-size formatter used across the webview so all size labels match.
+// Uses binary units (1024 base) and 1 decimal place for KB/MB/GB for readability.
+function formatBytes(n) {
+    if (n === undefined || n === null) { return ''; }
+    const num = Number(n) || 0;
+    if (num < 1024) { return `${num} B`; }
+    if (num < 1024 * 1024) { return `${(num / 1024).toFixed(1)} KB`; }
+    if (num < 1024 * 1024 * 1024) { return `${(num / (1024 * 1024)).toFixed(1)} MB`; }
+    return `${(num / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
 function renderFileList(state) {
@@ -142,7 +196,7 @@ function renderFileList(state) {
         return;
     }
 
-    // This function will be called when a checkbox state changes.
+            // This function will be called when a checkbox state changes.
     const handleSelectionChange = () => {
         const allCheckboxes = fileListRoot.querySelectorAll('.file-checkbox');
         const newSelectedPaths = [];
@@ -168,7 +222,8 @@ function renderFileList(state) {
                 if (!parentUl) { break; }
                 const parentLi = parentUl.closest('li.folder-item');
                 if (!parentLi) { break; }
-                const descendantCheckboxes = parentLi.querySelectorAll('input.file-checkbox');
+                // Only consider checkboxes in the descendant subtree (exclude the parent's own checkbox)
+                const descendantCheckboxes = parentLi.querySelectorAll(':scope ul .file-checkbox');
                 let total = 0, checked = 0;
                 descendantCheckboxes.forEach(cb => { total++; if (cb.checked) { checked++; } });
                 const parentCb = parentLi.querySelector('input.file-checkbox');
@@ -218,15 +273,14 @@ function renderFileList(state) {
                 const isChecked = checkbox.checked;
                 // If a folder is checked/unchecked, apply the same state to all children
                 if (!isFile) {
-                    const descendantCheckboxes = li.querySelectorAll('.file-checkbox');
+                    // Only target checkboxes in the child subtree (exclude the folder's own checkbox)
+                    const descendantCheckboxes = li.querySelectorAll(':scope ul .file-checkbox');
                     descendantCheckboxes.forEach(descCb => {
                         descCb.checked = isChecked;
                         try { descCb.indeterminate = false; } catch (e) {}
                     });
-                    // After toggling descendants, update ancestor folders
-                    try { updateAncestorStates(li); } catch (e) {}
                 }
-                // For leaf changes, also update ancestor state so parent indeterminate toggles correctly
+                // Update ancestor folders once after any change (folder or leaf)
                 try { updateAncestorStates(li); } catch (e) {}
                 handleSelectionChange();
             });
@@ -241,8 +295,15 @@ function renderFileList(state) {
             // *** ADDING EXPAND/COLLAPSE INTERACTIVITY ***
             if (!isFile) {
                 // Clicking the name/icon of a folder toggles its expanded state
-                name.addEventListener('click', () => li.classList.toggle('expanded'));
-                icon.addEventListener('click', () => li.classList.toggle('expanded'));
+                const toggleExpand = () => {
+                    const isExpanded = li.classList.toggle('expanded');
+                    try {
+                        if (isExpanded) { expandedPaths.add(fullPath); }
+                        else { expandedPaths.delete(fullPath); }
+                    } catch (e) {}
+                };
+                name.addEventListener('click', toggleExpand);
+                icon.addEventListener('click', toggleExpand);
             }
 
             label.appendChild(checkbox);
@@ -259,12 +320,26 @@ function renderFileList(state) {
     }
 
     fileListRoot.appendChild(createTreeHtml(fileTree));
+    // After rendering, reapply previously stored expanded state so folders the user opened
+    // remain expanded across debounced re-renders.
+    try {
+        if (expandedPaths.size > 0) {
+            expandedPaths.forEach(p => {
+                try {
+                    const li = fileListRoot.querySelector(`li[data-path="${p}"]`);
+                    if (li) { li.classList.add('expanded'); }
+                } catch (e) {}
+            });
+        }
+    } catch (e) {}
     // After initial render, ensure folder checkboxes reflect tri-state based on current selections
     try {
         const folderItems = fileListRoot.querySelectorAll('li.folder-item');
         folderItems.forEach(fi => {
             try {
-                const descendantCheckboxes = fi.querySelectorAll('input.file-checkbox');
+                // Only consider descendant file-checkboxes in the subtree (exclude the parent's own checkbox)
+                // Only consider checkboxes in the descendant subtree (exclude the parent's own checkbox)
+                const descendantCheckboxes = fi.querySelectorAll(':scope ul .file-checkbox');
                 let total = 0, checked = 0;
                 descendantCheckboxes.forEach(cb => { total++; if (cb.checked) { checked++; } });
                 const parentCb = fi.querySelector('input.file-checkbox');
@@ -277,6 +352,9 @@ function renderFileList(state) {
         });
     } catch (e) {}
 }
+
+// Replace direct calls with debounced version in callers
+const debouncedRenderFileList = debounce(renderFileList, 80);
 
 // Lightweight message router: forward a few key message types to the UI functions
 window.addEventListener('message', event => {
@@ -293,7 +371,7 @@ window.addEventListener('message', event => {
         } catch (e) { /* swallow */ }
     }
     if (msg.type === 'state') {
-        renderFileList(msg.state);
+        debouncedRenderFileList(msg.state);
         try {
             const s = msg.state || {};
             if (typeof s.paused !== 'undefined') {
@@ -353,7 +431,7 @@ window.addEventListener('message', event => {
         } catch (e) {}
     } else if (msg.type === 'previewDelta') {
         // This is the core of the fix. We now call renderFileList from here.
-        renderPreviewDelta(msg.delta); // Update the chips
+    renderPreviewDelta(msg.delta); // Update the chips
         if (msg.delta && msg.delta.fileTree) {
             // Construct a minimal state object for the rendering function using fileTree/selectedPaths
             const syntheticState = {
@@ -361,7 +439,7 @@ window.addEventListener('message', event => {
                 selectedPaths: Array.isArray(msg.delta.selectedPaths) ? msg.delta.selectedPaths : [],
                 minimalSelectedTreeLines: msg.delta.minimalSelectedTreeLines
             };
-            renderFileList(syntheticState); // Re-render the file list
+            debouncedRenderFileList(syntheticState); // Re-render the file list (debounced)
         }
     } else if (msg.type === 'ingestPreview') {
         const previewRoot = nodes.ingestPreviewRoot || document.getElementById('ingest-preview');
@@ -415,7 +493,23 @@ window.addEventListener('message', event => {
                     if (rb) { rb.setAttribute('aria-pressed', 'true'); rb.classList.add('active'); }
                 }
             } else {
-                pendingOverrideUsed = false;
+                // generation succeeded: explicitly clear transient override flags and UI state
+                // so the redaction toggle does not remain active accidentally. Be defensive
+                // in DOM manipulation so any partial state is removed.
+                try {
+                    pendingOverrideUsed = false;
+                } catch (e) { pendingOverrideUsed = false; }
+                try {
+                    overrideDisableRedaction = false;
+                } catch (e) { overrideDisableRedaction = false; }
+                try {
+                    const rb = document.getElementById('btn-disable-redaction');
+                    if (rb) {
+                        try { rb.setAttribute('aria-pressed', 'false'); } catch (ex) {}
+                        try { rb.classList.remove('active'); } catch (ex) {}
+                        try { rb.removeAttribute('data-pending-override'); } catch (ex) {}
+                    }
+                } catch (e) { /* ignore DOM errors */ }
             }
         } catch (e) {}
     }
@@ -427,18 +521,7 @@ function renderPreviewDelta(delta) {
     if (statsTarget === null && chipsTarget === null) { return; }
 
     // Small helpers
-    function fmtSize(n) {
-        if (n === undefined || n === null) {
-            return '';
-        }
-        if (n < 1024) {
-            return `${n} B`;
-        }
-        if (n < 1024 * 1024) {
-            return `${(n / 1024).toFixed(1)} KB`;
-        }
-        return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-    }
+    const fmtSize = formatBytes;
 
     const parts = [];
     if (delta && delta.selectedCount !== undefined && delta.selectedCount !== null) {
@@ -527,15 +610,7 @@ function handleProgress(e) {
             if (progressStats) {
             const pParts = [];
             if (typeof e.totalFiles === 'number') { pParts.push(`${e.totalFiles} files`); }
-            if (typeof e.totalSize === 'number') {
-                const s = e.totalSize;
-                let sizeStr = '';
-                if (s < 1024) { sizeStr = `${s} B`; }
-                else if (s < 1024 * 1024) { sizeStr = `${(s/1024).toFixed(1)} KB`; }
-                else if (s < 1024 * 1024 * 1024) { sizeStr = `${(s/(1024*1024)).toFixed(1)} MB`; }
-                else { sizeStr = `${(s/(1024*1024*1024)).toFixed(1)} GB`; }
-                pParts.push(sizeStr);
-            }
+            if (typeof e.totalSize === 'number') { pParts.push(formatBytes(e.totalSize)); }
             if (typeof e.tokenEstimate === 'number') { pParts.push(`~${Math.round(e.tokenEstimate)} tokens`); }
             progressStats.textContent = pParts.join(' · ');
         }
@@ -603,22 +678,15 @@ function handleScanStats(e) {
     if (!statsEl) { return; }
     const parts = [];
     if (typeof e.totalFiles === 'number') { parts.push(`Scanned: ${e.totalFiles}`); }
-    if (typeof e.totalSize === 'number') { parts.push(`Size: ${e.totalSize} B`); }
+    // Use shared formatter for consistency with other UI areas
+    if (typeof e.totalSize === 'number') { parts.push(`Size: ${formatBytes(e.totalSize)}`); }
     statsEl.textContent = parts.join(' · ');
     // Also update inline progress stats next to the progress bar
     const progressStats = document.querySelector('.progress-stats');
     if (progressStats) {
         const pParts = [];
         if (typeof e.totalFiles === 'number') { pParts.push(`${e.totalFiles} files`); }
-        if (typeof e.totalSize === 'number') {
-            const s = e.totalSize;
-            let sizeStr = '';
-            if (s < 1024) { sizeStr = `${s} B`; }
-            else if (s < 1024 * 1024) { sizeStr = `${(s/1024).toFixed(1)} KB`; }
-            else if (s < 1024 * 1024 * 1024) { sizeStr = `${(s/(1024*1024)).toFixed(1)} MB`; }
-            else { sizeStr = `${(s/(1024*1024*1024)).toFixed(1)} GB`; }
-            pParts.push(sizeStr);
-        }
+    if (typeof e.totalSize === 'number') { pParts.push(formatBytes(e.totalSize)); }
         if (typeof e.tokenEstimate === 'number') { pParts.push(`~${Math.round(e.tokenEstimate)} tokens`); }
         progressStats.textContent = pParts.join(' · ');
     }
@@ -697,10 +765,33 @@ window.onload = function() {
             if (action === 'selectAll' || action === 'clearSelection') {
                 const shouldSelect = action === 'selectAll';
                 try {
-                    const checkboxes = document.querySelectorAll('#file-list .file-checkbox');
-                    const allPaths = Array.from(checkboxes).map(cb => cb.getAttribute('data-path'));
-                    postAction('setSelection', { relPaths: shouldSelect ? allPaths : [] });
+                    // Only include file (leaf) items — selector targets checkboxes that are children of li.file-item
+                    const fileCheckboxes = document.querySelectorAll('#file-list li.file-item .file-checkbox');
+                    const filePaths = Array.from(fileCheckboxes).map(cb => cb.getAttribute('data-path')).filter(Boolean);
+                    postAction('setSelection', { relPaths: shouldSelect ? filePaths : [] });
                 } catch (e) { /* swallow DOM errors */ }
+                return;
+            }
+            // Expand/Collapse all operate on the rendered tree DOM immediately for instant feedback
+            if (action === 'expandAll' || action === 'collapseAll') {
+                const shouldExpand = action === 'expandAll';
+                try {
+                    const folderItems = document.querySelectorAll('#file-list li.folder-item');
+                    folderItems.forEach(fi => {
+                        try {
+                            const pathAttr = fi.getAttribute('data-path');
+                            if (shouldExpand) {
+                                fi.classList.add('expanded');
+                                if (pathAttr) { try { expandedPaths.add(pathAttr); } catch (e) {} }
+                            } else {
+                                fi.classList.remove('expanded');
+                                if (pathAttr) { try { expandedPaths.delete(pathAttr); } catch (e) {} }
+                            }
+                        } catch (e) { /* ignore per-node errors */ }
+                    });
+                } catch (e) { /* swallow DOM errors */ }
+                // Also notify the host so provider/tree state stays in sync
+                postAction(action);
                 return;
             }
             if (action === 'togglePause') {
@@ -791,8 +882,8 @@ window.onload = function() {
                 try { setTimeout(() => { const repo = document.getElementById('ingest-repo'); if (repo && typeof repo.focus === 'function') { repo.focus(); } }, 0); } catch (e) {}
             });
         }
-    } catch (e) { /* swallow header ingest wiring errors */ }
-    try {
+    
+        // Also wire header settings button explicitly (header UI lives outside #toolbar)
         const headerSettings = document.getElementById('openSettings');
         if (headerSettings) {
             headerSettings.addEventListener('click', (ev) => {
@@ -801,12 +892,11 @@ window.onload = function() {
                 if (settingsEl) { settingsEl.hidden = false; }
                 // Request latest config from the extension for the settings UI
                 postAction('configRequest');
+                // focus first input in settings for keyboard users
                 try { setTimeout(() => { const first = settingsEl && settingsEl.querySelector ? settingsEl.querySelector('input,select,textarea,button') : null; if (first && typeof first.focus === 'function') { first.focus(); } }, 0); } catch (e) {}
             });
         }
-    } catch (e) { /* swallow header settings wiring errors */ }
-    // Also wire the explicit pause button if present (some DOM variants
-    // may render a dedicated pause button without data-action wiring).
+    } catch (e) { /* swallow header wiring errors */ }
     try {
         const explicitPause = nodes.pauseBtn || document.getElementById('btn-pause-resume');
         if (explicitPause) {
@@ -839,9 +929,9 @@ window.onload = function() {
         presetBtn.setAttribute('aria-expanded', 'true');
         presetMenu.removeAttribute('hidden');
         presetMenu.setAttribute('aria-hidden', 'false');
-        // focus first menuitem for keyboard users
-        const first = presetMenu.querySelector('[role="menuitem"]');
-        if (first && typeof first.focus === 'function') { first.focus(); }
+        // focus first option for keyboard users
+        const first = presetMenu.querySelector('[role="option"]');
+        if (first) { try { first.setAttribute('tabindex', '0'); first.focus(); } catch (e) {} }
         // capture outside clicks to close
         setTimeout(() => { window.addEventListener('click', onWindowClickForPreset); }, 0);
     }
@@ -872,32 +962,54 @@ window.onload = function() {
         nodes.presetBtn.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closePresetMenu(); } });
     }
     if (nodes.presetMenu) {
-        // Use a small delegation for menu items to avoid per-item wiring
+        // Use a small delegation for option clicks to avoid per-item wiring
         nodes.presetMenu.addEventListener('click', (ev) => {
-            const it = ev.target && ev.target.closest ? ev.target.closest('[role="menuitem"][data-preset]') : null;
+            const it = ev.target && ev.target.closest ? ev.target.closest('[role="option"][data-preset]') : null;
             if (!it) { return; }
             ev.preventDefault(); ev.stopPropagation();
             const preset = it.getAttribute('data-preset');
             if (preset) { postAction('applyPreset', { preset }); }
             closePresetMenu();
         });
+        // Keyboard navigation: Enter/Space to activate, Arrow keys to move focus
         nodes.presetMenu.addEventListener('keydown', (ev) => {
-            if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); const it = ev.target && ev.target.closest ? ev.target.closest('[role="menuitem"][data-preset]') : null; if (it) { it.click(); } }
-            if (ev.key === 'Escape') { closePresetMenu(); }
+            const options = Array.from(nodes.presetMenu.querySelectorAll('[role="option"]'));
+            const current = ev.target && ev.target.closest ? ev.target.closest('[role="option"]') : null;
+            const idx = current ? options.indexOf(current) : -1;
+            if (ev.key === 'Enter' || ev.key === ' ') {
+                ev.preventDefault(); if (current) { current.click(); }
+            } else if (ev.key === 'ArrowDown' || ev.key === 'ArrowRight') {
+                ev.preventDefault(); const next = options[Math.min(options.length - 1, Math.max(0, idx + 1))]; if (next) { try { options.forEach(o => o.setAttribute('tabindex', '-1')); next.setAttribute('tabindex', '0'); next.focus(); } catch (e) {} }
+            } else if (ev.key === 'ArrowUp' || ev.key === 'ArrowLeft') {
+                ev.preventDefault(); const prev = options[Math.max(0, idx - 1)]; if (prev) { try { options.forEach(o => o.setAttribute('tabindex', '-1')); prev.setAttribute('tabindex', '0'); prev.focus(); } catch (e) {} }
+            } else if (ev.key === 'Escape') { closePresetMenu(); }
         });
     }
     document.getElementById('ingest-cancel')?.addEventListener('click', () => { const m = document.getElementById('ingestModal'); if (m) { m.hidden = true; } });
     document.getElementById('ingest-submit')?.addEventListener('click', () => {
-        const repo = (document.getElementById('ingest-repo') || {}).value || '';
-        const ref = (document.getElementById('ingest-ref') || {}).value || '';
-        const subpath = (document.getElementById('ingest-subpath') || {}).value || '';
-        const includeSubmodules = !!(document.getElementById('ingest-submodules') && document.getElementById('ingest-submodules').checked);
-        if (!repo || repo.trim().length === 0) { showToast('Please enter a repo URL or owner/repo slug', 'error'); return; }
-        // simple client-side validation
-        const slugLike = /^[^\/]+\/[^\/]+$/.test(repo.trim()) || /github\.com\//.test(repo);
-        if (!slugLike) { showToast('Invalid repo format', 'error'); return; }
-    // send to extension
-    postAction('ingestRemote', { repo: repo.trim(), ref: ref.trim() || undefined, subpath: subpath.trim() || undefined, includeSubmodules });
+            const repo = (document.getElementById('ingest-repo') || {}).value || '';
+            const ref = (document.getElementById('ingest-ref') || {}).value || '';
+            const subpath = (document.getElementById('ingest-subpath') || {}).value || '';
+            const includeSubmodules = !!(document.getElementById('ingest-submodules') && document.getElementById('ingest-submodules').checked);
+            if (!repo || repo.trim().length === 0) { showToast('Please enter a repo URL or owner/repo slug', 'error'); return; }
+            // Normalise common URL/SSH forms to the owner/repo slug used by the host
+            let normalized = repo.trim();
+            try {
+                // git@github.com:owner/repo(.git) — explicitly capture owner and repo
+                const m1 = normalized.match(/^git@github\.com:([^\/\s]+)\/([^\/\s]+)(?:\.git)?$/i);
+                if (m1 && m1[1] && m1[2]) { normalized = `${m1[1]}/${m1[2]}`; }
+                // ssh://git@github.com/owner/repo(.git)
+                const m2 = normalized.match(/^ssh:\/\/git@github\.com\/([^\/\s]+)\/([^\/\s]+)(?:\.git)?$/i);
+                if (m2 && m2[1] && m2[2]) { normalized = `${m2[1]}/${m2[2]}`; }
+                // https://github.com/owner/repo(.git) or https://www.github.com/owner/repo
+                const m3 = normalized.match(/github\.com\/([^\/\s]+)\/([^\/\s]+)(?:\.git)?/i);
+                if (m3 && m3[1] && m3[2]) { normalized = `${m3[1]}/${m3[2]}`; }
+            } catch (e) { /* ignore normalization errors */ }
+            // Accept only owner/repo shape at this point
+            const slugLike = /^[^\/]+\/[^\/]+$/.test(normalized);
+            if (!slugLike) { showToast('Invalid repo format; expected owner/repo, https://github.com/owner/repo or git@github.com:owner/repo.git', 'error'); return; }
+        // send normalized slug to extension
+        postAction('ingestRemote', { repo: normalized, ref: ref.trim() || undefined, subpath: subpath.trim() || undefined, includeSubmodules });
     // set loading state in modal so users get immediate feedback
     if (nodes.ingestPreviewRoot) { nodes.ingestPreviewRoot.classList.add('loading'); }
     if (nodes.ingestSpinner) { nodes.ingestSpinner.hidden = false; nodes.ingestSpinner.removeAttribute('aria-hidden'); }
@@ -1008,7 +1120,9 @@ function populateSettings(settings) {
             changes.maxTotalSizeBytes = maxTotalSizeBytes;
             changes.tokenLimit = tokenLimit;
             const pv = (getEl('presets') && getEl('presets').value) || '';
-            changes.presets = pv.trim() ? pv.split(',').map(s => s.trim()).filter(Boolean) : [];
+            // Normalize UI 'presets' input to the runtime key 'filterPresets' so the
+            // host immediately uses them for scanning/filtering without a second-step sync.
+            changes.filterPresets = pv.trim() ? pv.split(',').map(s => s.trim()).filter(Boolean) : [];
             // include redaction keys at top-level settings
             const cfgChanges = Object.assign({}, changes);
             cfgChanges.showRedacted = showRedacted;

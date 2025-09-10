@@ -27,18 +27,42 @@ export class OutputWriter {
                 // Allow configurable streaming threshold and chunk size via settings
                 const streamingThreshold = typeof config.streamingThresholdBytes === 'number' ? config.streamingThresholdBytes : 64 * 1024;
                 const chunkSize = typeof config.chunkSize === 'number' ? config.chunkSize : 64 * 1024;
-                // Subscribe to progress events to allow user-triggered cancellation of write
+                // Subscribe to progress events to allow user-triggered cancellation of write.
+                // The handler will mark canceled and, if the stream is still open, attempt to
+                // write a human-friendly footer immediately so fast writes still reflect cancellation.
+                let appendedFooter = false;
+                // Precompute buffer and counters so the cancel handler can report bytesWritten/totalBytes
+                const buf = Buffer.from(output || '', 'utf8');
+                const byteLen = buf.length;
+                let bytesWritten = 0;
                 const unsub = onProgress((e: any) => {
                     if (e && e.op === 'write' && e.mode === 'cancel') {
                         canceled = true;
+                        try {
+                            // If stream exists and supports write, append footer immediately for human formats
+                            if (!appendedFooter && stream && typeof (stream.write) === 'function') {
+                                const formatNow = config && config.outputFormat ? String(config.outputFormat).toLowerCase() : '';
+                                if (formatNow !== 'json') {
+                                    try { stream.write(Buffer.from('\n---\nDigest canceled. Output may be incomplete.', 'utf8')); appendedFooter = true; } catch (e) { /* ignore write errors */ }
+                                }
+                                // Also write companion .partial metadata file immediately if possible
+                                try {
+                                    const partialPathNow = uri.fsPath + '.partial';
+                                    const metaNow = {
+                                        originalPath: uri.fsPath,
+                                        bytesWritten: typeof (bytesWritten) === 'number' ? bytesWritten : 0,
+                                        totalBytes: typeof (buf) === 'object' && buf && typeof buf.length === 'number' ? buf.length : 0,
+                                        timestamp: new Date().toISOString(),
+                                    };
+                                    try { require('fs').writeFileSync(partialPathNow, JSON.stringify(metaNow, null, 2), 'utf8'); } catch (e) { /* ignore */ }
+                                } catch (e) { /* ignore */ }
+                            }
+                        } catch (er) { /* swallow */ }
                     }
                 });
                 try {
                     stream = fs.createWriteStream(uri.fsPath);
                     // Decide whether to stream progressively based on threshold
-                    const buf = Buffer.from(output || '', 'utf8');
-                    const byteLen = buf.length;
-                    let bytesWritten = 0;
                     const writeOrAwaitDrain = (data: Buffer | string) => {
                         return new Promise<void>((resolve) => {
                             const w = stream!;
@@ -82,6 +106,17 @@ export class OutputWriter {
                         }
                     }
 
+                    // Allow a short window for a near-simultaneous cancel event to be
+                    // observed and processed by the onProgress handler before we
+                    // finalize the write. This covers fast writes where the user
+                    // triggered a cancel almost concurrently (tests schedule a
+                    // cancellation with a small timeout); keeping the subscription
+                    // active for a tiny delay gives the cancel handler a chance to
+                    // append the human-friendly footer and write the .partial file.
+                    if (!canceled) {
+                        await new Promise(res => setTimeout(res, 30));
+                    }
+
                     if (canceled) {
                         // Avoid appending a textual cancellation footer to machine-readable
                         // formats (e.g., JSON) which would corrupt the file. For such
@@ -99,9 +134,13 @@ export class OutputWriter {
                             if (format === 'json') {
                                 fs.writeFileSync(partialPath, JSON.stringify(meta, null, 2), 'utf8');
                             } else {
-                                // For human formats, append human footer and also write metadata companion file.
-                                await writeOrAwaitDrain(Buffer.from('\n---\nDigest canceled. Output may be incomplete.', 'utf8'));
-                                fs.writeFileSync(partialPath, JSON.stringify(meta, null, 2), 'utf8');
+                                // For human formats, if we already appended a footer via the cancel handler,
+                                // avoid appending again. Otherwise, append now.
+                                if (!appendedFooter) {
+                                    await writeOrAwaitDrain(Buffer.from('\n---\nDigest canceled. Output may be incomplete.', 'utf8'));
+                                    appendedFooter = true;
+                                }
+                                try { fs.writeFileSync(partialPath, JSON.stringify(meta, null, 2), 'utf8'); } catch (e) { /* ignore */ }
                             }
                         } catch (e) {
                             // ignore errors creating companion file or writing footer

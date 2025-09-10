@@ -31,10 +31,29 @@ import { validateConfig } from './utils/validateConfig';
 import { showUserError } from './utils/errors';
 import { setTransientOverride } from './utils/transientOverrides';
 import { WorkspaceManager } from './services/workspaceManager';
+import { clearListeners } from './providers/eventBus';
 // DEPRECATED: PreviewPanel import removed.
 
 export function activate(context: vscode.ExtensionContext) {
 try { console.log('[codebase-digest] activate() called'); } catch (e) { try { console.debug('extension.activate log failed', e); } catch {} }
+	// Surface any uncaught promise rejections or exceptions during extension runtime
+	const onUnhandledRejection = (reason: any, promise: Promise<any>) => {
+		try {
+			const msg = reason && reason.message ? reason.message : String(reason);
+			try { showUserError('An internal error occurred', String(msg)); } catch (e) { try { console.error('UnhandledRejection', msg); } catch {} }
+		} catch (e) {}
+	};
+	const onUncaughtException = (err: any) => {
+		try {
+			const msg = err && err.message ? err.message : String(err);
+			try { showUserError('An unexpected error occurred', String(msg)); } catch (e) { try { console.error('UncaughtException', msg); } catch {} }
+		} catch (e) {}
+	};
+	try {
+		(global as any).process && typeof (global as any).process.on === 'function' && (global as any).process.on('unhandledRejection', onUnhandledRejection);
+		(global as any).process && typeof (global as any).process.on === 'function' && (global as any).process.on('uncaughtException', onUncaughtException);
+		context.subscriptions.push({ dispose: () => { try { (global as any).process && typeof (global as any).process.removeListener === 'function' && (global as any).process.removeListener('unhandledRejection', onUnhandledRejection); } catch {} try { (global as any).process && typeof (global as any).process.removeListener === 'function' && (global as any).process.removeListener('uncaughtException', onUncaughtException); } catch {} } });
+	} catch (e) {}
 	// Ensure the sidebar view has a provider as early as possible so VS Code doesn't report "no data provider"
 	try {
 		const { registerCodebaseView } = require('./providers/codebasePanel');
@@ -140,6 +159,8 @@ try { console.log('[codebase-digest] activate() called'); } catch (e) { try { co
 			if (!services) { continue; }
 			const treeProvider = new CodebaseDigestTreeProvider(folder, services);
 			treeProviders.set(folder.uri.fsPath, treeProvider);
+			// Ensure the provider's disposable (watcher/timers) is disposed on extension deactivation
+			try { context.subscriptions.push({ dispose: () => { try { if (typeof (treeProvider as any).dispose === 'function') { (treeProvider as any).dispose(); } } catch (e) {} } }); } catch (e) {}
 			// Initial scan so the tree appears at activation
 			treeProvider.refresh();
 
@@ -305,7 +326,8 @@ try { console.log('[codebase-digest] activate() called'); } catch (e) { try { co
 							redactionPatterns: cfg.get('redactionPatterns', []),
 							redactionPlaceholder: cfg.get('redactionPlaceholder', '[REDACTED]'),
 							// pattern lists and ignore behavior
-							excludePatterns: cfg.get('excludePatterns', []),
+							// Provide safe defaults so large folders are excluded unless the user overrides them.
+							excludePatterns: cfg.get('excludePatterns', ['node_modules/**', '.git/**', '*.log', '*.tmp', '.DS_Store', 'Thumbs.db']),
 							includePatterns: cfg.get('includePatterns', []),
 							respectGitignore: cfg.get('respectGitignore', true),
 							gitignoreFiles: cfg.get('gitignoreFiles', ['.gitignore']),
@@ -545,6 +567,8 @@ try { console.log('[codebase-digest] activate() called'); } catch (e) { try { co
 					// Create and store a new tree provider
 					const treeProvider = new CodebaseDigestTreeProvider(folder, services);
 					treeProviders.set(folder.uri.fsPath, treeProvider);
+					// Ensure the provider's disposable (watcher/timers) is disposed on extension deactivation
+					try { context.subscriptions.push({ dispose: () => { try { if (typeof (treeProvider as any).dispose === 'function') { (treeProvider as any).dispose(); } } catch (e) {} } }); } catch (e) {}
 					// Initial scan
 					treeProvider.refresh();
 					// Register sidebar view for this provider
@@ -593,4 +617,6 @@ try { console.log('[codebase-digest] activate() called'); } catch (e) { try { co
 	});
 }
 
-export function deactivate() {}
+export function deactivate() {
+	try { clearListeners(); } catch (e) { /* ignore */ }
+}

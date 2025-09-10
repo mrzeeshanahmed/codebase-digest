@@ -24,14 +24,26 @@
         <symbol id="icon-chevron-up" viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M7.646 4.646a.5.5 0 0 1 .708 0l6 6a.5.5 0 0 1-.708.708L8 5.707l-5.646 5.647a.5.5 0 0 1-.708-.708l6-6z"/></symbol>
         <symbol id="icon-chevron-down" viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708z"/></symbol>
     <!-- other symbols... -->
+        <symbol id="icon-settings" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.62l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.027 7.027 0 0 0-1.63-.94l-.36-2.54A.5.5 0 0 0 13.75 2h-3.5a.5.5 0 0 0-.5.43l-.36 2.54c-.57.22-1.1.52-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.7 8.88a.5.5 0 0 0 .12.62l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94L2.82 15.9a.5.5 0 0 0-.12.62l1.92 3.32c.14.24.44.34.7.22l2.39-.96c.5.42 1.06.76 1.63.94l.36 2.54c.05.27.28.46.55.46h3.5c.27 0 .5-.19.55-.46l.36-2.54c.57-.18 1.13-.52 1.63-.94l2.39.96c.26.11.56.02.7-.22l1.92-3.32a.5.5 0 0 0-.12-.62l-2.03-1.58zM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7z"/>
+        </symbol>
+        <!-- Alias for other icon sets that reference a different id (ensures header uses an available id) -->
+        <symbol id="icon-settings-gear" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.62l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.027 7.027 0 0 0-1.63-.94l-.36-2.54A.5.5 0 0 0 13.75 2h-3.5a.5.5 0 0 0-.5.43l-.36 2.54c-.57.22-1.1.52-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.7 8.88a.5.5 0 0 0 .12.62l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94L2.82 15.9a.5.5 0 0 0-.12.62l1.92 3.32c.14.24.44.34.7.22l2.39-.96c.5.42 1.06.76 1.63.94l.36 2.54c.05.27.28.46.55.46h3.5c.27 0 .5-.19.55-.46l.36-2.54c.57-.18 1.13-.52 1.63-.94l2.39.96c.26.11.56.02.7-.22l1.92-3.32a.5.5 0 0 0-.12-.62l-2.03-1.58zM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7z"/>
+        </symbol>
     <symbol id="icon-check" viewBox="0 0 16 16" fill="currentColor"><path d="M13.485 1.929a1 1 0 0 1 1.415 1.414l-8.25 8.25a1 1 0 0 1-1.414 0l-4-4a1 1 0 0 1 1.414-1.414L6 9.586l7.485-7.657z"/></symbol>
         <symbol id="icon-cloud-download" viewBox="0 0 24 24" fill="currentColor"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM17 13l-5 5-5-5h3V9h4v4h3z"/></symbol>
-        <symbol id="icon-generate" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L2 7v6c0 5 4 9 10 9s10-4 10-9V7l-10-5zm0 11a3 3 0 1 1 0-6 3 3 0 0 1 0 6z"/></symbol>
+                <symbol id="icon-generate" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L2 7v6c0 5 4 9 10 9s10-4 10-9V7l-10-5zm0 11a3 3 0 1 1 0-6 3 3 0 0 1 0 6z"/></symbol>
+                <!-- compact inline logo symbol for header (scales with currentColor) -->
+                <symbol id="icon-logo" viewBox="0 0 24 24" fill="currentColor">
+                    <rect x="2" y="2" width="20" height="20" rx="4" ry="4"></rect>
+                    <path d="M9 8h1v8H9zM14 8h1v8h-1z" fill="#fff" opacity="0.9"></path>
+                </symbol>
     </svg>
 
     <div class="container" id="dashboard">
         <header class="main-header">
-            <img src="../icons/icon.png" alt="Extension Logo" class="logo">
+            <svg class="logo" aria-hidden="true"><use href="#icon-logo"></use></svg>
             <div id="workspace-info">
                     <h1>Code Ingest</h1>
                 <div id="workspace-slug" aria-live="polite">&nbsp;</div>
@@ -42,6 +54,10 @@
                 </button>
                 <button id="openSettings" type="button" data-action="openSettings" title="Open Settings">
                     <svg class="icon"><use href="#icon-settings"></use></svg>
+                </button>
+                <button id="btn-pause-resume" type="button" data-action="togglePause" aria-pressed="false" title="Pause/Resume">
+                    <svg class="icon"><use href="#icon-refresh"></use></svg>
+                    <span class="sr-only">Pause</span>
                 </button>
                 <button id="preset-btn" type="button" aria-haspopup="true" aria-expanded="false" title="Presets">
                     <svg class="icon"><use href="#icon-check"></use></svg>
@@ -55,10 +71,10 @@
         </header>
 
         <!-- Visible preset menu (previously hidden) - kept adjacent to header for positioning -->
-        <div id="preset-menu" role="menu" aria-label="Presets menu" aria-hidden="true" hidden>
-            <button role="menuitem" data-preset="codeOnly">Code Only</button>
-            <button role="menuitem" data-preset="docsOnly">Docs Only</button>
-            <button role="menuitem" data-preset="testsOnly">Tests Only</button>
+        <div id="preset-menu" role="listbox" aria-label="Presets" aria-hidden="true" hidden aria-multiselectable="false">
+            <button role="option" data-preset="codeOnly" tabindex="-1">Code Only</button>
+            <button role="option" data-preset="docsOnly" tabindex="-1">Docs Only</button>
+            <button role="option" data-preset="testsOnly" tabindex="-1">Tests Only</button>
         </div>
 
         <div class="action-bar">
@@ -217,7 +233,6 @@
     
     <!-- Hidden toolbar for JS functionality that doesn't need a visible button in the new UI -->
     <div hidden id="hidden-toolbar">
-        <button id="btn-pause-resume" type="button" data-action="togglePause"></button>
         <button id="btn-cancel-write" type="button" data-action="cancelWrite"></button>
         <button id="btn-token-count" type="button" data-action="tokenCount"></button>
     <!-- redaction toggle moved to visible header for discoverability -->

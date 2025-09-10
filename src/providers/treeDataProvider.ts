@@ -13,7 +13,7 @@ import { emitProgress } from './eventBus';
 import { getMutex } from '../utils/asyncLock';
 import { minimatch } from 'minimatch';
 
-export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileNode> {
+export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileNode>, vscode.Disposable {
     private expandState: ExpandState;
 
     /**
@@ -46,6 +46,7 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
     private lastScanStats: any;
     private directoryCache: DirectoryCache;
     private diagnostics: Diagnostics;
+    private _watcher?: vscode.FileSystemWatcher | null;
     private scanning: boolean = false;
     // Simple cancellation token for scan operations
     private scanToken: { isCancellationRequested?: boolean } | null = null;
@@ -69,6 +70,8 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
         const watcher = (vscode.workspace && typeof (vscode.workspace as any).createFileSystemWatcher === 'function')
             ? (vscode.workspace as any).createFileSystemWatcher('**/*')
             : null;
+    // Store watcher on instance so it can be disposed later
+    this._watcher = watcher;
     const path = require('path');
     this.diagnostics = services && services.diagnostics ? services.diagnostics : new Diagnostics('info');
         const handleChange = (uri: vscode.Uri) => {
@@ -141,6 +144,21 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
             watcher.onDidDelete(handleChange);
             watcher.onDidChange(handleChange);
         }
+        // Ensure the provider can be cleanly disposed by callers. Tests and extension activation
+        // code may call dispose() when a workspace is removed. We implement a typed
+        // dispose() method below on the class so the vscode.Disposable contract is satisfied.
+    }
+
+    public dispose(): void {
+        try {
+            // clear debounce timers
+            for (const t of this.debounceTimers.values()) { try { clearTimeout(t as any); } catch {} }
+            this.debounceTimers.clear();
+        } catch (e) { /* ignore */ }
+        try { this.pendingHydrations.clear(); } catch (e) { /* ignore */ }
+        try { if (this._watcher && typeof (this._watcher.dispose) === 'function') { this._watcher.dispose(); } } catch (e) { /* ignore */ }
+        try { this._onDidChangeTreeData.dispose(); } catch (e) { /* ignore */ }
+        try { emitProgress({ op: 'scan', mode: 'end', determinate: false, message: 'provider disposed' }); } catch (e) { /* ignore */ }
     }
 
     toggleSelection(node: FileNode): void { this.selectionManager.toggleSelection(node); }

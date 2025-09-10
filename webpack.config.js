@@ -60,6 +60,18 @@ const extensionConfig = {
           }
         ]
       }
+      ,
+      // Emit webview static assets (css/js/html/images) as separate files so they
+      // are available at runtime via Webview.asWebviewUri and are not inlined
+      // into the extension bundle.
+      {
+        test: /\.(png|jpg|jpeg|gif|svg|css|html|js)$/,
+        include: path.resolve(__dirname, 'resources', 'webview'),
+        type: 'asset/resource',
+        generator: {
+          filename: 'resources/webview/[name][ext]'
+        }
+      }
     ]
   },
   devtool: 'nosources-source-map',
