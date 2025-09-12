@@ -443,6 +443,21 @@
           "default": true,
           "description": "Collect performance metrics during scan."
         },
+        "codebaseDigest.maxPendingHydrations": {
+          "type": "number",
+          "default": 200,
+          "description": "Maximum number of coalesced pending directory hydrations before scheduling a full refresh. Increase to allow more per-directory updates, decrease to prefer full refreshes."
+        },
+        "codebaseDigest.pendingHydrationBatchSize": {
+          "type": "number",
+          "default": 25,
+          "description": "Number of pending directory hydrations to process per batch to avoid blocking the event loop."
+        },
+        "codebaseDigest.pendingHydrationBatchDelayMs": {
+          "type": "number",
+          "default": 25,
+          "description": "Milliseconds to wait between pending hydration batches to yield to the event loop."
+        },
         "codebaseDigest.redactionPatterns": {
           "type": "array",
           "default": [],

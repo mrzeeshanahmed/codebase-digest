@@ -15,6 +15,13 @@ import { minimatch } from 'minimatch';
 
 export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileNode>, vscode.Disposable {
     private expandState: ExpandState;
+    // When filesystem events produce a very large number of pending hydrations,
+    // avoid processing them all in a tight loop which can block the event loop
+    // and lead to poor UI responsiveness. We make these tunable via workspace
+    // settings so users and telemetry can refine them over time.
+    private static readonly DEFAULT_MAX_PENDING_HYDRATIONS = 200;
+    private static readonly DEFAULT_PENDING_BATCH_SIZE = 25;
+    private static readonly DEFAULT_PENDING_BATCH_DELAY_MS = 25;
 
     /**
      * Expand all folders up to MAX_EXPAND_DEPTH
@@ -56,11 +63,15 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
     // requests here so many watcher events don't queue up many expensive scans.
     private pendingHydrations: Set<string> = new Set();
     private selectionManager: SelectionManager;
+    // Optional metrics service injected via services bundle
+    private metrics?: any;
 
     constructor(folder: vscode.WorkspaceFolder, services: any) {
     this.workspaceFolder = folder;
     this.gitignoreService = services.gitignoreService;
     this.fileScanner = services.fileScanner;
+    // Prefer an explicitly provided metrics service if present
+    this.metrics = services && services.metrics ? services.metrics : undefined;
     this.workspaceRoot = folder.uri.fsPath;
     this.directoryCache = new DirectoryCache(this.fileScanner);
     this.selectionManager = new SelectionManager(() => this.rootNodes, this.selectedRelPaths, (n) => this._onDidChangeTreeData.fire(n), () => this.previewUpdater && this.previewUpdater());
@@ -150,7 +161,14 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
                 if (prev) { clearTimeout(prev); }
             } catch (e) { /* ignore timing clear errors */ }
             const t = setTimeout(async () => {
-                try { await runNow(); } catch (e) { /* swallow */ } finally { this.debounceTimers.delete(key); }
+                try {
+                    try { await runNow(); } catch (e) { try { this.diagnostics && this.diagnostics.warn ? this.diagnostics.warn('debounced runNow failed', e) : console.warn('debounced runNow failed', e); } catch {} }
+                } catch (outerErr) {
+                    // Catch any unexpected synchronous errors thrown while handling the debounce
+                    try { this.diagnostics && this.diagnostics.warn ? this.diagnostics.warn('debounce handler failed', outerErr) : console.warn('debounce handler failed', outerErr); } catch {}
+                } finally {
+                    try { this.debounceTimers.delete(key); } catch (e) { /* swallow */ }
+                }
             }, 250);
             this.debounceTimers.set(key, t as ReturnType<typeof setTimeout>);
         };
@@ -340,35 +358,103 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
             // full workspace scan was running. We handle these sequentially using
             // the workspace mutex to avoid races with other scans.
             if (this.pendingHydrations.size > 0) {
-                const pending = Array.from(this.pendingHydrations);
-                // Clear the set early so new watcher events are accumulated separately
+                // Snapshot and clear early so incoming watcher events are captured separately
+                const allPending = Array.from(this.pendingHydrations);
                 this.pendingHydrations.clear();
+                const backlog = allPending.length;
                 const config = this.loadConfig();
-                for (const dirPath of pending) {
+
+                // Allow tuning via workspace settings. If settings are not present,
+                // fall back to reasonable defaults defined above.
+                const cfg = vscode.workspace.getConfiguration('codebaseDigest', this.workspaceFolder.uri);
+                const maxPending = cfg.get('maxPendingHydrations', CodebaseDigestTreeProvider.DEFAULT_MAX_PENDING_HYDRATIONS) as number;
+                const batchSize = cfg.get('pendingHydrationBatchSize', CodebaseDigestTreeProvider.DEFAULT_PENDING_BATCH_SIZE) as number;
+                const batchDelay = cfg.get('pendingHydrationBatchDelayMs', CodebaseDigestTreeProvider.DEFAULT_PENDING_BATCH_DELAY_MS) as number;
+
+                // Lightweight telemetry hook: prefer an explicitly injected metrics service, otherwise fall back to Diagnostics logging.
+                const metricsSvc = this.metrics || (this as any).services && (this as any).services.metrics;
+                const logTelemetry = (payload: any) => {
                     try {
-                        // Find parent node in the freshly-scanned tree
-                        const findNode = (nodes: FileNode[]): FileNode | undefined => {
-                            for (const node of nodes) {
-                                if (node.path === dirPath && node.type === 'directory') { return node; }
-                                if (node.children) { const f = findNode(node.children); if (f) { return f; } }
-                            }
-                            return undefined;
-                        };
-                        const parentNode = findNode(this.rootNodes);
-                        if (!parentNode) { continue; }
-                        const m = getMutex(this.workspaceRoot || this.workspaceFolder.uri.fsPath);
-                        const relRelease = await m.lock();
+                        // Enrich payload with workspace-level snapshot if available
                         try {
-                            const children = await this.fileScanner.scanDirectory(parentNode.path, config, undefined);
-                            parentNode.children = children;
-                            this.directoryCache.set(parentNode.path, children);
-                            this._onDidChangeTreeData.fire(parentNode);
-                        } finally {
-                            try { relRelease(); } catch (e) { /* swallow */ }
+                            payload.workspace = payload.workspace || {};
+                            payload.workspace.path = this.workspaceRoot;
+                            payload.workspace.totalFiles = this.totalFiles || (this.lastScanStats && this.lastScanStats.totalFiles) || 0;
+                            payload.workspace.totalSize = this.totalSize || (this.lastScanStats && this.lastScanStats.totalSize) || 0;
+                            payload.provider = payload.provider || { pendingHydrationsCount: backlog, rootNodes: (this.rootNodes && this.rootNodes.length) || 0 };
+                        } catch (e) { /* swallow enrichment errors */ }
+
+                        if (metricsSvc && typeof metricsSvc.inc === 'function') {
+                            // If metrics exposes counters, increment a lightweight event counter
+                            try { metricsSvc.inc('pendingHydrationsEvents', 1); } catch (e) { /* ignore */ }
+                            // If the metrics service supports logging or flushing, call it
+                            if (typeof (metricsSvc as any).log === 'function') {
+                                try { (metricsSvc as any).log(); } catch (_) { /* ignore */ }
+                            }
+                            // Also write structured debug to Diagnostics for easier local inspection
+                            try { this.diagnostics && this.diagnostics.debug ? this.diagnostics.debug('pendingHydrations.telemetry', payload) : console.debug('pendingHydrations.telemetry', payload); } catch (e) { /* swallow */ }
+                        } else {
+                            // Use Diagnostics output channel for structured debug logging
+                            try { this.diagnostics && this.diagnostics.debug ? this.diagnostics.debug('pendingHydrations.telemetry', payload) : console.debug('pendingHydrations.telemetry', payload); } catch (e) { /* swallow */ }
                         }
-                    } catch (e) {
-                        try { this.diagnostics && this.diagnostics.warn ? this.diagnostics.warn('pending hydration failed', e) : console.warn('pending hydration failed', e); } catch {}
+                    } catch (e) { /* swallow */ }
+                };
+
+                // If backlog is huge, prefer scheduling a full refresh rather than
+                // iterating an enormous list of per-directory hydrations which can
+                // be far slower than a single optimized workspace scan.
+                if (backlog > maxPending) {
+                    try {
+                        // Emit telemetry with backlog size and chosen threshold
+                        logTelemetry({ event: 'backlog_too_large', backlog, maxPending, batchSize, batchDelay, ts: Date.now() });
+                        // Schedule a deferred full refresh to allow the UI to breathe
+                        // and to let further watcher events be coalesced into the next scan.
+                        setTimeout(() => {
+                            try { this.refresh(); } catch (e) { /* swallow */ }
+                        }, 50);
+                        try { this.diagnostics && this.diagnostics.warn ? this.diagnostics.warn(`pendingHydrations backlog too large (${backlog}), scheduling full refresh (maxPending=${maxPending})`) : console.warn(`pendingHydrations backlog too large (${backlog}), scheduling full refresh (maxPending=${maxPending})`); } catch {}
+                    } catch (e) { /* swallow scheduling errors */ }
+                } else {
+                    // Process in small batches to avoid blocking the event loop for too long
+                    let idx = 0;
+                    const startMs = Date.now();
+                    while (idx < allPending.length) {
+                        const batch = allPending.slice(idx, idx + batchSize);
+                        // Process the batch in parallel-ish but still serialized with the workspace mutex
+                        for (const dirPath of batch) {
+                            try {
+                                // Find parent node in the freshly-scanned tree
+                                const findNode = (nodes: FileNode[]): FileNode | undefined => {
+                                    for (const node of nodes) {
+                                        if (node.path === dirPath && node.type === 'directory') { return node; }
+                                        if (node.children) { const f = findNode(node.children); if (f) { return f; } }
+                                    }
+                                    return undefined;
+                                };
+                                const parentNode = findNode(this.rootNodes);
+                                if (!parentNode) { continue; }
+                                const m = getMutex(this.workspaceRoot || this.workspaceFolder.uri.fsPath);
+                                const relRelease = await m.lock();
+                                try {
+                                    const children = await this.fileScanner.scanDirectory(parentNode.path, config, undefined);
+                                    parentNode.children = children;
+                                    this.directoryCache.set(parentNode.path, children);
+                                    this._onDidChangeTreeData.fire(parentNode);
+                                } finally {
+                                    try { relRelease(); } catch (e) { /* swallow */ }
+                                }
+                            } catch (e) {
+                                try { this.diagnostics && this.diagnostics.warn ? this.diagnostics.warn('pending hydration failed', e) : console.warn('pending hydration failed', e); } catch {}
+                            }
+                        }
+                        idx += batchSize;
+                        // yield to the event loop briefly between batches
+                        if (idx < allPending.length) {
+                            await new Promise(res => setTimeout(res, batchDelay));
+                        }
                     }
+                    const elapsed = Date.now() - startMs;
+                    try { logTelemetry({ event: 'backlog_processed', backlog, batchSize, batchDelay, elapsed, ts: Date.now() }); } catch (e) { /* swallow */ }
                 }
             }
             this.scanning = false;

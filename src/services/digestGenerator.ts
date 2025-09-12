@@ -149,10 +149,53 @@ export class DigestGenerator {
             try {
                 imports = await analyzeImports(file.path, ext, body);
             } catch (e: any) {
-                // Record analyzeImports failures as per-file errors so they are surfaced in the summary
+                // If dependency analysis fails, degrade gracefully:
+                // 1) Log a concise message to the shared OutputChannel (non-fatal)
+                // 2) Push a user-facing warning (so callers see something in the summary)
+                // 3) Attempt a lightweight heuristic fallback to extract import/require statements
                 const msg = e && e.message ? String(e.message) : String(e || 'analyzeImports failed');
-                perFileErrors.push({ path: file.relPath, message: `analyzeImports: ${msg}`, stack: e && e.stack ? String(e.stack) : undefined });
-                imports = [];
+                try {
+                    const ch = DigestGenerator.getErrorChannel();
+                    if (ch) {
+                        ch.appendLine(`[analyzeImports] ${file.relPath}: ${msg}`);
+                        if (e && e.stack) { ch.appendLine(String(e.stack)); }
+                    }
+                } catch (ee) { /* swallow channel failures */ }
+                try { warnings.push(`Dependency analysis failed for ${file.relPath}; proceeding without full import resolution`); } catch (ee) { /* swallow */ }
+                try { perFileErrors.push({ path: file.relPath, message: `analyzeImports: ${msg}`, stack: e && e.stack ? String(e.stack) : undefined }); } catch (ee) { /* swallow */ }
+                // Heuristic fallback: scan the file body for common import/require patterns to capture likely deps.
+                try {
+                    const heur: string[] = [];
+                    if (body && typeof body === 'string') {
+                        // match ES import statements: import X from 'mod' or import 'mod'
+                        const importRe = /import\s+(?:[\s\S]+?)from\s+['"]([^'"]+)['"]/g;
+                        let m: RegExpExecArray | null = null;
+                        while ((m = importRe.exec(body)) !== null) {
+                            if (m[1]) { heur.push(m[1]); }
+                        }
+                        // match bare imports like: import 'mod';
+                        const importBareRe = /import\s+['"]([^'"]+)['"]/g;
+                        while ((m = importBareRe.exec(body)) !== null) {
+                            if (m[1]) { heur.push(m[1]); }
+                        }
+                        // match CommonJS requires: require('mod') or require("mod")
+                        const reqRe = /require\(\s*['"]([^'"]+)['"]\s*\)/g;
+                        while ((m = reqRe.exec(body)) !== null) {
+                            if (m[1]) { heur.push(m[1]); }
+                        }
+                        // De-dup and prefer package-like names
+                        const seenH = new Set<string>();
+                        const finalH = [] as string[];
+                        for (const h of heur) {
+                            if (!seenH.has(h)) { seenH.add(h); finalH.push(h); }
+                        }
+                        imports = finalH;
+                    } else {
+                        imports = [];
+                    }
+                } catch (ee) {
+                    imports = [];
+                }
             }
             // Token estimation (unchanged semantics)
             let tokenizer = config.tokenModel ? getTokenizer(config.tokenModel) : undefined;
