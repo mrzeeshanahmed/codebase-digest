@@ -155,23 +155,40 @@ export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?
     const url = `https://github.com/${owner}/${repo}.git`;
     // Use a session-unique prefix to reduce collisions and make tmp dir scoping obvious
     const sessionPrefix = `${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2,8)}-`;
-    const dir = tmpDir || fs.mkdtempSync(path.join(os.tmpdir(), `${sessionPrefix}${repo}-`));
-    if (!tmpDir) { _createdTmpDirs.push(dir); }
+    let dir = tmpDir || fs.mkdtempSync(path.join(os.tmpdir(), `${sessionPrefix}${repo}-`));
+    if (!tmpDir) {
+        _createdTmpDirs.push(dir);
+        // Write a small metadata file so we can later identify the creator process
+        try {
+            const meta = {
+                pid: process.pid,
+                ppid: (process as any).ppid || null,
+                createdAt: new Date().toISOString(),
+                exec: process.execPath,
+                stack: (new Error()).stack?.split('\n').slice(2,8)
+            } as any;
+            fs.writeFileSync(path.join(dir, '.codebase-digest-creator.json'), JSON.stringify(meta, null, 2));
+        } catch (e) { /* best-effort, ignore */ }
+    }
     let env: any = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
     // Helper to write askpass script into `dir` and set env vars accordingly
-    const askpassPath = path.join(dir, '.git-askpass.sh');
+    // Write askpass helper into a separate temp dir (not the clone target) so the
+    // clone target stays empty. Only create the helper when we have a token.
+    let askpassDir: string | undefined;
+    let askpassPath: string | undefined;
     const writeAskpass = () => {
-        const script = `#!/bin/sh\ncase \"$1\" in\n*Username*) printf 'x-access-token\\n' ;;\n*Password*) printf '%s\\n' \"$GIT_ASKPASS_TOKEN\" ;;\n*) printf '\\n' ;;\nesac\n`;
+        if (!providedToken) { return; }
         try {
+            askpassDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codebase-digest-askpass-'));
+            askpassPath = path.join(askpassDir, 'git-askpass.sh');
+            const script = `#!/bin/sh\ncase \"$1\" in\n*Username*) printf 'x-access-token\\n' ;;\n*Password*) printf '%s\\n' \"$GIT_ASKPASS_TOKEN\" ;;\n*) printf '\\n' ;;\nesac\n`;
             fs.writeFileSync(askpassPath, script, { mode: 0o700 });
             try { fs.chmodSync(askpassPath, 0o700); } catch (e) { /* ignore */ }
-        } catch (e) {
-            // If we cannot write the helper, fall back to token-in-url as last resort
-            // but ensure we scrub outputs. This should be rare.
-            // Note: we still prefer the askpass approach.
-        }
-        if (providedToken) {
             env = { ...env, GIT_ASKPASS: askpassPath, GIT_ASKPASS_TOKEN: providedToken };
+        } catch (e) {
+            // If we cannot write the helper, fall back to token-in-url as last resort.
+            // Swallow here; clone will still attempt and may fail with a sanitized error.
+            try { askpassDir = undefined; askpassPath = undefined; } catch (_) {}
         }
     };
     // Create askpass helper before any clone attempt
@@ -181,21 +198,63 @@ export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?
     try {
         // Step 1: git clone
         // Pick clone args; allow opts.skipFilter to disable the blob filter if requested
-    const baseCloneArgs = opts && opts.skipFilter ? ['clone','--no-checkout','--depth','1','--single-branch',url,dir] : ['clone','--no-checkout','--depth','1','--filter=blob:none','--single-branch',url,dir];
-    try {
-        await spawnGitPromise(baseCloneArgs, { env }).then(() => {});
-    } catch (cloneErr: any) {
-        const details = scrubTokens(String(cloneErr && (cloneErr.details || cloneErr.message) ? (cloneErr.details || cloneErr.message) : cloneErr || ''));
-        const lower = (details || '').toLowerCase();
-        if (lower.includes('enoent') || lower.includes('spawn git') || lower.includes('not found')) {
-            // Provide clearer guidance for missing Git executable
-            const msg = 'Git not found: please install Git and ensure it is available on your PATH. Visit https://git-scm.com/downloads, install Git, then restart Visual Studio Code and retry. Verify by running `git --version` in your terminal.';
-            const err = new Error(msg);
-            try { (err as any).details = details; } catch (_) {}
-            throw err;
+        const baseCloneArgsTemplate = opts && opts.skipFilter ? ['clone','--no-checkout','--depth','1','--single-branch',url] : ['clone','--no-checkout','--depth','1','--filter=blob:none','--single-branch',url];
+        // Defensive retry: if an external process has created a conflicting temp dir
+        // (destination already exists and is not empty), allocate a fresh mkdtemp and retry.
+        const maxCloneAttempts = 3;
+        let cloneAttempt = 0;
+        while (true) {
+            const baseCloneArgs = [...baseCloneArgsTemplate, dir];
+            try {
+                await spawnGitPromise(baseCloneArgs, { env }).then(() => {});
+                break; // success
+            } catch (cloneErr: any) {
+                const details = scrubTokens(String(cloneErr && (cloneErr.details || cloneErr.message) ? (cloneErr.details || cloneErr.message) : cloneErr || ''));
+                const lower = (details || '').toLowerCase();
+                // Detect missing git executable and rethrow with clearer guidance
+                if (lower.includes('enoent') || lower.includes('spawn git') || lower.includes('not found')) {
+                    const msg = 'Git not found: please install Git and ensure it is available on your PATH. Visit https://git-scm.com/downloads, install Git, then restart Visual Studio Code and retry. Verify by running `git --version` in your terminal.';
+                    const err = new Error(msg);
+                    try { (err as any).details = details; } catch (_) {}
+                    throw err;
+                }
+                // Handle destination-collision cases by retrying with a fresh mkdtemp
+                if (lower.includes('already exists') || lower.includes('destination path')) {
+                    cloneAttempt += 1;
+                    if (cloneAttempt >= maxCloneAttempts) {
+                        // Exhausted retries; rethrow original error
+                        throw cloneErr;
+                    }
+                    // Allocate a new temp dir and continue; do not attempt to remove an
+                    // externally-created directory. Track newly-created dirs for cleanup.
+                    try {
+                        const newDir = fs.mkdtempSync(path.join(os.tmpdir(), `${sessionPrefix}${repo}-`));
+                        if (!tmpDir) { _createdTmpDirs.push(newDir); }
+                        // Best-effort: annotate dir so future investigations can attribute it
+                        try {
+                            const meta = {
+                                pid: process.pid,
+                                ppid: (process as any).ppid || null,
+                                createdAt: new Date().toISOString(),
+                                exec: process.execPath,
+                                stack: (new Error()).stack?.split('\n').slice(2,8)
+                            } as any;
+                            fs.writeFileSync(path.join(newDir, '.codebase-digest-creator.json'), JSON.stringify(meta, null, 2));
+                        } catch (_) { /* ignore */ }
+                        dir = newDir;
+                        // Re-write askpass helper if needed so GIT_ASKPASS points to a valid file
+                        try { writeAskpass(); } catch (_) { /* ignore */ }
+                        // continue loop and retry clone
+                        continue;
+                    } catch (mkErr) {
+                        // If we cannot create a fresh temp dir, surface original clone error
+                        throw cloneErr;
+                    }
+                }
+                // Otherwise rethrow the clone error
+                throw cloneErr;
+            }
         }
-        throw cloneErr;
-    }
         // Step 2: sparse-checkout if subpath and not explicitly skipped
         if (subpath && !(opts && opts.skipSparse)) {
             try {
@@ -244,6 +303,10 @@ export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?
         } catch (ce) {
             // swallow cleanup errors; caller will see original error
         }
+        // Also attempt to cleanup the askpass helper dir if we created one
+        try {
+            if (askpassDir && fs.existsSync(askpassDir)) { fs.rmSync(askpassDir, { recursive: true, force: true }); }
+        } catch (_) { /* ignore */ }
         throw err;
     }
     // Step 3: git checkout
@@ -260,6 +323,11 @@ export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?
         }
         throw checkoutErr;
     }
+    // Clean up the askpass helper now that clone/checkout are complete. Keep the
+    // clone target intact; the helper is only needed for the git operations above.
+    try {
+        if (askpassDir && fs.existsSync(askpassDir)) { fs.rmSync(askpassDir, { recursive: true, force: true }); }
+    } catch (_) { /* ignore */ }
     return dir;
 }
 
@@ -282,119 +350,56 @@ export function cleanupSessionTmpDirs(): void {
     }
 }
 
-export async function ingestRemoteRepo(urlOrSlug: string, options?: { ref?: { tag?: string; branch?: string; commit?: string }, subpath?: string, includeSubmodules?: boolean }): Promise<{ localPath: string; meta: RemoteRepoMeta }> {
-    let tmpDir: string | undefined;
+export async function ingestRemoteRepo(urlOrSlug: string, options?: { ref?: { tag?: string; branch?: string; commit?: string }, subpath?: string, includeSubmodules?: boolean }, tmpDir?: string): Promise<{ localPath: string; meta: RemoteRepoMeta }> {
     let localPath: string | undefined;
     try {
         let ownerRepo = urlOrSlug;
-        let refType = '';
-        let refValue = '';
         if (urlOrSlug.startsWith('https://')) {
             const m = urlOrSlug.match(/github.com\/([^\/]+\/[^\/]+)(?:\/|$)/);
             if (!m) {
-                await interactiveMessages.showUserError(new Error(scrubTokens('Invalid GitHub URL or owner/repo slug')), scrubTokens(urlOrSlug));
-                throw new Error(scrubTokens('Invalid GitHub URL or owner/repo slug'));
+                await interactiveMessages.showUserError(new Error('Invalid GitHub URL'), tmpDir || urlOrSlug);
+                throw new Error('Invalid GitHub URL');
             }
             ownerRepo = m[1];
         }
-        // Determine repository visibility first. If the repository is public we can
-        // bypass authentication entirely. If private, only allow ingest when the
-        // authenticated user is the repo owner.
-        let token: string | undefined = undefined;
-        let resolved: { sha: string; branch?: string; tag?: string; commit?: string } = { sha: '' };
-        try {
-            // Unauthenticated request to check repo visibility
-            const repoResp = await safeFetch(`https://api.github.com/repos/${ownerRepo}`);
-            if (repoResp && repoResp.ok) {
-                const repoInfo = await repoResp.json();
-                if (!repoInfo.private) {
-                    // Public repo — do not request auth, proceed unauthenticated
-                    token = undefined;
-                } else {
-                    // Private repo — require authentication and verify ownership
-                    const sessionToken = await authenticate();
-                    // Fetch repository info using authenticated request to ensure access
-                    const [repoOwner, repoName] = ownerRepo.split('/');
-                    const repoInfoAuth = await githubApiRequest(`/repos/${repoOwner}/${repoName}`, sessionToken);
-                    // Fetch authenticated user
-                    const userInfo = await githubApiRequest('/user', sessionToken);
-                    const authLogin = userInfo && userInfo.login ? String(userInfo.login) : null;
-                    const repoOwnerLogin = repoInfoAuth && repoInfoAuth.owner && repoInfoAuth.owner.login ? String(repoInfoAuth.owner.login) : null;
-                    if (!authLogin || !repoOwnerLogin || authLogin !== repoOwnerLogin) {
-                        throw new Error('Access denied: the authenticated GitHub account does not own this private repository.');
-                    }
-                    token = sessionToken;
-                }
-            } else {
-                // If we couldn't determine visibility (network/rate-limit), fall back
-                // to attempting authentication so the later resolveRefToSha can use
-                // the API path if possible.
-                token = await authenticate();
-            }
-        } catch (visErr: any) {
-            // If checking visibility failed due to network/auth or other transient
-            // issues, fall back to requesting authentication so we can proceed.
-            try {
-                token = await authenticate();
-            } catch (authErr) {
-                // Re-throw original visibility error if authentication fails too
-                if (visErr && visErr.message) { visErr.message = scrubTokens(String(visErr.message)); }
-                throw visErr;
-            }
-        }
-        if (options?.ref) {
-            if (options.ref.branch) { refType = 'branch'; refValue = options.ref.branch; }
-            if (options.ref.tag) { refType = 'tag'; refValue = options.ref.tag; }
-            if (options.ref.commit) { refType = 'commit'; refValue = options.ref.commit; }
-        }
+        // Normalize input: remove trailing .git if user supplied owner/repo.git
+        ownerRepo = ownerRepo.replace(/\.git$/, '');
+
+        // Authenticate (caller is responsible for providing a writable tmpDir)
+        const token = await authenticate();
+
+        // Resolve the requested ref to a SHA
         let sha: string;
         try {
             sha = await resolveRefToSha(ownerRepo, options?.ref, token);
         } catch (err: any) {
-            // Ensure message is scrubbed before user display
             if (err && err.message) { err.message = scrubTokens(String(err.message)); }
             if (err instanceof internalErrors.RateLimitError) {
                 await interactiveMessages.showUserError(err, scrubTokens(String(err.message)));
             } else if (err instanceof internalErrors.GitAuthError) {
-                // Suggest signing in when auth errors occur
-                await interactiveMessages.showUserError(err, scrubTokens('Authentication required to access this repository.')); 
+                await interactiveMessages.showUserError(err, scrubTokens('Authentication required to access this repository.'));
             } else {
                 await interactiveMessages.showUserError(new Error(scrubTokens('Remote repository ingest failed.')), scrubTokens(String(err)));
             }
             throw err;
         }
-        resolved.sha = sha;
-        resolved.branch = options?.ref?.branch;
-        resolved.tag = options?.ref?.tag;
-        resolved.commit = options?.ref?.commit;
-        tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `${ownerRepo.replace('/', '-')}-`));
-        try {
-            localPath = await partialClone(ownerRepo, sha, options?.subpath, tmpDir, undefined, token);
-        } catch (err: any) {
-            if (err && err.message) { err.message = scrubTokens(String(err.message)); }
-            await interactiveMessages.showUserError(new Error(scrubTokens('Git clone or checkout failed.')), scrubTokens(String(err)));
-            throw err;
-        }
+
+        // Perform partial clone into the caller-provided tmpDir
+        localPath = await partialClone(ownerRepo, sha, options?.subpath, tmpDir, undefined, token);
+
         // If includeSubmodules, run git submodule update --init --recursive
         if (options?.includeSubmodules) {
-            try {
-                await spawnGitPromise(['submodule', 'update', '--init', '--recursive'], { cwd: localPath!, env: process.env }).then(() => {});
-            } catch (err: any) {
-                if (err && err.message) { err.message = scrubTokens(String(err.message)); }
-                await interactiveMessages.showUserError(new Error(scrubTokens('Git submodule update failed.')), scrubTokens(String(err)));
-                throw err;
-            }
+            await runSubmoduleUpdate(localPath!);
         }
+
         return {
             localPath: localPath!,
             meta: {
                 ownerRepo,
-                resolved,
+                resolved: { sha, branch: options?.ref?.branch, tag: options?.ref?.tag, commit: options?.ref?.commit },
                 subpath: options?.subpath
             }
         };
-    } catch (err) {
-        throw err;
     } finally {
         // Ensure temporary directory is cleaned up on any failure path if it exists and wasn't returned
         try {
@@ -402,7 +407,7 @@ export async function ingestRemoteRepo(urlOrSlug: string, options?: { ref?: { ta
                 await cleanup(tmpDir);
             }
         } catch (cleanupErr) {
-            const ch = vscode.window.createOutputChannel('Codebase Digest Errors');
+            const ch = vscode.window.createOutputChannel('Code Ingest Errors');
             ch.appendLine(`Failed to cleanup temporary dir ${tmpDir}: ${String(cleanupErr)}`);
             ch.show(true);
         }

@@ -1,12 +1,15 @@
 import { FileNode } from '../types/interfaces';
 import { FileScanner } from '../services/fileScanner';
 import { buildFileTree } from './treeHelpers';
+import { buildTreeLines } from '../format/treeBuilder';
 
 export function computePreviewState(rootNodes: FileNode[], selectedFiles: FileNode[], fileScanner: FileScanner, config: any) {
     const maxLines = config.maxSelectedTreeLines || 50;
+    // Use the single canonical tree builder for both minimal (selected-only)
+    // and full tree modes so truncation and CRLF normalization are consistent.
     const minimalSelectedTreeLines = selectedFiles.length > 0
-        ? require('../utils/formatters').Formatters.buildSelectedTreeLines(selectedFiles, maxLines)
-        : require('../format/treeBuilder').buildTreeLines(rootNodes, 'full', maxLines);
+        ? buildTreeLines(selectedFiles, 'minimal', maxLines)
+        : buildTreeLines(rootNodes, 'full', maxLines);
     const chartStats = fileScanner.aggregateStats(selectedFiles.length > 0 ? selectedFiles : rootNodes);
     // Compute a lightweight token estimate for preview/status.
     // Old behavior used config.tokenEstimate as a boolean which produced 0/1 values.

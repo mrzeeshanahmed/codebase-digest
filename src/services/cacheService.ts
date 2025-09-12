@@ -37,6 +37,36 @@ export class CacheService {
             outputSeparatorsHeader: params.outputSeparatorsHeader || '',
         };
         const stableJson = stableStringify(keyObj);
-        return require('crypto').createHash('sha256').update(stableJson).digest('hex');
+        // NOTE: We prefer Node's built-in crypto for a strong SHA-256 key.
+        // Some bundlers (or incorrect webpack configs) may externalize or
+        // shim 'crypto' which can cause require('crypto') to throw at
+        // runtime in ESM or packaged builds. Keep 'crypto' external in the
+        // bundler config; if it's not available at runtime, fall back to a
+        // deterministic JS hash so caching degrades gracefully rather than
+        // throwing and disabling caching entirely.
+        try {
+            const crypto = require('crypto');
+            if (crypto && typeof crypto.createHash === 'function') {
+                return crypto.createHash('sha256').update(stableJson).digest('hex');
+            }
+        } catch (e) {
+            try { console.warn('cacheService: crypto unavailable, falling back to JS hash; ensure bundler keeps crypto external'); } catch (_) {}
+        }
+
+        // Fallback: deterministic 128-bit FNV-1a (2×64-bit) using BigInt.
+        // Produces 32 hex chars, substantially reducing collision risk vs 32-bit.
+        function fnv1a64Hex(str: string, seed: bigint = 0xcbf29ce484222325n): string {
+            let h = seed;
+            const FNV_PRIME = 0x00000100000001B3n;
+            const MASK_64 = 0xFFFFFFFFFFFFFFFFn;
+            for (let i = 0; i < str.length; i++) {
+                h ^= BigInt(str.charCodeAt(i));
+                h = (h * FNV_PRIME) & MASK_64;
+            }
+            return h.toString(16).padStart(16, '0');
+        }
+        const h1 = fnv1a64Hex(stableJson, 0xcbf29ce484222325n);
+        const h2 = fnv1a64Hex('#' + stableJson, 0x84222325cbf29ce4n);
+        return h1 + h2;
     }
 }

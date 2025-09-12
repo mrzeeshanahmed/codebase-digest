@@ -43,9 +43,10 @@ export class ExpandState {
 
     expandAll(rootNodes: FileNode[]): void {
         const expandNode = (node: FileNode, depth: number) => {
-            if (node.type === 'directory' && depth < this.maxDepth) {
+            // Include nodes at depth == maxDepth, but don't recurse further past maxDepth
+            if (node.type === 'directory' && depth <= this.maxDepth) {
                 this.expandedRelPaths.add(node.relPath);
-                if (node.children) {
+                if (node.children && depth < this.maxDepth) {
                     for (const child of node.children) {
                         expandNode(child, depth + 1);
                     }

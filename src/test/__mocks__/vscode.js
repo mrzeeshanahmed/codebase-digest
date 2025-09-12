@@ -24,9 +24,10 @@ const vscodeMock = {
   },
   window: {
     createTreeView: jest.fn(() => ({})),
-    showInformationMessage: jest.fn(() => Promise.resolve()),
+  showInformationMessage: jest.fn(() => Promise.resolve()),
+  showErrorMessage: jest.fn(() => Promise.resolve()),
     showSaveDialog: jest.fn(() => Promise.resolve(undefined)),
-    createOutputChannel: jest.fn(() => ({ appendLine: jest.fn(), show: jest.fn(), clear: jest.fn(), dispose: jest.fn(), hide: jest.fn(), replace: jest.fn(), name: 'Codebase Digest' })),
+  createOutputChannel: jest.fn(() => ({ appendLine: jest.fn(), show: jest.fn(), clear: jest.fn(), dispose: jest.fn(), hide: jest.fn(), replace: jest.fn(), name: 'Code Ingest' })),
     createStatusBarItem: jest.fn(() => ({ text: '', show: jest.fn(), hide: jest.fn(), dispose: jest.fn(), command: undefined })),
   },
   commands: {
@@ -40,7 +41,7 @@ const vscodeMock = {
       }
       // Default behavior for tests: show information and fire open document
       try { if (vscodeMock.window && vscodeMock.window.showInformationMessage) { await vscodeMock.window.showInformationMessage('Digest generated successfully.'); } } catch (e) {}
-      try { workspaceOpenEmitter.fire({ getText: () => 'Codebase Digest' }); } catch (e) {}
+  try { workspaceOpenEmitter.fire({ getText: () => 'Code Ingest' }); } catch (e) {}
       return undefined;
     }),
   },

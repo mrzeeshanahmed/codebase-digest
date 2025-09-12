@@ -21,37 +21,61 @@ export function setWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri
         try { html = fs.readFileSync(indexPath, 'utf8'); } catch (e) { html = undefined; }
     }
     if (!html) {
-        // Fail open with a minimal HTML so the extension doesn't crash the host if resources are missing
+        // Fail open: provide a helpful debug page so users can see where we looked for index.html
         try {
-            webview.html = `<html><body><h2>Extension resource missing</h2><pre>Webview index.html not found in expected locations.</pre></body></html>`;
+            // Attempt to generate a nonce for the CSP; fall back to no-nonce when unavailable
+            let nonceAttr = '';
+            let nonce = undefined as string | undefined;
+            try {
+                const crypto = require('crypto');
+                nonce = crypto.randomBytes(16).toString('base64');
+                nonceAttr = ` nonce="${nonce}"`;
+            } catch (_) {
+                nonce = undefined;
+                nonceAttr = '';
+            }
+            const cspMeta = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src ${webview.cspSource}${nonce ? ` 'nonce-${nonce}'` : ''}; style-src ${webview.cspSource}${nonce ? ` 'nonce-${nonce}'` : ''}; img-src ${webview.cspSource} data:;">`;
+            const candidatesList = indexCandidates.map(p => `<li><code>${p.replace(/</g,'&lt;')}</code></li>`).join('\n');
+            webview.html = `<!doctype html><html><head>${cspMeta}</head><body><h2>Extension resource missing</h2><p>The webview index.html could not be found. I looked in these locations:</p><ul>${candidatesList}</ul><p>Extension root: <code>${extensionUri.fsPath.replace(/</g,'&lt;')}</code></p><p>To fix this, ensure <code>resources/webview/index.html</code> exists (or check the packaged <code>dist/resources/webview/index.html</code>).</p><pre style="white-space:pre-wrap;">If this keeps failing during development, run the build step that populates the resources (e.g., the extension's build or packaging script).</pre></body></html>`;
         } catch (_) {
             // best-effort: if even assigning html fails, swallow to avoid extension crash
         }
         return;
     }
     // Rewrite <link> tags but skip absolute, data, or already-webview URIs
-    html = html.replace(/<link\s+[^>]*href="([^"]+)"[^>]*>/g, (m: string, href: string) => {
+    // Helper to escape regex metacharacters for safe replacement (used below)
+    function escapeRegExp(s: string) {
+        return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
+    // Match href attributes using either single or double quotes and capture the quote char
+    html = html.replace(/<link\b[^>]*\bhref\s*=\s*(['"])(.*?)\1[^>]*>/gi, (m: string, quote: string, href: string) => {
         try {
             if (/^(https?:|data:|vscode-resource:|vscode-webview-resource:)/i.test(href) || href.indexOf(webview.cspSource) !== -1) {
                 return m;
             }
             const resolved = resolveResourcePath(href, extensionUri);
+            
             if (!resolved) { return m; }
-            const uri = webview.asWebviewUri(vscode.Uri.file(resolved));
-            return m.replace(href, uri.toString());
+            const uri = webview.asWebviewUri(vscode.Uri.file(resolved)).toString();
+            // Replace only the href attribute value (preserve quoting and other attributes)
+            // Replace the quoted href value directly to avoid complex RegExp pitfalls.
+            return m.replace(quote + href + quote, `${quote}${uri}${quote}`);
         } catch (e) { return m; }
     });
 
     // Rewrite <script src=> tags but skip absolute, data, or already-webview URIs
-    html = html.replace(/<script\s+[^>]*src="([^"]+)"[^>]*>/g, (m: string, src: string) => {
+    // Match script src attributes with either single or double quotes
+    html = html.replace(/<script\b[^>]*\bsrc\s*=\s*(['"])(.*?)\1[^>]*>/gi, (m: string, quote: string, src: string) => {
         try {
             if (/^(https?:|data:|vscode-resource:|vscode-webview-resource:)/i.test(src) || src.indexOf(webview.cspSource) !== -1) {
                 return m;
             }
             const resolved = resolveResourcePath(src, extensionUri);
             if (!resolved) { return m; }
-            const uri = webview.asWebviewUri(vscode.Uri.file(resolved));
-            return m.replace(src, uri.toString());
+            const uri = webview.asWebviewUri(vscode.Uri.file(resolved)).toString();
+            // Replace the quoted src value directly to avoid RegExp pitfalls.
+            return m.replace(quote + src + quote, `${quote}${uri}${quote}`);
         } catch (e) { return m; }
     });
     // Rewrite image src attributes to use the webview asWebviewUri so resources are loaded from the local webview root.
@@ -66,15 +90,13 @@ export function setWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri
             // Normalize slashes for matching (handle Windows backslashes)
             const normalized = src.replace(/\\/g, '/');
 
-            // Detect patterns like ../icons/... or ../../icons/... and map to resources/icons/...
-            const iconsMatch = normalized.match(/^(?:\.\.\/)+icons(?:\/(.*))?$/i);
-            let resolved: string | undefined;
-            if (iconsMatch) {
-                const rel = iconsMatch[1] || '';
-                resolved = findExisting([path.join(extensionUri.fsPath, 'resources', 'icons', rel), path.join(extensionUri.fsPath, 'dist', 'resources', 'icons', rel)]);
-            } else {
-                // Default: resolve relative to resources/webview (search both root and dist)
-                resolved = findExisting([path.join(extensionUri.fsPath, 'resources', 'webview', normalized), path.join(extensionUri.fsPath, 'dist', 'resources', 'webview', normalized)]);
+            // Prefer the canonical resolver which checks both webview and icons locations
+            let resolved: string | undefined = resolveResourcePath(normalized, extensionUri);
+            // As a defensive fallback, if resolveResourcePath didn't find it, check icons locations directly
+            if (!resolved) {
+                const iconsMatch = normalized.match(/(?:\/(?:icons)\/)(.*)$/i);
+                const rel = iconsMatch ? iconsMatch[1] : normalized;
+                resolved = findExisting([path.join(extensionUri.fsPath, 'resources', 'icons', rel), path.join(extensionUri.fsPath, 'dist', 'resources', 'icons', rel), path.join(extensionUri.fsPath, 'resources', 'webview', normalized), path.join(extensionUri.fsPath, 'dist', 'resources', 'webview', normalized)]);
             }
             if (!resolved) { return m; }
             const uri = webview.asWebviewUri(vscode.Uri.file(resolved));
@@ -86,30 +108,35 @@ export function setWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri
         }
     });
 
-    // Helper to escape regex metacharacters for safe replacement
-    function escapeRegExp(s: string) {
-        // Escape regex metacharacters. Use canonical character class that
-        // includes a single escaped backslash: /[.*+?^${}()|[\]\\]/g
-        return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    }
+    // (escapeRegExp is defined above)
     
     // Resolve a resource href/src relative to the extension and dist locations.
     function resolveResourcePath(href: string, extensionUri: vscode.Uri): string | undefined {
-        // Normalize common authoring prefixes so callers may reference assets as
-        // "resources/..." or "dist/resources/..." or relative paths like "../icons/...".
-        let normalized = href.replace(/\\/g, '/');
-        // strip leading ./ or ../
-        normalized = normalized.replace(/^\.{1,2}\//, '');
-        // strip leading 'resources/' or 'dist/resources/' if present
-        normalized = normalized.replace(/^dist\/resources\//i, '');
-        normalized = normalized.replace(/^resources\//i, '');
-        // prefer webview folder, but check dist fallback
-        return findExisting([
-            path.join(extensionUri.fsPath, 'resources', 'webview', normalized),
-            path.join(extensionUri.fsPath, 'dist', 'resources', 'webview', normalized),
-            path.join(extensionUri.fsPath, 'resources', 'icons', normalized),
-            path.join(extensionUri.fsPath, 'dist', 'resources', 'icons', normalized)
-        ]);
+    // Normalize common authoring prefixes so callers may reference assets as
+    // "resources/..." or "dist/resources/..." or relative paths like "../icons/...".
+    let normalized = href.replace(/\\/g, '/');
+    // We'll attempt a set of sensible candidate locations instead of manipulating
+    // the path string in-place. This handles roots like
+    //  - resources/webview/styles.css
+    //  - dist/resources/webview/styles.css
+    //  - ../icons/icon.png (relative to webview/index.html)
+
+    // Helper to normalize and return candidate absolute paths
+    const cands: string[] = [];
+    // 1) direct path relative to extension root (e.g., "resources/webview/styles.css")
+    cands.push(path.join(extensionUri.fsPath, normalized));
+    // 2) dist-prefixed variant
+    cands.push(path.join(extensionUri.fsPath, 'dist', normalized));
+    // 3) treat the href as relative to the resources/webview folder (common authoring)
+    cands.push(path.join(extensionUri.fsPath, 'resources', 'webview', normalized));
+    cands.push(path.join(extensionUri.fsPath, 'dist', 'resources', 'webview', normalized));
+    // 4) treat as an icons reference
+    cands.push(path.join(extensionUri.fsPath, 'resources', 'icons', normalized));
+    cands.push(path.join(extensionUri.fsPath, 'dist', 'resources', 'icons', normalized));
+
+    // Normalize each candidate (collapses ../ segments) and check existence
+    const normalizedCands = cands.map(p => path.normalize(p));
+    return findExisting(normalizedCands);
     }
 
     function findExisting(cands: string[]): string | undefined {
@@ -132,7 +159,8 @@ export function setWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri
     }
 
     // Generate a nonce for any inline <style> or <script> we might need to allow.
-    // CSP nonces are base64; using crypto for secure randomness.
+    // CSP nonces are base64; using crypto for secure randomness. Build and inject
+    // a CSP meta tag that always includes webview.cspSource and the nonce when available.
     try {
         const crypto = require('crypto');
         const nonce = crypto.randomBytes(16).toString('base64');
@@ -150,16 +178,32 @@ export function setWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri
             return `<script${rest} nonce="${nonce}">`;
         });
 
-    const cspMeta = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src ${webview.cspSource} 'nonce-${nonce}'; style-src ${webview.cspSource} 'nonce-${nonce}'; img-src ${webview.cspSource} data:;">`;
-        // Inject CSP only if there isn't already one (idempotent across repeated calls)
+        const cspMeta = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src ${webview.cspSource} 'nonce-${nonce}'; style-src ${webview.cspSource} 'nonce-${nonce}'; img-src ${webview.cspSource} data:;">`;
+        // Inject CSP meta deterministically: prefer inserting into <head>, otherwise
+        // create a <head> after <html> or prepend to document as a last resort.
         if (!/Content-Security-Policy/i.test(html)) {
-            html = html.replace(/<head[^>]*>/i, (match: string) => `${match}${cspMeta}`);
+            if (/<head\b[^>]*>/i.test(html)) {
+                html = html.replace(/<head\b[^>]*>/i, (match: string) => `${match}${cspMeta}`);
+            } else if (/<html\b[^>]*>/i.test(html)) {
+                // Insert a minimal head containing the CSP immediately after <html ...>
+                html = html.replace(/<html\b[^>]*>/i, (match: string) => `${match}<head>${cspMeta}</head>`);
+            } else {
+                // No html/head tags present; prepend the CSP meta so it appears early in the document
+                html = `${cspMeta}${html}`;
+            }
         }
     } catch (e) {
-        // If crypto isn't available for any reason, fall back to prior strict CSP without nonce.
-    const cspMeta = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src ${webview.cspSource}; style-src ${webview.cspSource}; img-src ${webview.cspSource} data:;">`;
+        // If crypto isn't available, fall back to a CSP without nonce but still
+        // ensure webview.cspSource is present and injected deterministically.
+        const cspMeta = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src ${webview.cspSource}; style-src ${webview.cspSource}; img-src ${webview.cspSource} data:;">`;
         if (!/Content-Security-Policy/i.test(html)) {
-            html = html.replace(/<head[^>]*>/i, (match: string) => `${match}${cspMeta}`);
+            if (/<head\b[^>]*>/i.test(html)) {
+                html = html.replace(/<head\b[^>]*>/i, (match: string) => `${match}${cspMeta}`);
+            } else if (/<html\b[^>]*>/i.test(html)) {
+                html = html.replace(/<html\b[^>]*>/i, (match: string) => `${match}<head>${cspMeta}</head>`);
+            } else {
+                html = `${cspMeta}${html}`;
+            }
         }
     }
     webview.html = html;
@@ -185,7 +229,23 @@ export function wireWebviewMessages(webview: vscode.Webview, treeProvider: any, 
 
     // Register the message listener and ensure it is disposed when the extension/context is disposed.
     try {
-        const disp = webview.onDidReceiveMessage((msg: any) => processWebviewMessage(msg, webview, treeProvider, folderPath, onConfigSet, onGetState, context));
+        // Wrap the process call so both synchronous errors and promise rejections
+        // are caught. This ensures message types like 'configRequest' are always
+        // routed and won't cause an unhandled rejection to escape the host.
+        const disp = webview.onDidReceiveMessage((msg: any) => {
+            try {
+                const res = processWebviewMessage(msg, webview, treeProvider, folderPath, onConfigSet, onGetState, context);
+                // If the handler returns a promise, attach a rejection handler to
+                // avoid unhandled promise rejections bubbling out of the event loop.
+                if (res && typeof (res as any).catch === 'function') {
+                    (res as any).catch((err: any) => {
+                        try { console.warn('webviewHelpers: processWebviewMessage rejected', stringifyError(err)); } catch {};
+                    });
+                }
+            } catch (err) {
+                try { console.warn('webviewHelpers: processWebviewMessage threw', stringifyError(err)); } catch {};
+            }
+        });
         // If a context is provided, attach the disposable so VS Code will dispose it on deactivation.
         if (context && Array.isArray((context as any).subscriptions)) {
             try { (context as any).subscriptions.push(disp); } catch (e) { /* ignore push errors */ }
@@ -256,7 +316,7 @@ export async function processWebviewMessage(msg: any, webview: vscode.Webview, t
     }
     if (msg.type === 'config' && msg.action === 'set' && msg.changes) {
         // Sanitize incoming changes: only allow known keys and simple scalar types
-        const safeKeys = ['respectGitignore','outputFormat','tokenModel','binaryFilePolicy','maxFiles','maxTotalSizeBytes','tokenLimit','presets','showRedacted','redactionPatterns','redactionPlaceholder'];
+    const safeKeys = ['respectGitignore','outputFormat','tokenModel','binaryFilePolicy','maxFiles','maxTotalSizeBytes','tokenLimit','presets','showRedacted','redactionPatterns','redactionPlaceholder','filterPresets','contextLimit'];
         const safeChanges: Record<string, any> = {};
             try {
                 for (const k of Object.keys(msg.changes || {})) {

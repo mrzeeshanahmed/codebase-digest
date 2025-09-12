@@ -34,7 +34,7 @@ export class Formatters {
         warnings: string[]
     ): string {
         const lines: string[] = [];
-        lines.push(`# Codebase Digest`);
+    lines.push(`# Code Ingest`);
         lines.push(`Workspace: ${workspaceName}`);
         lines.push(`Path: ${workspacePath}`);
         lines.push(`Files: ${selection.length}`);

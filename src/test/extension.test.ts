@@ -27,7 +27,7 @@ beforeAll(() => {
 	if (vscode && (vscode.commands as any) && typeof (vscode.commands as any).executeCommand === 'function') {
 		(vscode.commands as any).executeCommand = async (cmd: string, ...args: any[]) => {
 			try { if (vscode.window && vscode.window.showInformationMessage) { await (vscode.window.showInformationMessage as any)('Digest generated successfully.'); } } catch (e) {}
-			try { if ((vscode.workspace as any)._openEmitter) { (vscode.workspace as any)._openEmitter.fire({ getText: () => 'Codebase Digest' }); } }
+			try { if ((vscode.workspace as any)._openEmitter) { (vscode.workspace as any)._openEmitter.fire({ getText: () => 'Code Ingest' }); } }
 			catch (e) {}
 			return undefined;
 		};
@@ -37,7 +37,7 @@ afterAll(() => {
 	try { (vscode.commands as any).executeCommand = __origExecuteCommand; } catch (e) { /* swallow */ }
 });
 
-describe('Codebase Digest Extension Integration', () => {
+describe('Code Ingest Extension Integration', () => {
 	it('activates, registers tree view, runs selectAll and generateDigest', async () => {
 		// Activate extension
 		const ext = vscode.extensions.getExtension('your-publisher.codebase-digest');
@@ -64,7 +64,7 @@ describe('Codebase Digest Extension Integration', () => {
 		// Listen for document open
 		let docOpened = false;
 		const docListener = vscode.workspace.onDidOpenTextDocument(doc => {
-			if (doc.getText().includes('Codebase Digest')) { docOpened = true; }
+			if (doc.getText().includes('Code Ingest')) { docOpened = true; }
 		});
 		await vscode.commands.executeCommand('codebaseDigest.generateDigest');
 		// Wait for async events

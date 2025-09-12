@@ -179,6 +179,11 @@ button.secondary:hover {
 .collapsible-section[open] .chevron {
 		/* open: rotate to point down */
 		transform: rotate(90deg);
+		/* ensure the rotation anchor is stable across browsers and for inline SVGs */
+		-webkit-transform-origin: center center;
+		transform-origin: center center;
+		-webkit-transform-box: fill-box;
+		transform-box: fill-box;
 }
 
 .section-header {
@@ -211,6 +216,13 @@ button.secondary:hover {
 		transition: transform 0.2s ease-in-out;
 		/* closed: chevron points right (0deg); open rotates to 90deg */
 		transform: rotate(0deg);
+		/* ensure the chevron rotates around its center; some browsers require explicit origin */
+		display: inline-block; /* ensure transform-origin applies predictably */
+		-webkit-transform-origin: center center;
+		transform-origin: center center;
+		-webkit-transform-box: fill-box;
+		transform-box: fill-box;
+		will-change: transform;
 }
 
 /* Ensure the summary contains the heading as first child for screen readers */
@@ -399,11 +411,19 @@ details.collapsible-section > summary > h3 { display: inline-block; }
 		justify-content: center;
 		z-index: 100;
 }
-.modal-wrapper[hidden] {
+/* Treat aria-hidden the same as [hidden] so authors toggling aria-hidden alone
+   do not accidentally leave an overlay that intercepts clicks or focus. */
+.modal-wrapper[hidden],
+.modal-wrapper[aria-hidden="true"] {
 	/* Author styles can override the UA [hidden] rule; ensure hidden actually hides the modal.
 	   Use display:none so the modal doesn't block pointer events or focus when hidden. */
 	display: none !important;
 	visibility: hidden !important;
+	pointer-events: none !important;
+}
+
+/* Also ensure overlay inside an aria-hidden modal cannot capture pointer events */
+.modal-wrapper[aria-hidden="true"] .modal-overlay {
 	pointer-events: none !important;
 }
 .modal-overlay {

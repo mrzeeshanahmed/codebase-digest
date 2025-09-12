@@ -1,5 +1,5 @@
 /**
- * Diagnostics: Logging, timers, and warnings aggregation for Codebase Digest.
+ * Diagnostics: Logging, timers, and warnings aggregation for Code Ingest.
  */
 import * as vscode from 'vscode';
 import { FileNode } from '../types/interfaces';
@@ -9,8 +9,8 @@ export class Diagnostics {
     private channel: vscode.OutputChannel;
     private logLevel: LogLevel;
 
-    constructor(logLevel: LogLevel = 'info') {
-        this.channel = vscode.window.createOutputChannel('Codebase Digest');
+    constructor(logLevel: LogLevel = 'info', channelName: string = 'Code Ingest') {
+        this.channel = vscode.window.createOutputChannel(channelName);
         this.logLevel = logLevel;
     }
 

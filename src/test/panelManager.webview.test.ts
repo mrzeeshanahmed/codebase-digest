@@ -7,8 +7,8 @@ Manual validation checklist (quick steps to verify sidebar-first UX):
 
 - Reload the extension (Extension Development Host)
 - Confirm no editor WebviewPanel auto-opens on activation
-- Open the Primary Sidebar and verify a "Codebase Digest" view exists
-- Run the Command Palette action "Focus Codebase Digest" (or status bar) and confirm the view receives focus
+- Open the Primary Sidebar and verify a "Code Ingest" view exists
+- Run the Command Palette action "Focus Code Ingest" (or status bar) and confirm the view receives focus
 - Use the welcome/empty state and click the Open Dashboard action — it should focus the sidebar view, not open a panel tab
 
 These tests cover programmatic assertions for CSP injection, asset URI rewriting, and that the contributed view id remains aligned to `codebaseDigestDashboard`.

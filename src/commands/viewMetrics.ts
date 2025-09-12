@@ -16,7 +16,7 @@ export async function viewMetricsCommand(workspaceFolder: vscode.WorkspaceFolder
         vscode.window.showInformationMessage('No performance metrics collected for this workspace.');
         return;
     }
-    const channel = vscode.window.createOutputChannel('Codebase Digest - Metrics');
+    const channel = vscode.window.createOutputChannel('Code Ingest - Metrics');
     channel.clear();
     channel.appendLine('Performance Metrics:\n');
     channel.appendLine(JSON.stringify({ counters: metrics.counters, timers: metrics.timers }, null, 2));

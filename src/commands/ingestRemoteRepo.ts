@@ -1,4 +1,7 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
+import * as os from 'os';
+import * as fs from 'fs';
 import { ContentProcessor } from '../services/contentProcessor';
 import { internalErrors, interactiveMessages } from '../utils';
 import { Formatters } from '../utils/formatters';
@@ -18,6 +21,119 @@ export function registerIngestRemoteRepo(context: vscode.ExtensionContext) {
     context.subscriptions.push(vscode.commands.registerCommand('codebaseDigest.ingestRemoteRepoProgrammatic', async (params: { repo: string, ref?: any, subpath?: string, includeSubmodules?: boolean }) => {
         return await ingestRemoteRepoProgrammatic(params);
     }));
+
+    // New programmatic commands to support two-stage remote ingest from the webview
+    context.subscriptions.push(vscode.commands.registerCommand('codebaseDigest.loadRemoteRepo', async (params: { repo: string, ref?: any, subpath?: string, includeSubmodules?: boolean }) => {
+        return await loadRemoteRepo(params);
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand('codebaseDigest.ingestLoadedRepo', async (params: { tmpPath: string }) => {
+        if (!params || !params.tmpPath) { throw new Error('tmpPath parameter required'); }
+        return await ingestLoadedRepo(params.tmpPath);
+    }));
+}
+
+// Exported function: perform only the clone and return the temporary local path (kept)
+export async function loadRemoteRepo(params: { repo: string, ref?: any, subpath?: string, includeSubmodules?: boolean }) : Promise<{ localPath?: string, error?: string }>{
+    const { repo, ref, subpath, includeSubmodules } = params as any;
+    // Normalize and create tmp dir similarly to programmatic flow so callers can inspect it
+    let repoSlug = repo;
+    if (typeof repoSlug === 'string' && repoSlug.startsWith('https://')) {
+        const m = repoSlug.match(/github.com\/([^\/]+\/[^\/]+)(?:[\/\?#]|$)/);
+        if (m) { repoSlug = m[1]; }
+    }
+    repoSlug = String(repoSlug).replace(/\.git$/, '');
+    const tmpDirPrefix = path.join(os.tmpdir(), `${repoSlug.replace(/[\/ :]/g, '-')}-`);
+    const tmpDir = fs.mkdtempSync(tmpDirPrefix);
+    try {
+    emitProgress({ op: 'ingest', mode: 'start', determinate: false, message: 'Loading remote repo...' });
+        const result = await ingestRemoteRepo(repo, { ref, subpath, includeSubmodules }, tmpDir as any);
+        const returnedLocal = (result && (result as any).localPath) ? (result as any).localPath : tmpDir;
+    emitProgress({ op: 'ingest', mode: 'end', determinate: false, message: 'Repository loaded' });
+        return { localPath: returnedLocal } as any;
+    } catch (err: any) {
+    emitProgress({ op: 'ingest', mode: 'end', determinate: false, message: 'Load failed' });
+        // Attempt to cleanup the temporary dir we created. Wrap in its own
+        // try/catch so any cleanup failure does not mask the original error.
+        try {
+            if (tmpDir) {
+                await cleanupRemoteTmp(tmpDir);
+            }
+        } catch (cleanupErr) {
+            try { console.warn('loadRemoteRepo: cleanup failed', String(cleanupErr)); } catch (_) { /* ignore */ }
+        }
+        return { error: String(err || '') } as any;
+    }
+}
+
+// Exported function: process a tmpPath previously created by loadRemoteRepo, then cleanup
+export async function ingestLoadedRepo(tmpPath: string): Promise<{ output?: string, preview?: any } | void> {
+    const tmpDir = tmpPath;
+    const formatters = new Formatters();
+    const config: DigestConfig = vscode.workspace.getConfiguration('codebaseDigest') as any;
+    try {
+    emitProgress({ op: 'ingest', mode: 'start', determinate: false, message: 'Ingesting loaded repo...' });
+        // Use ContentProcessor.scanDirectory to get files
+        const files = await ContentProcessor.scanDirectory(tmpDir, config);
+        // Scanning for a preview should not mark every file as selected. Clear
+        // any transient selection flags so subsequent generate/gather flows
+        // respect the user's explicit selections instead of treating everything
+        // as selected which can spike token estimates unexpectedly.
+        try {
+            for (const f of files) { (f as any).isSelected = false; }
+        } catch (e) {
+            // non-fatal: continue with files as-is
+        }
+        files.sort((a, b) => a.relPath.localeCompare(b.relPath));
+        const cp = new ContentProcessor();
+        let tokenEstimate = 0;
+        const contentChunks: string[] = [];
+        for (const file of files) {
+            try {
+                const ext = file.path.split('.').pop()?.toLowerCase() || '';
+                const r = await cp.getFileContent(file.path, '.' + ext, config);
+                const header = formatters.buildFileHeader(file, config);
+                const body = r.content || '';
+                let chunk = '';
+                if (config.outputPresetCompatible || config.outputFormat === 'markdown' || config.outputFormat === 'text') {
+                    chunk = header + body + '\n';
+                } else if (config.outputFormat === 'json') {
+                    chunk = JSON.stringify({ header, body }, null, 2);
+                }
+                if (config.tokenEstimate) { tokenEstimate += (new TokenAnalyzer()).estimate(body, config.tokenModel, config.tokenDivisorOverrides); }
+                contentChunks.push(chunk);
+                emitProgress({ op: 'ingest', mode: 'progress', determinate: false, message: `Processing ${file.relPath}` });
+            } catch (e) { /* per-file errors ignored for preview */ }
+        }
+        const stats: TraversalStats = {
+            totalFiles: files.length,
+            totalSize: files.reduce((acc, f) => acc + (f.size || 0), 0),
+            skippedBySize: 0, skippedByTotalLimit: 0, skippedByMaxFiles: 0, skippedByDepth: 0, skippedByIgnore: 0,
+            directories: 0, symlinks: 0, warnings: [], durationMs: 0
+        };
+        const summary = config.includeSummary ? formatters.buildSummary(config, stats, files, tokenEstimate, '', config.outputWriteLocation, []) : '';
+        const tree = config.includeTree ? (typeof config.includeTree === 'string' && config.includeTree === 'minimal' ? formatters.buildSelectedTree(files) : formatters.buildTree(files, true)) : '';
+        const output = config.outputFormat === 'json' ? JSON.stringify({ summary: summary, tree, files: contentChunks }, null, 2) : [summary, tree, ...contentChunks].join(config.outputSeparatorsHeader || '\n---\n');
+    emitProgress({ op: 'ingest', mode: 'end', determinate: false, message: 'Ingest complete' });
+        const previewPayload = { summary, tree, tokenEstimate, totalFiles: stats.totalFiles, totalSize: stats.totalSize };
+        return { output, preview: previewPayload };
+    } catch (err: any) {
+    emitProgress({ op: 'ingest', mode: 'end', determinate: false, message: 'Ingest failed' });
+        const errStr = String(err || '');
+        if (errStr.toLowerCase().includes('rate limit')) {
+            interactiveMessages.showUserError(new Error('GitHub API rate limit reached. Try again later or use an authenticated session.'), String(err));
+        } else if (errStr.toLowerCase().includes('auth') || errStr.toLowerCase().includes('authentication')) {
+            interactiveMessages.showUserError(new Error('Authentication required. Sign in via VS Code (Accounts > Sign in with GitHub) and retry.'), String(err));
+        } else {
+            interactiveMessages.showUserError(new Error('Remote repository ingest failed.'), String(err));
+        }
+        // Re-throw so programmatic callers receive the error and can forward it to the webview
+        throw err;
+    } finally {
+        // Always attempt to cleanup the temporary directory after ingest
+        try {
+            if (tmpDir) { await cleanupRemoteTmp(tmpDir); }
+        } catch (e) { /* best-effort cleanup */ }
+    }
 }
 
 async function interactiveIngestFlow() {
@@ -61,14 +177,35 @@ export async function ingestRemoteRepoProgrammatic(params: { repo: string, ref?:
     const { repo, ref, subpath, includeSubmodules, keepTmpDir } = params as any;
     const formatters = new Formatters();
     const config: DigestConfig = vscode.workspace.getConfiguration('codebaseDigest') as any;
-    let tmpDir: string | undefined;
+    // Normalize repo input before deriving a tmp dir name. Accept owner/repo or
+    // a full GitHub URL; strip a trailing .git if present so the mkdtemp prefix
+    // doesn't include ".git" which can cause confusing temp dir names.
+    let repoSlug = repo;
+    if (typeof repoSlug === 'string' && repoSlug.startsWith('https://')) {
+        const m = repoSlug.match(/github.com\/([^\/]+\/[^\/]+)(?:[\/\?#]|$)/);
+        if (m) { repoSlug = m[1]; }
+    }
+    repoSlug = String(repoSlug).replace(/\.git$/, '');
+    const tmpDirPrefix = path.join(os.tmpdir(), `${repoSlug.replace(/[\/ :]/g, '-')}-`);
+    let tmpDir: string | undefined = undefined;
+
     try {
-        emitProgress({ op: 'generate', mode: 'start', determinate: false, message: 'Ingesting remote repo...' });
-        const result = await ingestRemoteRepo(repo, { ref, subpath, includeSubmodules });
-        tmpDir = result.localPath;
+        // Create temporary directory; if mkdtempSync throws we'll handle in catch/finally
+        tmpDir = fs.mkdtempSync(tmpDirPrefix);
+    emitProgress({ op: 'ingest', mode: 'start', determinate: false, message: 'Ingesting remote repo...' });
+    // Pass the created tmpDir to the service function.
+    const result = await ingestRemoteRepo(repo, { ref, subpath, includeSubmodules }, tmpDir as any);
+        // When the service completes it returns localPath; prefer using that if present
+        // but we created the top-level tmpDir and will scan from it.
+        // tmpDir variable already points to the created dir.
         const meta = result.meta;
-        // Use ContentProcessor.scanDirectory to get files
-        const files = await ContentProcessor.scanDirectory(tmpDir, config);
+    // Use ContentProcessor.scanDirectory to get files
+    const files = await ContentProcessor.scanDirectory(tmpDir, config);
+    // Do not treat a scan-for-preview as a user selection pass. Clear any
+    // isSelected flags so token / selection chips reflect real user choices.
+    try {
+        for (const f of files) { (f as any).isSelected = false; }
+    } catch (e) { /* continue with scanned files if mutation fails */ }
         files.sort((a, b) => a.relPath.localeCompare(b.relPath));
         const cp = new ContentProcessor();
         let tokenEstimate = 0;
@@ -88,7 +225,7 @@ export async function ingestRemoteRepoProgrammatic(params: { repo: string, ref?:
                 }
                 if (config.tokenEstimate) { tokenEstimate += (new TokenAnalyzer()).estimate(body, config.tokenModel, config.tokenDivisorOverrides); }
                 contentChunks.push(chunk);
-                emitProgress({ op: 'generate', mode: 'progress', determinate: false, message: `Processing ${file.relPath}` });
+                emitProgress({ op: 'ingest', mode: 'progress', determinate: false, message: `Processing ${file.relPath}` });
             } catch (e) { /* per-file errors ignored for preview */ }
         }
         const stats: TraversalStats = {
@@ -101,17 +238,20 @@ export async function ingestRemoteRepoProgrammatic(params: { repo: string, ref?:
         const remoteSummary = (config.includeSummary && meta) ? buildRemoteSummary(meta) : '';
         const tree = config.includeTree ? (typeof config.includeTree === 'string' && config.includeTree === 'minimal' ? formatters.buildSelectedTree(files) : formatters.buildTree(files, true)) : '';
         const output = config.outputFormat === 'json' ? JSON.stringify({ summary: remoteSummary + summary, tree, files: contentChunks }, null, 2) : [remoteSummary + summary, tree, ...contentChunks].join(config.outputSeparatorsHeader || '\n---\n');
-        emitProgress({ op: 'generate', mode: 'end', determinate: false, message: 'Ingest complete' });
+    emitProgress({ op: 'ingest', mode: 'end', determinate: false, message: 'Ingest complete' });
         // Return small preview payload to caller (dashboard). If caller requested the
         // temporary clone to be retained, return the localPath so caller can inspect it.
         const previewPayload = { summary: remoteSummary + summary, tree, tokenEstimate, totalFiles: stats.totalFiles, totalSize: stats.totalSize };
         if (keepTmpDir) {
-            // Caller requested to keep the temp dir: return localPath location and preview.
-            return { output, preview: previewPayload, localPath: tmpDir } as any;
+            // Caller requested to keep the temp dir: prefer the service-returned
+            // localPath when available (it may point to a more precise subdir),
+            // otherwise fall back to the tmpDir we created.
+            const returnedLocal = (result && (result as any).localPath) ? (result as any).localPath : tmpDir;
+            return { output, preview: previewPayload, localPath: returnedLocal } as any;
         }
         return { output, preview: previewPayload };
     } catch (err: any) {
-        emitProgress({ op: 'generate', mode: 'end', determinate: false, message: 'Ingest failed' });
+    emitProgress({ op: 'ingest', mode: 'end', determinate: false, message: 'Ingest failed' });
         const errStr = String(err || '');
         if (errStr.toLowerCase().includes('rate limit')) {
             interactiveMessages.showUserError(new Error('GitHub API rate limit reached. Try again later or use an authenticated session.'), String(err));
@@ -120,9 +260,9 @@ export async function ingestRemoteRepoProgrammatic(params: { repo: string, ref?:
         } else {
             interactiveMessages.showUserError(new Error('Remote repository ingest failed.'), String(err));
         }
-        // Do not re-throw: we already displayed an error to the user and callers (including interactive flows)
-        // expect a graceful return rather than a duplicate error being surfaced.
-        return;
+        // Re-throw so programmatic callers receive the error and the webview can
+        // display a specific reason via the 'ingestError' message.
+        throw err;
     } finally {
         // Only cleanup the temporary dir if the caller did not request it to be kept.
         try {

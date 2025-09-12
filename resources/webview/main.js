@@ -11,6 +11,8 @@ const ITEM_HEIGHT = 28; // The height of each file row in pixels
 // (previously had an unused selectedSet which was confusing)
 let pendingPersistedSelection = null;
 let pendingPersistedFocusIndex = undefined;
+// Temporary holder for a repo path returned by the host after loading
+let loadedRepoTmpPath = null;
 // Pause state (moved up so message handlers can reference it safely)
 let paused = false;
 // Track expanded folder paths so we can restore UI state after re-renders
@@ -42,6 +44,38 @@ function node(id) {
     return nodes[id] || document.getElementById(id);
 }
 
+// Centralized lightweight logger for webview diagnostics. Use sparingly to avoid
+// overwhelming the console in normal operation.
+function logWarn(context, err) {
+    try {
+        if (err) { console.warn('[Code Ingest][webview] ' + context, err); }
+        else { console.warn('[Code Ingest][webview] ' + context); }
+    } catch (e) { /* best-effort logging only */ }
+}
+
+// Encode/decode helpers for safely storing file paths in data-* attributes.
+// Uses base64url encoding via btoa/atob with safe character replacements.
+function encodeForDataAttribute(s) {
+    if (s === null || s === undefined) { return ''; }
+    try {
+        const b = btoa(unescape(encodeURIComponent(String(s))));
+        return b.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+    } catch (e) {
+        try { return encodeURIComponent(String(s)); } catch (ex) { return String(s); }
+    }
+}
+
+function decodeFromDataAttribute(v) {
+    if (!v) { return ''; }
+    try {
+        const pad = v.length % 4 === 0 ? '' : '='.repeat(4 - (v.length % 4));
+        const b = (v || '').replace(/-/g, '+').replace(/_/g, '/') + pad;
+        return decodeURIComponent(escape(atob(b)));
+    } catch (e) {
+        try { return decodeURIComponent(String(v)); } catch (ex) { return String(v); }
+    }
+}
+
 function postAction(actionType, payload) {
     const base = Object.assign({ type: 'action', actionType }, payload || {});
     if (currentFolderPath) { base.folderPath = currentFolderPath; }
@@ -62,20 +96,38 @@ function sanitizePayload(obj) {
     // from the webview to the extension host.
     try {
         const copy = {};
+        // Keys whose array values should be transmitted as-is (no trimming/coercion)
+        const passthroughArrayKeys = new Set(['relPaths', 'selectedPaths', 'selectedFiles']);
         for (const k of Object.keys(obj || {})) {
             const v = obj[k];
             // Allow simple scalars and arrays of scalars only
             if (v === null || v === undefined) { copy[k] = v; continue; }
             if (typeof v === 'string') {
                 // trim and remove control characters
-                copy[k] = v.trim().replace(/[\x00-\x1F\x7F]/g, '');
-                // clamp length
-                if (copy[k].length > 2000) { copy[k] = copy[k].slice(0, 2000); }
+                const s = v.trim().replace(/[\x00-\x1F\x7F]/g, '');
+                // clamp length for general strings
+                copy[k] = (s.length > 2000) ? s.slice(0, 2000) : s;
                 continue;
             }
             if (typeof v === 'number' || typeof v === 'boolean') { copy[k] = v; continue; }
             if (Array.isArray(v)) {
-                copy[k] = v.map(x => (typeof x === 'string' ? x.trim().replace(/[\x00-\x1F\x7F]/g, '') : String(x)));
+                // Preserve arrays for known selection-like keys without trimming
+                if (passthroughArrayKeys.has(k)) {
+                    try {
+                        copy[k] = v.filter(x => (x === null || x === undefined) || typeof x === 'string' || typeof x === 'number' || typeof x === 'boolean');
+                    } catch (e) { copy[k] = []; }
+                    continue;
+                }
+                // For other arrays, preserve scalar elements but trim long strings
+                try {
+                    copy[k] = v.map(x => {
+                        if (x === null || x === undefined) { return x; }
+                        if (typeof x === 'string') { const s = x.trim().replace(/[\x00-\x1F\x7F]/g, ''); return s.length > 2000 ? s.slice(0, 2000) : s; }
+                        if (typeof x === 'number' || typeof x === 'boolean') { return x; }
+                        // drop complex/non-scalar entries rather than coercing them to strings
+                        return undefined;
+                    }).filter(x => typeof x !== 'undefined');
+                } catch (e) { copy[k] = []; }
                 continue;
             }
             // For objects, try to shallow-serialize simple key:scalar entries
@@ -84,17 +136,23 @@ function sanitizePayload(obj) {
                 for (const kk of Object.keys(v)) {
                     const vv = v[kk];
                     if (vv === null || vv === undefined) { o[kk] = vv; }
-                    else if (typeof vv === 'string') { o[kk] = vv.trim().replace(/[\x00-\x1F\x7F]/g, '').slice(0, 500); }
+                    else if (typeof vv === 'string') { const s = vv.trim().replace(/[\x00-\x1F\x7F]/g, ''); o[kk] = s.length > 500 ? s.slice(0, 500) : s; }
                     else if (Array.isArray(vv)) {
-                        // Preserve simple arrays of scalars nested inside objects (shallow only)
-                        o[kk] = vv.map(x => (typeof x === 'string' ? x.trim().replace(/[\x00-\x1F\x7F]/g, '').slice(0, 500) : (typeof x === 'number' || typeof x === 'boolean') ? x : String(x)));
+                        try {
+                            o[kk] = vv.map(x => {
+                                if (x === null || x === undefined) { return x; }
+                                if (typeof x === 'string') { const s = x.trim().replace(/[\x00-\x1F\x7F]/g, ''); return s.length > 500 ? s.slice(0, 500) : s; }
+                                if (typeof x === 'number' || typeof x === 'boolean') { return x; }
+                                return undefined; // drop non-scalars
+                            }).filter(x => typeof x !== 'undefined');
+                        } catch (e) { o[kk] = []; }
                     } else if (typeof vv === 'number' || typeof vv === 'boolean') { o[kk] = vv; }
                 }
                 copy[k] = o;
                 continue;
             }
-            // fallback stringify
-            copy[k] = String(v).slice(0, 500);
+            // For any remaining non-scalar types (functions, symbols, etc.) avoid coercion; set to null
+            copy[k] = null;
         }
         return copy;
     } catch (e) { return obj; }
@@ -105,19 +163,21 @@ const __focusState = { lastFocused: null };
 function openModal(element) {
     try {
         __focusState.lastFocused = document.activeElement;
-        element.hidden = false;
+    element.hidden = false;
+    try { element.removeAttribute('aria-hidden'); } catch (e) {}
         // focus first control
         setTimeout(() => { const first = element.querySelector('input,button,select,textarea,[tabindex]'); if (first && typeof first.focus === 'function') { first.focus(); } }, 0);
         // basic trap: capture Tab key and keep focus inside modal
         element.addEventListener('keydown', modalKeyHandler);
-    } catch (e) {}
+    } catch (e) { logWarn('openModal failed', e); }
 }
 function closeModal(element) {
     try {
-        element.hidden = true;
+    element.hidden = true;
+    try { element.setAttribute('aria-hidden', 'true'); } catch (e) {}
         element.removeEventListener('keydown', modalKeyHandler);
         if (__focusState.lastFocused && typeof __focusState.lastFocused.focus === 'function') { __focusState.lastFocused.focus(); }
-    } catch (e) {}
+    } catch (e) { logWarn('closeModal failed', e); }
 }
 function modalKeyHandler(e) {
     // Allow Escape to close the modal locally (keeps behaviour consistent with global handler
@@ -126,6 +186,7 @@ function modalKeyHandler(e) {
         try {
             const modal = e.currentTarget;
             modal.hidden = true;
+            try { modal.setAttribute('aria-hidden', 'true'); } catch (e) {}
             modal.removeEventListener('keydown', modalKeyHandler);
             if (__focusState.lastFocused && typeof __focusState.lastFocused.focus === 'function') { __focusState.lastFocused.focus(); }
         } catch (ex) { /* swallow */ }
@@ -177,6 +238,27 @@ function formatBytes(n) {
     return `${(num / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
+// Robust lookup helper: find a <li> with a given data-path without using
+// querySelector with interpolated selectors (which can break on paths
+// containing quotes or other CSS-special characters). This iterates
+// the rendered nodes and compares attributes directly.
+function findLiByDataPath(root, path) {
+    if (!root || !path) { return null; }
+    try {
+        const nodes = root.querySelectorAll('li[data-path]');
+        for (let i = 0; i < nodes.length; i++) {
+            const n = nodes[i];
+            try {
+                if (!n.getAttribute) { continue; }
+                const attr = n.getAttribute('data-path');
+                const decoded = attr ? decodeFromDataAttribute(attr) : null;
+                if (decoded === path) { return n; }
+            } catch (e) { logWarn('findLiByDataPath node read failed', e); }
+        }
+    } catch (e) { /* swallow */ }
+    return null;
+}
+
 function renderFileList(state) {
     const fileListRoot = document.getElementById('file-list');
     if (!fileListRoot) { return; }
@@ -198,16 +280,23 @@ function renderFileList(state) {
 
             // This function will be called when a checkbox state changes.
     const handleSelectionChange = () => {
-        const allCheckboxes = fileListRoot.querySelectorAll('.file-checkbox');
+        // Only consider checkboxes that are children of leaf file list items to avoid
+        // processing folder-level checkboxes (which are used for tri-state UI only).
+        // This reduces DOM work and prevents accidental double-processing.
+        let checkboxes = fileListRoot.querySelectorAll('li.file-item .file-checkbox');
+        // Fallback for environments where li.file-item may not be present
+        if (!checkboxes || checkboxes.length === 0) {
+            checkboxes = fileListRoot.querySelectorAll('.file-checkbox');
+        }
         const newSelectedPaths = [];
-        allCheckboxes.forEach(cb => {
+        checkboxes.forEach(cb => {
+            if (!cb) { return; }
             if (cb.checked) {
-                const path = cb.getAttribute('data-path');
-                // Only add file paths to the selection, not folders
-                const li = cb.closest('li.file-item');
-                if (li && path) {
-                    newSelectedPaths.push(path);
-                }
+                try {
+                    const attr = cb.getAttribute && cb.getAttribute('data-path');
+                    const path = attr ? decodeFromDataAttribute(attr) : null;
+                    if (path) { newSelectedPaths.push(path); }
+                } catch (e) { /* ignore per-node read failures */ }
             }
         });
         postAction('setSelection', { relPaths: newSelectedPaths });
@@ -222,8 +311,9 @@ function renderFileList(state) {
                 if (!parentUl) { break; }
                 const parentLi = parentUl.closest('li.folder-item');
                 if (!parentLi) { break; }
-                // Only consider checkboxes in the descendant subtree (exclude the parent's own checkbox)
-                const descendantCheckboxes = parentLi.querySelectorAll(':scope ul .file-checkbox');
+                // Only consider checkboxes that belong to leaf file items in the descendant subtree
+                // (exclude folder-level checkboxes so folder vs file boxes are not mixed).
+                const descendantCheckboxes = parentLi.querySelectorAll(':scope ul li.file-item .file-checkbox');
                 let total = 0, checked = 0;
                 descendantCheckboxes.forEach(cb => { total++; if (cb.checked) { checked++; } });
                 const parentCb = parentLi.querySelector('input.file-checkbox');
@@ -234,7 +324,7 @@ function renderFileList(state) {
                 }
                 current = parentLi;
             }
-        } catch (e) { /* ignore DOM traversal errors */ }
+    } catch (e) { logWarn('updateAncestorStates DOM traversal failed', e); }
     }
 
     // Recursive function to build the tree HTML and attach listeners
@@ -257,7 +347,7 @@ function renderFileList(state) {
 
             const li = document.createElement('li');
             li.className = isFile ? 'file-tree-li file-item' : 'file-tree-li folder-item';
-            li.setAttribute('data-path', fullPath);
+            li.setAttribute('data-path', encodeForDataAttribute(fullPath));
 
             const label = document.createElement('label');
             label.className = 'file-tree-label';
@@ -266,18 +356,18 @@ function renderFileList(state) {
             checkbox.type = 'checkbox';
             checkbox.className = 'file-checkbox';
             checkbox.checked = selectedPaths.has(fullPath);
-            checkbox.setAttribute('data-path', fullPath);
+            checkbox.setAttribute('data-path', encodeForDataAttribute(fullPath));
 
             // *** ADDING CHECKBOX INTERACTIVITY ***
             checkbox.addEventListener('change', () => {
                 const isChecked = checkbox.checked;
                 // If a folder is checked/unchecked, apply the same state to all children
                 if (!isFile) {
-                    // Only target checkboxes in the child subtree (exclude the folder's own checkbox)
-                    const descendantCheckboxes = li.querySelectorAll(':scope ul .file-checkbox');
+                    // Only target leaf file checkboxes in the child subtree (exclude folder-level checkboxes)
+                    const descendantCheckboxes = li.querySelectorAll(':scope ul li.file-item .file-checkbox');
                     descendantCheckboxes.forEach(descCb => {
                         descCb.checked = isChecked;
-                        try { descCb.indeterminate = false; } catch (e) {}
+                        try { descCb.indeterminate = false; } catch (e) { logWarn('setting indeterminate failed', e); }
                     });
                 }
                 // Update ancestor folders once after any change (folder or leaf)
@@ -326,20 +416,19 @@ function renderFileList(state) {
         if (expandedPaths.size > 0) {
             expandedPaths.forEach(p => {
                 try {
-                    const li = fileListRoot.querySelector(`li[data-path="${p}"]`);
+                    const li = findLiByDataPath(fileListRoot, p);
                     if (li) { li.classList.add('expanded'); }
-                } catch (e) {}
+                } catch (e) { logWarn('createTreeHtml per-node handler failed', e); }
             });
         }
-    } catch (e) {}
+    } catch (e) { logWarn('renderFileList restore expandedPaths failed', e); }
     // After initial render, ensure folder checkboxes reflect tri-state based on current selections
     try {
         const folderItems = fileListRoot.querySelectorAll('li.folder-item');
         folderItems.forEach(fi => {
             try {
-                // Only consider descendant file-checkboxes in the subtree (exclude the parent's own checkbox)
-                // Only consider checkboxes in the descendant subtree (exclude the parent's own checkbox)
-                const descendantCheckboxes = fi.querySelectorAll(':scope ul .file-checkbox');
+                // Only consider descendant leaf file-checkboxes in the subtree (exclude the parent's own checkbox)
+                const descendantCheckboxes = fi.querySelectorAll(':scope ul li.file-item .file-checkbox');
                 let total = 0, checked = 0;
                 descendantCheckboxes.forEach(cb => { total++; if (cb.checked) { checked++; } });
                 const parentCb = fi.querySelector('input.file-checkbox');
@@ -348,7 +437,7 @@ function renderFileList(state) {
                     else if (checked === total) { parentCb.checked = true; parentCb.indeterminate = false; }
                     else { parentCb.checked = false; parentCb.indeterminate = true; }
                 }
-            } catch (e) {}
+            } catch (e) { logWarn('renderFileList folder tri-state calculation failed for a folder', e); }
         });
     } catch (e) {}
 }
@@ -479,6 +568,26 @@ window.addEventListener('message', event => {
         } catch (e) { /* swallow */ }
     } else if (msg.type === 'progress') {
         (window.__handleProgress || handleProgress)(msg.event);
+    } else if (msg.type === 'remoteRepoLoaded') {
+        // Host responded that the remote repo was cloned/loaded. msg.payload.tmpPath should
+        // contain the temporary filesystem path that the host created. Store it locally
+        // and update the modal UI to allow the user to start the ingest.
+        try {
+            const payload = msg.payload || {};
+            const tmp = payload.tmpPath || null;
+            if (tmp) {
+                loadedRepoTmpPath = tmp;
+                const textEl = nodes.ingestPreviewText || document.getElementById('ingest-preview-text');
+                if (textEl) { textEl.textContent = `Repository loaded: ${String(tmp)}`; }
+                // swap buttons: hide Load Repo, show Start Ingest
+                const loadBtn = document.getElementById('ingest-load-repo');
+                const startBtn = document.getElementById('ingest-submit');
+                try { if (loadBtn) { loadBtn.hidden = true; loadBtn.setAttribute('aria-hidden', 'true'); } } catch (e) {}
+                try { if (startBtn) { startBtn.hidden = false; startBtn.removeAttribute('aria-hidden'); startBtn.focus(); } } catch (e) {}
+            } else {
+                showToast('Failed to load repository', 'error');
+            }
+        } catch (e) { /* swallow to avoid breaking other handlers */ }
     } else if (msg.type === 'generationResult') {
         try {
             const res = msg.result || {};
@@ -487,11 +596,18 @@ window.addEventListener('message', event => {
             }
             if (res && res.error) {
                 showToast(String(res.error), 'warn', 6000);
-                if (pendingOverrideUsed) {
-                    overrideDisableRedaction = true;
+                // The redaction override is a one-shot transient flag. If the generation
+                // failed, do NOT persist the disable-redaction state — clear transient
+                // flags and update the UI so the override is not sticky.
+                try {
+                    if (pendingOverrideUsed) {
+                        pendingOverrideUsed = false;
+                    }
+                    overrideDisableRedaction = false;
                     const rb = document.getElementById('btn-disable-redaction');
-                    if (rb) { rb.setAttribute('aria-pressed', 'true'); rb.classList.add('active'); }
-                }
+                    if (rb) { try { rb.setAttribute('aria-pressed', 'false'); } catch (e) {}
+                        try { rb.classList.remove('active'); } catch (e) {} }
+                } catch (e) { /* ignore UI errors */ }
             } else {
                 // generation succeeded: explicitly clear transient override flags and UI state
                 // so the redaction toggle does not remain active accidentally. Be defensive
@@ -577,6 +693,7 @@ function renderPreviewDelta(delta) {
             if (overLimit) {
                 const message = 'Token estimate exceeds configured context limit — output may be truncated or incomplete.';
                 if (!banner) {
+                    // Create banner only once
                     banner = document.createElement('div');
                     banner.id = bannerId;
                     banner.className = 'over-limit-banner';
@@ -587,11 +704,24 @@ function renderPreviewDelta(delta) {
                     text.className = 'over-limit-text';
                     banner.appendChild(text);
                     // Insert the banner above the chips target for visual prominence
-                    if (chipsTarget && chipsTarget.parentNode) { chipsTarget.parentNode.insertBefore(banner, chipsTarget); }
-                    else { document.body.insertBefore(banner, document.body.firstChild); }
+                    try {
+                        if (chipsTarget && chipsTarget.parentNode) { chipsTarget.parentNode.insertBefore(banner, chipsTarget); }
+                        else { document.body.insertBefore(banner, document.body.firstChild); }
+                    } catch (e) { /* ignore insertion errors */ }
+                } else {
+                    // If banner exists but is orphaned or in the wrong place, try to reparent it
+                    try {
+                        if (chipsTarget && chipsTarget.parentNode && banner.parentNode !== chipsTarget.parentNode) {
+                            if (banner.parentNode) { banner.parentNode.removeChild(banner); }
+                            chipsTarget.parentNode.insertBefore(banner, chipsTarget);
+                        }
+                    } catch (e) { /* ignore reparenting errors */ }
                 }
-                const txt = banner.querySelector('.over-limit-text'); if (txt) { txt.textContent = message; }
-            } else { if (banner && banner.parentNode) { banner.parentNode.removeChild(banner); } }
+                try { const txt = banner.querySelector('.over-limit-text'); if (txt) { txt.textContent = message; } } catch (e) {}
+            } else {
+                // If no longer over limit, remove banner if present and attached
+                try { if (banner && banner.parentNode) { banner.parentNode.removeChild(banner); } } catch (e) { /* ignore removal errors */ }
+            }
         } catch (e) { /* swallow DOM errors to avoid breaking the webview */ }
     }
 }
@@ -666,7 +796,19 @@ function updatePauseButton() {
     const b = pauseBtn();
     if (!b) { return; }
     // Update text, pressed state and CSS class for accessibility and styling
-    b.textContent = paused ? 'Resume' : 'Pause';
+    // Avoid replacing button children (icons). Update or create a small label node.
+    try {
+        let label = b.querySelector('.pause-label');
+        if (!label) {
+            label = document.createElement('span');
+            label.className = 'pause-label';
+            // append label after existing children so icons remain intact
+            b.appendChild(label);
+        }
+        label.textContent = paused ? 'Resume' : 'Pause';
+        // Keep an accessible name in sync as well
+        try { b.setAttribute('aria-label', paused ? 'Resume' : 'Pause'); } catch (e) {}
+    } catch (e) { try { b.textContent = paused ? 'Resume' : 'Pause'; } catch (ex) {} }
     try { b.setAttribute('aria-pressed', String(!!paused)); } catch (e) {}
     try { b.classList.toggle('paused', !!paused); } catch (e) {}
 }
@@ -767,7 +909,9 @@ window.onload = function() {
                 try {
                     // Only include file (leaf) items — selector targets checkboxes that are children of li.file-item
                     const fileCheckboxes = document.querySelectorAll('#file-list li.file-item .file-checkbox');
-                    const filePaths = Array.from(fileCheckboxes).map(cb => cb.getAttribute('data-path')).filter(Boolean);
+                    const filePaths = Array.from(fileCheckboxes).map(cb => {
+                        try { const a = cb.getAttribute && cb.getAttribute('data-path'); return a ? decodeFromDataAttribute(a) : null; } catch (e) { return null; }
+                    }).filter(Boolean);
                     postAction('setSelection', { relPaths: shouldSelect ? filePaths : [] });
                 } catch (e) { /* swallow DOM errors */ }
                 return;
@@ -779,13 +923,14 @@ window.onload = function() {
                     const folderItems = document.querySelectorAll('#file-list li.folder-item');
                     folderItems.forEach(fi => {
                         try {
-                            const pathAttr = fi.getAttribute('data-path');
+                            const pathAttr = fi.getAttribute && fi.getAttribute('data-path');
+                            const decodedPath = pathAttr ? decodeFromDataAttribute(pathAttr) : null;
                             if (shouldExpand) {
                                 fi.classList.add('expanded');
-                                if (pathAttr) { try { expandedPaths.add(pathAttr); } catch (e) {} }
+                                if (decodedPath) { try { expandedPaths.add(decodedPath); } catch (e) {} }
                             } else {
                                 fi.classList.remove('expanded');
-                                if (pathAttr) { try { expandedPaths.delete(pathAttr); } catch (e) {} }
+                                if (decodedPath) { try { expandedPaths.delete(decodedPath); } catch (e) {} }
                             }
                         } catch (e) { /* ignore per-node errors */ }
                     });
@@ -803,7 +948,7 @@ window.onload = function() {
             }
             if (action === 'openSettings') {
                 const settingsEl = document.getElementById('settings');
-                if (settingsEl) { settingsEl.hidden = false; }
+                if (settingsEl) { openModal(settingsEl); }
                 // Request latest config from the extension for the settings UI
                 postAction('configRequest');
                 // focus first input in settings for keyboard users
@@ -812,7 +957,7 @@ window.onload = function() {
             }
             if (action === 'ingestRemote') {
                 const m = document.getElementById('ingestModal');
-                if (m) { m.hidden = false; }
+                if (m) { openModal(m); }
                 try { setTimeout(() => { const repo = document.getElementById('ingest-repo'); if (repo && typeof repo.focus === 'function') { repo.focus(); } }, 0); } catch (e) {}
                 return;
             }
@@ -878,7 +1023,7 @@ window.onload = function() {
             headerIngest.addEventListener('click', (ev) => {
                 ev.preventDefault(); ev.stopPropagation();
                 const m = document.getElementById('ingestModal');
-                if (m) { m.hidden = false; }
+                if (m) { openModal(m); }
                 try { setTimeout(() => { const repo = document.getElementById('ingest-repo'); if (repo && typeof repo.focus === 'function') { repo.focus(); } }, 0); } catch (e) {}
             });
         }
@@ -889,7 +1034,7 @@ window.onload = function() {
             headerSettings.addEventListener('click', (ev) => {
                 ev.preventDefault(); ev.stopPropagation();
                 const settingsEl = document.getElementById('settings');
-                if (settingsEl) { settingsEl.hidden = false; }
+                if (settingsEl) { openModal(settingsEl); }
                 // Request latest config from the extension for the settings UI
                 postAction('configRequest');
                 // focus first input in settings for keyboard users
@@ -942,6 +1087,11 @@ window.onload = function() {
         presetMenu.setAttribute('hidden', '');
         window.removeEventListener('click', onWindowClickForPreset);
         // return focus to the button
+        try {
+            // Reset option tabindex to -1 so keyboard navigation doesn't trap focus
+            const options = presetMenu.querySelectorAll('[role="option"]');
+            options.forEach(o => { try { o.setAttribute('tabindex', '-1'); } catch (e) {} });
+        } catch (e) {}
         if (typeof presetBtn.focus === 'function') { presetBtn.focus(); }
     }
     function togglePresetMenu() {
@@ -985,43 +1135,75 @@ window.onload = function() {
             } else if (ev.key === 'Escape') { closePresetMenu(); }
         });
     }
-    document.getElementById('ingest-cancel')?.addEventListener('click', () => { const m = document.getElementById('ingestModal'); if (m) { m.hidden = true; } });
-    document.getElementById('ingest-submit')?.addEventListener('click', () => {
+    document.getElementById('ingest-cancel')?.addEventListener('click', () => { const m = document.getElementById('ingestModal'); if (m) { closeModal(m); } });
+    // Two-stage ingest flow: Load repo first, then start ingest on the loaded repo
+    document.getElementById('ingest-load-repo')?.addEventListener('click', () => {
             const repo = (document.getElementById('ingest-repo') || {}).value || '';
             const ref = (document.getElementById('ingest-ref') || {}).value || '';
             const subpath = (document.getElementById('ingest-subpath') || {}).value || '';
             const includeSubmodules = !!(document.getElementById('ingest-submodules') && document.getElementById('ingest-submodules').checked);
             if (!repo || repo.trim().length === 0) { showToast('Please enter a repo URL or owner/repo slug', 'error'); return; }
-            // Normalise common URL/SSH forms to the owner/repo slug used by the host
-            let normalized = repo.trim();
+            // Normalize common URL/SSH forms to the owner/repo slug used by the host.
+            // Accepts: owner/repo, https://github.com/owner/repo, http(s) with www, git@github.com:owner/repo.git, and similar.
+            const raw = repo.trim();
+            let normalized = raw;
+            let lookedLikeRemote = false;
             try {
-                // git@github.com:owner/repo(.git) — explicitly capture owner and repo
-                const m1 = normalized.match(/^git@github\.com:([^\/\s]+)\/([^\/\s]+)(?:\.git)?$/i);
+                // Quick heuristic to know whether the user entered a remote-style string
+                if (/^https?:\/\//i.test(raw) || /^git@/i.test(raw) || /github\.com/i.test(raw)) { lookedLikeRemote = true; }
+                // If it's a proper URL, parse and extract the first two path segments
+                if (/^https?:\/\//i.test(raw)) {
+                    try {
+                        const u = new URL(raw);
+                        const path = (u.pathname || '').replace(/^\/+|\/+$/g, '');
+                        const parts = path.split('/').filter(Boolean);
+                        if (parts.length >= 2) { normalized = `${parts[0]}/${parts[1]}`; }
+                    } catch (e) { /* ignore URL parse errors */ }
+                }
+                // git@github.com:owner/repo.git forms
+                const m1 = raw.match(/^git@github\.com:([^\/\s]+)\/([^\/\s]+)(?:\.git)?$/i);
                 if (m1 && m1[1] && m1[2]) { normalized = `${m1[1]}/${m1[2]}`; }
-                // ssh://git@github.com/owner/repo(.git)
-                const m2 = normalized.match(/^ssh:\/\/git@github\.com\/([^\/\s]+)\/([^\/\s]+)(?:\.git)?$/i);
+                // ssh://git@github.com/owner/repo.git
+                const m2 = raw.match(/^ssh:\/\/git@github\.com\/([^\/\s]+)\/([^\/\s]+)(?:\.git)?$/i);
                 if (m2 && m2[1] && m2[2]) { normalized = `${m2[1]}/${m2[2]}`; }
-                // https://github.com/owner/repo(.git) or https://www.github.com/owner/repo
-                const m3 = normalized.match(/github\.com\/([^\/\s]+)\/([^\/\s]+)(?:\.git)?/i);
+                // Any github.com/.../... occurrence (covers www.github.com and lacking protocol)
+                const m3 = raw.match(/(?:github\.com[:\/]|www\.github\.com[:\/])([^\/\s]+)\/([^\/\s]+)(?:\.git)?/i) || raw.match(/github\.com\/([^\/\s]+)\/([^\/\s]+)(?:\.git)?/i);
                 if (m3 && m3[1] && m3[2]) { normalized = `${m3[1]}/${m3[2]}`; }
             } catch (e) { /* ignore normalization errors */ }
-            // Accept only owner/repo shape at this point
-            const slugLike = /^[^\/]+\/[^\/]+$/.test(normalized);
-            if (!slugLike) { showToast('Invalid repo format; expected owner/repo, https://github.com/owner/repo or git@github.com:owner/repo.git', 'error'); return; }
-        // send normalized slug to extension
-        postAction('ingestRemote', { repo: normalized, ref: ref.trim() || undefined, subpath: subpath.trim() || undefined, includeSubmodules });
-    // set loading state in modal so users get immediate feedback
-    if (nodes.ingestPreviewRoot) { nodes.ingestPreviewRoot.classList.add('loading'); }
-    if (nodes.ingestSpinner) { nodes.ingestSpinner.hidden = false; nodes.ingestSpinner.removeAttribute('aria-hidden'); }
-    if (nodes.ingestPreviewText) { nodes.ingestPreviewText.textContent = 'Starting ingest...'; nodes.ingestPreviewText.classList.add('loading-placeholder'); }
+            const slugLike = /^[^\/\s]+\/[^\/\s]+$/.test(normalized);
+            if (!slugLike) {
+                const hint = lookedLikeRemote
+                    ? 'Ensure the URL includes both owner and repository (e.g. https://github.com/owner/repo).' 
+                    : 'Expected owner/repo or full GitHub URL (https://github.com/owner/repo or git@github.com:owner/repo.git).';
+                showToast('Invalid repo format; ' + hint, 'error');
+                return;
+            }
+        // show cloning state
+        if (nodes.ingestPreviewRoot) { nodes.ingestPreviewRoot.classList.add('loading'); }
+        if (nodes.ingestSpinner) { nodes.ingestSpinner.hidden = false; nodes.ingestSpinner.removeAttribute('aria-hidden'); }
+        if (nodes.ingestPreviewText) { nodes.ingestPreviewText.textContent = 'Cloning repository...'; nodes.ingestPreviewText.classList.add('loading-placeholder'); }
+        // send loadRemoteRepo action to host
+        postAction('loadRemoteRepo', { repo: normalized, ref: ref.trim() || undefined, subpath: subpath.trim() || undefined, includeSubmodules });
+    });
+
+    // Start ingest of a previously-loaded repository. The host should have returned
+    // a temporary path via the 'remoteRepoLoaded' message which we store in loadedRepoTmpPath.
+    document.getElementById('ingest-submit')?.addEventListener('click', () => {
+            if (!loadedRepoTmpPath) { showToast('No loaded repository available. Click Load Repo first.', 'error'); return; }
+            // send ingestLoadedRepo with the temporary path
+            postAction('ingestLoadedRepo', { tmpPath: loadedRepoTmpPath });
+            // set loading state
+            if (nodes.ingestPreviewRoot) { nodes.ingestPreviewRoot.classList.add('loading'); }
+            if (nodes.ingestSpinner) { nodes.ingestSpinner.hidden = false; nodes.ingestSpinner.removeAttribute('aria-hidden'); }
+            if (nodes.ingestPreviewText) { nodes.ingestPreviewText.textContent = 'Starting ingest...'; nodes.ingestPreviewText.classList.add('loading-placeholder'); }
     });
     // also wire the top-right close buttons for the two modals
-    document.getElementById('ingest-close')?.addEventListener('click', () => { const m = document.getElementById('ingestModal'); if (m) { m.hidden = true; } });
-    document.getElementById('settings-close')?.addEventListener('click', () => { const m = document.getElementById('settings'); if (m) { m.hidden = true; } });
+    document.getElementById('ingest-close')?.addEventListener('click', () => { const m = document.getElementById('ingestModal'); if (m) { closeModal(m); } });
+    document.getElementById('settings-close')?.addEventListener('click', () => { const m = document.getElementById('settings'); if (m) { closeModal(m); } });
 
     // clicking the overlay should cancel/close the modal as well
-    document.getElementById('ingest-cancel-overlay')?.addEventListener('click', () => { const m = document.getElementById('ingestModal'); if (m) { m.hidden = true; } });
-    document.getElementById('settings-cancel-overlay')?.addEventListener('click', () => { const m = document.getElementById('settings'); if (m) { m.hidden = true; } });
+    document.getElementById('ingest-cancel-overlay')?.addEventListener('click', () => { const m = document.getElementById('ingestModal'); if (m) { closeModal(m); } });
+    document.getElementById('settings-cancel-overlay')?.addEventListener('click', () => { const m = document.getElementById('settings'); if (m) { closeModal(m); } });
 
     // close modals on Escape key
     document.addEventListener('keydown', (ev) => {
@@ -1029,10 +1211,10 @@ window.onload = function() {
             try {
                 const im = document.getElementById('ingestModal');
                 const se = document.getElementById('settings');
-                if (im && !im.hidden) { im.hidden = true; }
-                if (se && !se.hidden) { se.hidden = true; }
+                if (im && !im.hidden) { closeModal(im); }
+                if (se && !se.hidden) { closeModal(se); }
                 // also close preset menu if open
-                try { if (nodes.presetBtn) { nodes.presetBtn.setAttribute('aria-expanded', 'false'); } if (nodes.presetMenu) { nodes.presetMenu.setAttribute('aria-hidden', 'true'); nodes.presetMenu.setAttribute('hidden', ''); } } catch (e) {}
+                try { if (typeof closePresetMenu === 'function') { closePresetMenu(); } } catch (e) {}
             } catch (e) { /* swallow */ }
         }
     });

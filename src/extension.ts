@@ -1,7 +1,7 @@
 import { ContentProcessor } from './services/contentProcessor';
 import { TokenAnalyzer } from './services/tokenAnalyzer';
 /**
- * Codebase Digest Extension Orchestration Flow
+ * Code Ingest Extension Orchestration Flow
  *
  * 1. scan: Initiate file scanning and filtering for the active workspace folder.
  * 2. select: Allow users to select files via tree view, dashboard, or commands.
@@ -375,9 +375,9 @@ try { console.log('[codebase-digest] activate() called'); } catch (e) { try { co
 
 	// Status bar item
 	const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
-	statusBar.text = 'Codebase Digest';
+	statusBar.text = 'Code Ingest';
 	// Clicking the status bar focuses the sidebar view (preferred) or opens the panel as fallback
-	statusBar.tooltip = 'Focus Codebase Digest view';
+	statusBar.tooltip = 'Focus Code Ingest view';
 	statusBar.command = 'codebaseDigest.focusView';
 	statusBar.show();
 	context.subscriptions.push(statusBar);
@@ -522,7 +522,7 @@ try { console.log('[codebase-digest] activate() called'); } catch (e) { try { co
 		const treeProvider = treeProviders.get(resolvedPath);
 		if (!treeProvider) { return; }
 		const preview = treeProvider.getPreviewData();
-		let title = `Codebase Digest (${preview.selectedCount} selected, ${preview.totalFiles} total, ${preview.selectedSize})`;
+	let title = `Code Ingest (${preview.selectedCount} selected, ${preview.totalFiles} total, ${preview.selectedSize})`;
 		let statusText = title;
 		const contextLimit = vscode.workspace.getConfiguration('codebaseDigest', vscode.Uri.file(resolvedPath)).get('contextLimit', 0);
 		if (contextLimit > 0 && preview.tokenEstimate && preview.tokenEstimate > contextLimit) {

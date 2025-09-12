@@ -53,7 +53,7 @@ export default {};
 import * as vscode from 'vscode';
 import { Diagnostics } from './diagnostics';
 
-const OUTPUT_CHANNEL_NAME = 'Codebase Digest';
+const OUTPUT_CHANNEL_NAME = 'Code Ingest';
 let outputChannel: vscode.OutputChannel | undefined;
 
 function getOutputChannel(): vscode.OutputChannel {

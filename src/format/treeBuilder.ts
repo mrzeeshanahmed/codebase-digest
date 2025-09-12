@@ -14,7 +14,9 @@ export function buildTreeLines(files: FileNode[], mode: 'minimal' | 'full' = 'fu
     }
     // Full tree: build full tree string and split into lines
     const full = f.buildTree(files, true) || '';
-    const lines = full.length ? full.split('\n') : [];
+    // Normalize CRLF to LF so splitting and truncation work consistently across platforms
+    const normalized = full.replace(/\r\n/g, '\n');
+    const lines = normalized.length ? normalized.split('\n') : [];
     if (lines.length > maxLines) {
         return [...lines.slice(0, maxLines), '... (truncated)'];
     }
@@ -22,7 +24,9 @@ export function buildTreeLines(files: FileNode[], mode: 'minimal' | 'full' = 'fu
 }
 
 export function buildTree(files: FileNode[], includeFull = true) {
-    return includeFull ? buildTreeLines(files, 'full').join('\n') : '';
+    // When requesting the full tree, explicitly pass a very large maxLines
+    // to avoid accidental truncation by the default (100 lines).
+    return includeFull ? buildTreeLines(files, 'full', Number.MAX_SAFE_INTEGER).join('\n') : '';
 }
 
 export function buildSelectedTreeLines(files: FileNode[], maxLines: number) {

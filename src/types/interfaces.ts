@@ -1,4 +1,4 @@
-// Shared types and interfaces for Codebase Digest
+// Shared types and interfaces for Code Ingest
 // CODEMOD-SAFE: Do not change exported type names, field names, or command IDs unless a prompt explicitly says so
 export interface FileNode {
     path: string;

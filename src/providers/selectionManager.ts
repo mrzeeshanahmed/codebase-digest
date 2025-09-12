@@ -42,10 +42,10 @@ export class SelectionManager {
     }
 
     clearSelection(): void {
+        // Reset selection state on all nodes and clear the selectedRelPaths cache.
         this.selectedRelPaths.length = 0;
         const clearNode = (node: FileNode) => {
-            node.isSelected = false;
-            this.selectedRelPaths = this.selectedRelPaths.filter(rp => rp !== node.relPath);
+            try { node.isSelected = false; } catch (e) {}
             if (node.children) {
                 for (const child of node.children) { clearNode(child); }
             }
@@ -62,17 +62,22 @@ export class SelectionManager {
         // operations which produce O(n*m) behavior on large trees.
         const want = new Set(relPaths || []);
         const collected: string[] = [];
-        const markSelection = (node: FileNode) => {
-            const isSel = want.has(node.relPath);
-            node.isSelected = !!isSel;
-            if (node.type === 'file' && isSel) {
-                collected.push(node.relPath);
+        // Traverse with ancestorHas to allow folder relPaths to select contained files
+        const markSelection = (node: FileNode, ancestorHas: boolean) => {
+            const nodeRequested = want.has(node.relPath);
+            const effective = ancestorHas || nodeRequested;
+            if (node.type === 'file') {
+                try { node.isSelected = !!effective; } catch (e) {}
+                if (effective) { collected.push(node.relPath); }
+            } else {
+                // Do not mark directories as selected; selection is represented by files
+                try { node.isSelected = false; } catch (e) {}
             }
             if (node.children) {
-                for (const child of node.children) { markSelection(child); }
+                for (const child of node.children) { markSelection(child, effective); }
             }
         };
-        for (const node of this.getRoots()) { markSelection(node); }
+        for (const node of this.getRoots()) { markSelection(node, false); }
         // Keep selectedRelPaths deterministic and compact: sort by relPath so
         // callers relying on stable ordering (and persisted snapshots) behave
         // consistently. getSelectedFiles() also sorts, so this aligns both APIs.
@@ -83,17 +88,21 @@ export class SelectionManager {
     }
 
     selectAll(): void {
-        this.selectedRelPaths.length = 0;
+        // Use a Set to collect file relPaths and avoid O(n^2) includes checks
+        const collected = new Set<string>();
         const selectNode = (node: FileNode) => {
-            node.isSelected = true;
             if (node.type === 'file') {
-                if (!this.selectedRelPaths.includes(node.relPath)) { this.selectedRelPaths.push(node.relPath); }
+                try { node.isSelected = true; } catch (e) {}
+                if (node.relPath) { collected.add(node.relPath); }
+            } else {
+                try { node.isSelected = false; } catch (e) {}
             }
             if (node.children) {
                 for (const child of node.children) { selectNode(child); }
             }
         };
         for (const node of this.getRoots()) { selectNode(node); }
+        this.selectedRelPaths = Array.from(collected).sort((a, b) => a.localeCompare(b));
         this.onChange(undefined);
         if (this.previewUpdater) { this.previewUpdater(); }
     }

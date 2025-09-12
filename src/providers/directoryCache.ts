@@ -16,6 +16,17 @@ export class DirectoryCache {
     async hydrateDirectory(dirPath: string, config: any): Promise<FileNode[]> {
         // Use ContentProcessor.scanDirectory to perform directory traversal for caching.
         const children = await ContentProcessor.scanDirectory(dirPath, config as any, 0, dirPath);
+        // Ensure cached nodes do not carry selection state. Selection should be
+        // managed by the SelectionManager / tree provider, not by a passive cache
+        // hydration. Clear isSelected recursively to avoid polluting UI selection.
+        const clearSelection = (nodes?: FileNode[]) => {
+            if (!Array.isArray(nodes)) { return; }
+            for (const n of nodes) {
+                try { (n as any).isSelected = false; } catch (e) {}
+                if (Array.isArray((n as any).children)) { clearSelection((n as any).children); }
+            }
+        };
+        try { clearSelection(children); } catch (e) {}
         this.cache.set(dirPath, children);
         return children;
     }

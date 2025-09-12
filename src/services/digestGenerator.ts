@@ -35,7 +35,7 @@ export class DigestGenerator {
     let warnings: string[] = [];
     const perFileWarnings: string[] = [];
     const perFileErrors: { path: string; message: string; stack?: string }[] = [];
-    const errorChannel = vscode.window.createOutputChannel('Codebase Digest Errors');
+    const errorChannel = vscode.window.createOutputChannel('Code Ingest Errors');
     const formatter = getFormatter(outputFormat);
         // Preserve file order by relPath
         const sortedFiles = [...files].sort((a, b) => a.relPath.localeCompare(b.relPath));
@@ -84,7 +84,7 @@ export class DigestGenerator {
                         } catch (e) {
                             // If a plugin handler throws while probing, capture and continue
                             // to next plugin rather than aborting the whole generation.
-                            try { const ch = vscode.window.createOutputChannel('Codebase Digest'); ch.appendLine('Plugin probe failed: ' + String(e)); } catch {}
+                            try { const ch = vscode.window.createOutputChannel('Code Ingest'); ch.appendLine('Plugin probe failed: ' + String(e)); } catch {}
                         }
                     }
                     if (!body) {
@@ -244,7 +244,7 @@ export class DigestGenerator {
                 }
             }
             // Log to output channel in a compact form
-            errorChannel.appendLine(`Codebase Digest encountered ${dedupedErrors.length} unique file errors:`);
+            errorChannel.appendLine(`Code Ingest encountered ${dedupedErrors.length} unique file errors:`);
             for (const e of dedupedErrors) {
                 errorChannel.appendLine(`- ${e.path}: ${e.message}`);
                 if (e.stack) {
@@ -305,10 +305,11 @@ export class DigestGenerator {
                 warnings.push(tokenLimitWarning);
             }
         }
-        // For human-readable formats (text/markdown) ensure the summary and
-        // ASCII tree are prepended to the output content so the user sees
-        // an immediate overview at the top of the generated file.
-        if (outputFormat !== 'json') {
+    // For human-readable formats (text/markdown) optionally prepend the summary and
+    // ASCII tree to the output content when outputPresetCompatible is enabled so the user sees
+    // an immediate overview at the top of the generated file.
+    // This is gated behind the config flag to avoid surprising existing callers/tests.
+    if (outputFormat !== 'json' && (config as any).outputPresetCompatible) {
             try {
                 const fm = new Formatters();
                 let headerBlock = '';
@@ -394,7 +395,7 @@ export class DigestGenerator {
                 }
             }
             // Emit guarded diagnostic: counts only, no content
-            try { this.tokenAnalyzer && (this.tokenAnalyzer as any).diagnostics && (this.tokenAnalyzer as any).diagnostics.info && (this.tokenAnalyzer as any).diagnostics.info('Redaction applied', { applied: !!(result as any).redactionApplied, warningsCount: Array.isArray(warnings) ? warnings.length : 0 }); } catch (e) { try { const ch = vscode.window.createOutputChannel('Codebase Digest'); ch.appendLine('[DigestGenerator] diagnostics.info failed: ' + String(e)); } catch {} }
+            try { this.tokenAnalyzer && (this.tokenAnalyzer as any).diagnostics && (this.tokenAnalyzer as any).diagnostics.info && (this.tokenAnalyzer as any).diagnostics.info('Redaction applied', { applied: !!(result as any).redactionApplied, warningsCount: Array.isArray(warnings) ? warnings.length : 0 }); } catch (e) { try { const ch = vscode.window.createOutputChannel('Code Ingest'); ch.appendLine('[DigestGenerator] diagnostics.info failed: ' + String(e)); } catch {} }
 
             // If outputObjects exist (JSON mode), produce a redacted copy so callers that inspect objects see redacted bodies
             if (outputFormat === 'json' && Array.isArray(result.outputObjects) && result.outputObjects.length > 0) {

@@ -77,6 +77,19 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
         const handleChange = (uri: vscode.Uri) => {
             const dir = path.dirname(uri.fsPath);
 
+            // Ignore events under heavy noise folders to reduce watcher churn
+            // (node_modules and .git). If a gitignore service is available,
+            // prefer its decision for more accurate filtering.
+            try {
+                const low = (dir || '').toLowerCase();
+                if (low.includes(`${path.sep}node_modules${path.sep}`) || low.endsWith(`${path.sep}node_modules`) || low.includes(`${path.sep}.git${path.sep}`) || low.endsWith(`${path.sep}.git`)) {
+                    return;
+                }
+                if (this.gitignoreService && typeof this.gitignoreService.isIgnored === 'function') {
+                    try { if (this.gitignoreService.isIgnored(uri.fsPath)) { return; } } catch (e) { /* ignore gitignore failures */ }
+                }
+            } catch (e) { /* ignore filtering errors */ }
+
             // Debounce key is the directory path; coalesce rapid events for same dir
             const key = String(dir || this.workspaceRoot || 'root');
             const runNow = async () => {
@@ -119,8 +132,10 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
                     const m = getMutex(this.workspaceRoot || this.workspaceFolder.uri.fsPath);
                     const relRelease = await m.lock();
                     try {
-                        // Pass through current scan token so a global cancellation will abort this directory scan if needed
-                        parentNode.children = await this.fileScanner.scanDirectory(parentNode.path, config, this.scanToken || undefined);
+                        // Do not reuse possibly-cancelled scan token for individual
+                        // directory hydrations. Passing undefined ensures a fresh
+                        // uncancelled run so the Loading... node won't get stuck.
+                        parentNode.children = await this.fileScanner.scanDirectory(parentNode.path, config, undefined);
                         this.directoryCache.set(parentNode.path, parentNode.children);
                         this._onDidChangeTreeData.fire(parentNode);
                     } finally {
@@ -518,6 +533,15 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
         if (groups.length > 0) {
             // Prepend virtual groups so they appear first-level
             this.rootNodes = [...groups, ...this.rootNodes];
+            // Remove any selected relPaths that were extracted into virtual groups
+            // to avoid duplicate/stale selections after grouping. Use the alreadyTaken set
+            // which contains relPaths moved into virtual groups.
+            try {
+                if (this.selectedRelPaths && this.selectedRelPaths.length > 0) {
+                    const taken = alreadyTaken;
+                    this.selectedRelPaths = this.selectedRelPaths.filter(rp => !taken.has(rp));
+                }
+            } catch (e) { /* defensive: ignore selection pruning errors */ }
         }
     }
 
@@ -563,7 +587,9 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
             includePatterns: cfg.get('includePatterns', []),
             respectGitignore: cfg.get('respectGitignore', true),
             gitignoreFiles: cfg.get('gitignoreFiles', []),
-            outputFormat: cfg.get('outputFormat', 'markdown'),
+            // Historically defaulted to 'markdown'; use 'text' as a safer default
+            // so callers that expect plain text outputs don't get double-formatted.
+            outputFormat: cfg.get('outputFormat', 'text'),
             includeMetadata: cfg.get('includeMetadata', true),
             includeTree: cfg.get('includeTree', true),
             includeSummary: cfg.get('includeSummary', true),
@@ -607,7 +633,7 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
                 return [
                     {
                         type: 'file',
-                        name: 'Welcome to Codebase Digest',
+                        name: 'Welcome to Code Ingest',
                         relPath: '__welcome__',
                         path: '',
                         isSelected: false,
@@ -721,14 +747,16 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
         if ((element as any).virtualType === 'welcome' || element.relPath === '__welcome__') {
             const item = new vscode.TreeItem(element.name, vscode.TreeItemCollapsibleState.None);
             item.description = 'Generate a digest of your codebase for LLMs. Choose an action below:';
-            item.tooltip = 'Welcome to Codebase Digest';
+            item.tooltip = 'Welcome to Code Ingest';
             item.iconPath = new vscode.ThemeIcon('rocket');
             item.contextValue = ContextValues.welcome;
             // Clicking the welcome node focuses the sidebar dashboard view
+            // Pass the WorkspaceFolder Uri object (not a string) so command
+            // handlers can unambiguously scope the action to this provider's folder
             item.command = {
                 command: 'codebaseDigest.focusView',
-                title: 'Focus Codebase Digest',
-                arguments: [this.workspaceFolder.uri.fsPath]
+                title: 'Focus Code Ingest',
+                arguments: [this.workspaceFolder.uri]
             } as any;
             return item;
         }
@@ -756,10 +784,11 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
                 settings: 'codebaseDigest.openSettings'
             };
             const cmd = cmdMap[act] || 'codebaseDigest.openDashboard';
+            // Use Uri so handlers have full workspaceFolder context (multi-root safe)
             item.command = {
                 command: cmd,
                 title: element.name,
-                arguments: [this.workspaceFolder.uri.fsPath]
+                arguments: [this.workspaceFolder.uri]
             } as any;
             return item;
         }

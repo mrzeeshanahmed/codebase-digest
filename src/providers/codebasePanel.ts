@@ -4,7 +4,7 @@ import { CodebaseDigestTreeProvider } from './treeDataProvider';
 import { onProgress } from './eventBus';
 import { setWebviewHtml, wireWebviewMessages } from './webviewHelpers';
 import { Diagnostics } from '../utils/diagnostics';
-const diagnostics = new Diagnostics('debug');
+const diagnostics = new Diagnostics('debug', 'Code Ingest');
 
 const panels: Map<string, CodebaseDigestPanel> = new Map();
 let registeredDisposable: vscode.Disposable | undefined;
@@ -17,6 +17,8 @@ export class CodebaseDigestPanel {
     private treeProvider: CodebaseDigestTreeProvider;
     private folderPath: string;
     private context?: vscode.ExtensionContext;
+    // track periodic preview interval so it can be cleared when webview reloads
+    private previewInterval?: ReturnType<typeof setInterval>;
 
     // Support two constructor shapes for backwards compatibility with tests:
     // - new CodebaseDigestPanel(context, extensionUri, treeProvider, folderPath)
@@ -46,7 +48,9 @@ export class CodebaseDigestPanel {
             this.panel.reveal(vscode.ViewColumn.One);
             return;
         }
-        this.panel = vscode.window.createWebviewPanel('codebaseDigestPanel', 'Codebase Digest', vscode.ViewColumn.One, {
+        // Ensure any previously scheduled interval is cleared before (re)creating
+        if (this.previewInterval) { clearInterval(this.previewInterval as any); this.previewInterval = undefined; }
+    this.panel = vscode.window.createWebviewPanel('codebaseDigestPanel', 'Code Ingest', vscode.ViewColumn.One, {
             enableScripts: true,
             localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, 'resources', 'webview'), this.extensionUri]
         });
@@ -88,8 +92,8 @@ export class CodebaseDigestPanel {
         }
     } catch (e) { try { diagnostics.warn('getting previewNow failed', e); } catch {} }
     // Periodic heartbeat to refresh stats every 5s
-    const interval = setInterval(() => this.postPreviewDelta(), 5000);
-    this.panel.onDidDispose(() => { clearInterval(interval); });
+    this.previewInterval = setInterval(() => this.postPreviewDelta(), 5000);
+    this.panel.onDidDispose(() => { try { if (this.previewInterval) { clearInterval(this.previewInterval as any); this.previewInterval = undefined; } } catch (e) { try { diagnostics.warn('clearing previewInterval failed', e); } catch {} } });
     this.panel.onDidDispose(() => { try { disposeProgress(); } catch (e) { try { diagnostics.warn('disposeProgress failed', e); } catch {} } });
     this.panel.onDidDispose(() => { try { scanProgressDisp(); } catch (e) { try { diagnostics.warn('scanProgressDisp failed', e); } catch {} } });
     }
@@ -97,11 +101,17 @@ export class CodebaseDigestPanel {
         private async postConfig() {
             if (!this.panel) { return; }
             const cfg = vscode.workspace.getConfiguration('codebaseDigest', vscode.Uri.file(this.folderPath));
-                const thresholdsDefault = { maxFiles: 25000, maxTotalSizeBytes: 536870912, tokenLimit: 32000 };
-                const thresholds = cfg.get('thresholds', thresholdsDefault) as any || {};
-                const maxFiles = cfg.get('maxFiles', thresholds.maxFiles || thresholdsDefault.maxFiles) as number;
-                const maxTotalSizeBytes = cfg.get('maxTotalSizeBytes', thresholds.maxTotalSizeBytes || thresholdsDefault.maxTotalSizeBytes) as number;
-                const tokenLimit = cfg.get('tokenLimit', thresholds.tokenLimit || thresholdsDefault.tokenLimit) as number;
+                    const thresholdsDefault = { maxFiles: 25000, maxTotalSizeBytes: 536870912, tokenLimit: 32000 };
+                    // Prefer explicitly flattened settings when present. Fall back to nested
+                    // `thresholds` object, then finally to hard defaults. This avoids a stale
+                    // thresholds object incorrectly overriding a direct setting.
+                    const thresholds = cfg.get('thresholds') as any || {};
+                    const rawMaxFiles = cfg.get('maxFiles') as any;
+                    const rawMaxTotalSizeBytes = cfg.get('maxTotalSizeBytes') as any;
+                    const rawTokenLimit = cfg.get('tokenLimit') as any;
+                    const maxFiles = (typeof rawMaxFiles === 'number') ? rawMaxFiles : (typeof thresholds.maxFiles === 'number' ? thresholds.maxFiles : thresholdsDefault.maxFiles);
+                    const maxTotalSizeBytes = (typeof rawMaxTotalSizeBytes === 'number') ? rawMaxTotalSizeBytes : (typeof thresholds.maxTotalSizeBytes === 'number' ? thresholds.maxTotalSizeBytes : thresholdsDefault.maxTotalSizeBytes);
+                    const tokenLimit = (typeof rawTokenLimit === 'number') ? rawTokenLimit : (typeof thresholds.tokenLimit === 'number' ? thresholds.tokenLimit : thresholdsDefault.tokenLimit);
 
                 const payload = {
                     type: 'config',
@@ -176,9 +186,13 @@ export class CodebaseDigestPanel {
 }
 
 function debounce(fn: () => void, ms: number) {
-    let t: NodeJS.Timeout | null = null;
+    // Use ReturnType<typeof setTimeout> so the type adapts to the runtime
+    // (number in browser/webview, Timeout in Node) and avoids referencing
+    // the NodeJS.Timeout symbol directly which can leak node types into
+    // webview-compiled code.
+    let t: ReturnType<typeof setTimeout> | null = null;
     return () => {
-        if (t) { clearTimeout(t); }
+        if (t) { clearTimeout(t as any); }
         t = setTimeout(() => { t = null; fn(); }, ms);
     };
 }
@@ -214,10 +228,13 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                 const folder = treeProvider['workspaceRoot'] || '';
                 const cfg = vscode.workspace.getConfiguration('codebaseDigest', vscode.Uri.file(folder));
                 const thresholdsDefault = { maxFiles: 25000, maxTotalSizeBytes: 536870912, tokenLimit: 32000 };
-                const thresholds = cfg.get('thresholds', thresholdsDefault) as any || {};
-                const maxFiles = cfg.get('maxFiles', thresholds.maxFiles || thresholdsDefault.maxFiles) as number;
-                const maxTotalSizeBytes = cfg.get('maxTotalSizeBytes', thresholds.maxTotalSizeBytes || thresholdsDefault.maxTotalSizeBytes) as number;
-                const tokenLimit = cfg.get('tokenLimit', thresholds.tokenLimit || thresholdsDefault.tokenLimit) as number;
+                const thresholds = cfg.get('thresholds') as any || {};
+                const rawMaxFiles = cfg.get('maxFiles') as any;
+                const rawMaxTotalSizeBytes = cfg.get('maxTotalSizeBytes') as any;
+                const rawTokenLimit = cfg.get('tokenLimit') as any;
+                const maxFiles = (typeof rawMaxFiles === 'number') ? rawMaxFiles : (typeof thresholds.maxFiles === 'number' ? thresholds.maxFiles : thresholdsDefault.maxFiles);
+                const maxTotalSizeBytes = (typeof rawMaxTotalSizeBytes === 'number') ? rawMaxTotalSizeBytes : (typeof thresholds.maxTotalSizeBytes === 'number' ? thresholds.maxTotalSizeBytes : thresholdsDefault.maxTotalSizeBytes);
+                const tokenLimit = (typeof rawTokenLimit === 'number') ? rawTokenLimit : (typeof thresholds.tokenLimit === 'number' ? thresholds.tokenLimit : thresholdsDefault.tokenLimit);
                 const payload = {
                     type: 'config',
                     folderPath: folder,
@@ -261,10 +278,13 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                     }
                 }
                 const thresholdsDefault = { maxFiles: 25000, maxTotalSizeBytes: 536870912, tokenLimit: 32000 };
-                const thresholds = cfg.get('thresholds', thresholdsDefault) as any || {};
-                const maxFiles = cfg.get('maxFiles', thresholds.maxFiles || thresholdsDefault.maxFiles) as number;
-                const maxTotalSizeBytes = cfg.get('maxTotalSizeBytes', thresholds.maxTotalSizeBytes || thresholdsDefault.maxTotalSizeBytes) as number;
-                const tokenLimit = cfg.get('tokenLimit', thresholds.tokenLimit || thresholdsDefault.tokenLimit) as number;
+                const thresholds = cfg.get('thresholds') as any || {};
+                const rawMaxFiles = cfg.get('maxFiles') as any;
+                const rawMaxTotalSizeBytes = cfg.get('maxTotalSizeBytes') as any;
+                const rawTokenLimit = cfg.get('tokenLimit') as any;
+                const maxFiles = (typeof rawMaxFiles === 'number') ? rawMaxFiles : (typeof thresholds.maxFiles === 'number' ? thresholds.maxFiles : thresholdsDefault.maxFiles);
+                const maxTotalSizeBytes = (typeof rawMaxTotalSizeBytes === 'number') ? rawMaxTotalSizeBytes : (typeof thresholds.maxTotalSizeBytes === 'number' ? thresholds.maxTotalSizeBytes : thresholdsDefault.maxTotalSizeBytes);
+                const tokenLimit = (typeof rawTokenLimit === 'number') ? rawTokenLimit : (typeof thresholds.tokenLimit === 'number' ? thresholds.tokenLimit : thresholdsDefault.tokenLimit);
                 const updated = {
                     respectGitignore: cfg.get('respectGitignore', cfg.get('gitignore', true)),
                     presets: cfg.get('presets', []),
@@ -340,15 +360,27 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                 } catch (ex) { /* ignore */ }
             });
 
-            // Provide periodic preview deltas
-            const interval = setInterval(() => {
-                const preview = treeProvider.getPreviewData();
-                const delta = { selectedCount: preview.selectedCount, totalFiles: preview.totalFiles, selectedSize: preview.selectedSize, tokenEstimate: preview.tokenEstimate, contextLimit: preview.contextLimit, fileTree: preview.fileTree, selectedPaths: Array.isArray(preview.selectedPaths) ? preview.selectedPaths : [] };
-                webviewView.webview.postMessage({ type: 'previewDelta', delta });
-            }, 5000);
-            webviewView.onDidDispose(() => clearInterval(interval));
+            // Provide periodic preview deltas. Keep a handle so we can clear it when the webview
+            // is re-resolved/revealed to avoid duplicate intervals.
+            let sidebarInterval: ReturnType<typeof setInterval> | undefined;
+            const startSidebarInterval = () => {
+                if (sidebarInterval) { try { clearInterval(sidebarInterval as any); } catch {} sidebarInterval = undefined; }
+                sidebarInterval = setInterval(() => {
+                    try {
+                        const preview = treeProvider.getPreviewData();
+                        const delta = { selectedCount: preview.selectedCount, totalFiles: preview.totalFiles, selectedSize: preview.selectedSize, tokenEstimate: preview.tokenEstimate, contextLimit: preview.contextLimit, fileTree: preview.fileTree, selectedPaths: Array.isArray(preview.selectedPaths) ? preview.selectedPaths : [] };
+                        webviewView.webview.postMessage({ type: 'previewDelta', delta });
+                    } catch (e) { /* ignore */ }
+                }, 5000);
+            };
+            // Register disposal handler first so it is guaranteed to run if the view
+            // is disposed very quickly after being resolved. This prevents the
+            // interval from continuing when the dispose handler might not yet be
+            // registered due to ordering.
+            webviewView.onDidDispose(() => { try { if (sidebarInterval) { clearInterval(sidebarInterval as any); sidebarInterval = undefined; } } catch (e) {} });
+            startSidebarInterval();
             webviewView.onDidDispose(() => { try { scanProgressDisp(); } catch (e) {} });
-                webviewView.onDidDispose(() => { try { activeViews.delete(webviewView); } catch (e) {} });
+            webviewView.onDidDispose(() => { try { activeViews.delete(webviewView); } catch (e) {} });
         }
     };
     try {
@@ -364,18 +396,31 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
 
 // Broadcast generation result to open panels and sidebar views so webview can show toasts (e.g., redactionApplied)
 export function broadcastGenerationResult(result: any, folderPath?: string) {
-    // Post to panels matching folderPath (or all if not specified)
+    // Determine the intended target folder for this generation result.
+    // Preference order: explicit folderPath param, result.folderPath/result.workspacePath, else undefined.
+    const inferred = folderPath || (result && (result.folderPath || result.workspacePath || result.workspaceFolder));
+    // If we couldn't infer a folder and the workspace is multi-root, avoid broadcasting to all
+    // to prevent toasts from appearing in unrelated workspace views. Callers should pass
+    // an explicit folderPath when running in multi-root workspaces.
+    const workspaceFolders = vscode.workspace.workspaceFolders || [];
+    const ambiguousMultiRoot = !inferred && workspaceFolders.length > 1;
+    if (ambiguousMultiRoot) {
+        try { diagnostics.warn('broadcastGenerationResult skipped: ambiguous target folder in multi-root workspace; pass folderPath to broadcastGenerationResult'); } catch (e) {}
+        return;
+    }
+
+    // Post to panels matching inferred folderPath (or all if none/in single-root workspace)
     for (const [key, panel] of panels.entries()) {
         try {
-            if (!folderPath || key === folderPath || (panel as any).folderPath === folderPath) {
+            if (!inferred || key === inferred || (panel as any).folderPath === inferred) {
                 if ((panel as any).panel) { (panel as any).panel.webview.postMessage({ type: 'generationResult', result }); }
             }
         } catch (e) { /* ignore */ }
     }
-    // Post to active sidebar views (filter by folderPath when provided)
+    // Post to active sidebar views (filter by inferred when provided)
     for (const [vw, vwFolder] of activeViews.entries()) {
         try {
-            if (!folderPath || vwFolder === folderPath) {
+            if (!inferred || vwFolder === inferred) {
                 vw.webview.postMessage({ type: 'generationResult', result });
             }
         } catch (e) { /* ignore */ }

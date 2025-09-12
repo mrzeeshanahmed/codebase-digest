@@ -50,7 +50,7 @@ export async function showUserError(err: Error, fallbackMessage?: string) {
             return { action: 'install' };
         }
         if (pick === showPath) {
-            const ch = vscode.window.createOutputChannel('Codebase Digest Diagnostics');
+            const ch = vscode.window.createOutputChannel('Code Ingest Diagnostics');
             try { ch.appendLine(`PATH=${process.env.PATH || ''}`); } catch (_) {}
             ch.show(true);
             return { action: 'showPath' };

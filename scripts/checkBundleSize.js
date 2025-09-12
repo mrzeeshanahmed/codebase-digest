@@ -20,17 +20,54 @@ let bundlePath;
 if (!artifactSpec) {
   bundlePath = path.resolve(__dirname, '..', 'dist', 'extension.js');
 } else if (String(artifactSpec).toLowerCase() === 'vsix') {
-  // Look for a .vsix produced by packaging step in repo root or dist
-  const candidates = [path.resolve(__dirname, '..')].concat([path.resolve(__dirname, '..', 'dist')]);
-  let found = null;
-  for (const dir of candidates) {
+  // Look for a .vsix produced by packaging step in common locations. Some CI
+  // pipelines place artifacts in `out`, `artifacts`, `build` or `release` dirs;
+  // scan these as well as repo root and dist. If multiple .vsix files are
+  // present, pick the most recently modified one.
+  const repoRoot = path.resolve(__dirname, '..');
+  const candidateDirs = [repoRoot, path.resolve(repoRoot, 'dist'), path.resolve(repoRoot, 'out'), path.resolve(repoRoot, 'artifacts'), path.resolve(repoRoot, 'build'), path.resolve(repoRoot, 'release'), path.resolve(repoRoot, 'releases')];
+
+  function findVsixInDir(dir, maxDepth = 2) {
+    const results = [];
+    function walk(d, depth) {
+      if (depth < 0) { return; }
+      let files = [];
+      try { files = fs.readdirSync(d); } catch (e) { return; }
+      for (const f of files) {
+        const fp = path.join(d, f);
+        let st;
+        try { st = fs.statSync(fp); } catch (e) { continue; }
+        if (st.isFile() && f.toLowerCase().endsWith('.vsix')) { results.push({ path: fp, mtime: st.mtimeMs }); }
+        else if (st.isDirectory()) { walk(fp, depth - 1); }
+      }
+    }
+    walk(dir, maxDepth);
+    return results;
+  }
+
+  let foundCandidates = [];
+  for (const d of candidateDirs) {
     try {
-      const files = fs.readdirSync(dir);
-      const vsix = files.find(f => f.toLowerCase().endsWith('.vsix'));
-      if (vsix) { found = path.join(dir, vsix); break; }
+      const r = findVsixInDir(d, 2);
+      if (r && r.length) { foundCandidates = foundCandidates.concat(r); }
     } catch (e) { /* ignore */ }
   }
-  bundlePath = found || path.resolve(__dirname, '..', 'dist', 'extension.js');
+  // pick the newest vsix by mtime
+  let found = null;
+  if (foundCandidates.length > 0) {
+    foundCandidates.sort((a, b) => b.mtime - a.mtime);
+    found = foundCandidates[0].path;
+  }
+  // Fallback: if no .vsix found, try common bundle locations for the JS bundle
+  if (found) {
+    bundlePath = found;
+  } else if (fs.existsSync(path.resolve(repoRoot, 'dist', 'extension.js'))) {
+    bundlePath = path.resolve(repoRoot, 'dist', 'extension.js');
+  } else if (fs.existsSync(path.resolve(repoRoot, 'out', 'extension.js'))) {
+    bundlePath = path.resolve(repoRoot, 'out', 'extension.js');
+  } else {
+    bundlePath = path.resolve(repoRoot, 'dist', 'extension.js');
+  }
 } else {
   bundlePath = path.resolve(__dirname, '..', String(artifactSpec));
 }
@@ -47,11 +84,12 @@ function envTruthy(v) {
 
 // Read and normalize control flags
 const explicitWarnOnly = envTruthy(process.env.BUNDLE_WARN_ONLY);
-// The workflow writes an explicit 'true' or 'false' string into GITHUB_ENV. Use a strict
-// string comparison here to avoid treating other truthy-like values differently.
-const explicitFail = String(process.env.BUNDLE_FAIL_ON_EXCEED) === 'true';
-const githubEventName = process.env.GITHUB_EVENT_NAME || process.env.GITHUB_EVENT || '';
-const isPullRequest = (githubEventName === 'pull_request' || githubEventName === 'pull_request_target');
+const explicitFail = envTruthy(process.env.BUNDLE_FAIL_ON_EXCEED);
+// Normalize CI event name sources: some workflows set GITHUB_EVENT_NAME, others
+// may expose github.event_name (lowercase) via normalization steps. Check common
+// variants to robustly detect PR events.
+const githubEventName = String(process.env.GITHUB_EVENT_NAME || process.env.GITHUB_EVENT || process.env.github_event_name || process.env.github_event || '').toLowerCase().trim();
+const isPullRequest = ['pull_request', 'pull_request_target', 'pull-request', 'pr'].includes(githubEventName);
 const WARN_ONLY = explicitFail ? false : (explicitWarnOnly ? true : (isPullRequest ? true : false));
 
 function human(n) {

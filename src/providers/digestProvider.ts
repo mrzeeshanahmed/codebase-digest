@@ -1,5 +1,5 @@
 /**
- * Codebase Digest Orchestration Flow
+ * Code Ingest Orchestration Flow
  *
  * 1. scan: Traverse and filter files in the workspace using FileScanner and FilterService.
  * 2. select: Track user selection of files for preview and digest generation.
@@ -121,17 +121,18 @@ export async function generateDigest(
     emitProgress({ op: 'generate', mode: 'start', determinate: false, message: 'Generating digest...' });
     files.sort((a: FileNode, b: FileNode) => a.relPath.localeCompare(b.relPath));
     // Step 2: compute cache key (after remoteMeta is available)
+    // Use runtimeConfig so transient overrides are included in the cache key
     const cacheKey = cacheService.computeKey({
-        sourceType: config.remoteRepo ? 'remote' : 'local',
-        remoteRepo: config.remoteRepo || '',
+        sourceType: runtimeConfig.remoteRepo ? 'remote' : 'local',
+        remoteRepo: runtimeConfig.remoteRepo || '',
         commitSha: remoteMeta?.resolved?.sha || '',
-        includePatterns: config.includePatterns,
-        excludePatterns: config.excludePatterns,
-        subpath: config.remoteRepoOptions?.subpath || '',
-        outputFormat: config.outputFormat,
-        outputPresetCompatible: config.outputPresetCompatible,
-        filterPresets: config.filterPresets || [],
-        outputSeparatorsHeader: config.outputSeparatorsHeader || '',
+        includePatterns: runtimeConfig.includePatterns || config.includePatterns,
+        excludePatterns: runtimeConfig.excludePatterns || config.excludePatterns,
+        subpath: runtimeConfig.remoteRepoOptions?.subpath || config.remoteRepoOptions?.subpath || '',
+        outputFormat: runtimeConfig.outputFormat || config.outputFormat,
+        outputPresetCompatible: runtimeConfig.outputPresetCompatible || config.outputPresetCompatible,
+        filterPresets: runtimeConfig.filterPresets || config.filterPresets || [],
+        outputSeparatorsHeader: runtimeConfig.outputSeparatorsHeader || config.outputSeparatorsHeader || '',
     });
     // Step 3: check cache
     let cacheDir = config.cacheDir;
@@ -161,7 +162,16 @@ export async function generateDigest(
                     if (fs.existsSync(cacheOutPath)) {
                         outContent = await fsp.readFile(cacheOutPath, 'utf8');
                     }
-                    await outputWriter.write(outContent, config);
+                    // Use runtimeConfig so any transient overrides are honored when writing cached output
+                    await outputWriter.write(outContent, runtimeConfig);
+                    // Broadcast the cached generation result so open webviews can show toasts and update chips
+                    try {
+                        const cachedResult: any = Object.assign({}, cached, { content: outContent });
+                        // Ensure top-level redactionApplied mirrors cached metadata so UI code
+                        // that inspects `res.redactionApplied` finds the flag.
+                        try { cachedResult.redactionApplied = !!(cachedResult?.metadata?.redactionApplied); } catch (e) { cachedResult.redactionApplied = false; }
+                        try { broadcastGenerationResult(cachedResult, workspacePath); } catch (e) { try { console.warn('digestProvider: broadcastGenerationResult failed (cached)', e); } catch {} }
+                    } catch (e) { /* ignore */ }
                     return cached;
                 }
             }
@@ -184,20 +194,39 @@ export async function generateDigest(
         const details = String(err || 'Generation failed');
         try { diagnostics && diagnostics.error && diagnostics.error('Generation failed or canceled: ' + details); } catch (e) {}
         try { errorsUtil.showUserError('Digest generation failed or canceled.', details, diagnostics as any); } catch (e) {}
-        // If cache out file was partially written, attempt to remove it to avoid leaving .out artifacts
-        try { if (fs.existsSync(cacheOutPath)) { await fsp.unlink(cacheOutPath).catch(() => {}); } } catch (e) {}
+        // If cache files were partially written, attempt to remove them to avoid leaving stale artifacts
+        try {
+            if (fs.existsSync(cacheOutPath)) { await fsp.unlink(cacheOutPath).catch(() => {}); }
+        } catch (e) {}
+        try {
+            if (fs.existsSync(cachePath)) { await fsp.unlink(cachePath).catch(() => {}); }
+        } catch (e) {}
         // Broadcast cancellation to webviews
         try { broadcastGenerationResult({ error: 'Generation failed or canceled.' }, workspacePath); } catch (e) {}
         return;
     }
     // Generator may have completed - emit end
     emitProgress({ op: 'generate', mode: 'end', determinate: false, message: 'Digest generation complete' });
-    // Compute total token estimate (sum of file estimates)
-    let totalTokenEstimate = digest.tokenEstimate || 0;
+    // Compute total token estimate (sum of file estimates). Ensure digest.tokenEstimate is always set.
+    let totalTokenEstimate: number = 0;
+    if (typeof digest.tokenEstimate === 'number') {
+        totalTokenEstimate = digest.tokenEstimate;
+    } else if (Array.isArray((digest as any).outputObjects) && (digest as any).outputObjects.length > 0) {
+        try {
+            totalTokenEstimate = (digest as any).outputObjects.reduce((acc: number, o: any) => acc + (typeof o?.tokenEstimate === 'number' ? o.tokenEstimate : 0), 0);
+        } catch (e) {
+            totalTokenEstimate = 0;
+        }
+    } else {
+        totalTokenEstimate = 0;
+    }
+    // Persist the computed token estimate back onto the digest so callers can rely on it
+    try { (digest as any).tokenEstimate = totalTokenEstimate; } catch (e) { /* ignore */ }
     // Optionally warn if over tokenLimit
     let tokenLimitWarning = null;
-    if (config.tokenLimit && totalTokenEstimate > config.tokenLimit) {
-        tokenLimitWarning = services.tokenAnalyzer.warnIfExceedsLimit(totalTokenEstimate, config.tokenLimit);
+    const numericTokenLimit = Number((runtimeConfig && runtimeConfig.tokenLimit) ?? (config && config.tokenLimit) ?? 0);
+    if (numericTokenLimit > 0 && totalTokenEstimate > numericTokenLimit) {
+        tokenLimitWarning = services.tokenAnalyzer.warnIfExceedsLimit(totalTokenEstimate, numericTokenLimit);
         if (tokenLimitWarning) {
             digest.warnings = digest.warnings || [];
             digest.warnings.push(tokenLimitWarning);
@@ -221,7 +250,9 @@ export async function generateDigest(
     }
     // Step 5: write output - the DigestGenerator already applied redaction and set redactionApplied
     const outContent = digest.content;
-    await outputWriter.write(outContent, config);
+    // Use runtimeConfig when writing output so transient overrides (e.g., format)
+    // affect how the output is written.
+    await outputWriter.write(outContent, runtimeConfig);
     // Step 6: emit event
     // If you need to notify digest generation, use an event emitter or callback passed in
     // Step 7: write cache
@@ -241,18 +272,29 @@ export async function generateDigest(
                 workspacePath: '',
                 selectedFiles: files.map(f => f.relPath),
                 limits: {
-                    maxFiles: config.maxFiles,
-                    maxTotalSizeBytes: config.maxTotalSizeBytes,
-                    maxFileSize: config.maxFileSize,
-                    maxDirectoryDepth: config.maxDirectoryDepth,
+                    maxFiles: runtimeConfig.maxFiles || config.maxFiles,
+                    maxTotalSizeBytes: runtimeConfig.maxTotalSizeBytes || config.maxTotalSizeBytes,
+                    maxFileSize: runtimeConfig.maxFileSize || config.maxFileSize,
+                    maxDirectoryDepth: runtimeConfig.maxDirectoryDepth || config.maxDirectoryDepth,
                 },
                 format: runtimeConfig.outputFormat || config.outputFormat,
             }
         } as any;
-            await fsp.writeFile(cachePath, JSON.stringify(cacheObj, null, 2), 'utf8');
-            // Cache the already-redacted output if redaction was applied, otherwise cache the original
-            const cacheOut = outContent;
-            await fsp.writeFile(cacheOutPath, cacheOut, 'utf8');
+            // Write cache atomically: write to temp files then rename into place
+            const tmpJson = cachePath + '.tmp';
+            const tmpOut = cacheOutPath + '.tmp';
+            try {
+                await fsp.writeFile(tmpJson, JSON.stringify(cacheObj, null, 2), 'utf8');
+                const cacheOut = outContent;
+                await fsp.writeFile(tmpOut, cacheOut, 'utf8');
+                await fsp.rename(tmpJson, cachePath);
+                await fsp.rename(tmpOut, cacheOutPath);
+            } catch (e) {
+                // Clean up any tmp files on failure
+                try { if (fs.existsSync(tmpJson)) { await fsp.unlink(tmpJson).catch(() => {}); } } catch (ee) {}
+                try { if (fs.existsSync(tmpOut)) { await fsp.unlink(tmpOut).catch(() => {}); } } catch (ee) {}
+                throw e;
+            }
         } catch (e) {
             diagnostics.warn('Cache write error: ' + String(e));
         }
@@ -262,7 +304,9 @@ export async function generateDigest(
         await cleanupRemoteTmp(remoteTmpDir);
     }
     const finalResult = {
-        ...digest,
+    ...digest,
+    // Mirror redactionApplied at top-level for compatibility with UI that expects it
+    redactionApplied: !!(digest as any).redactionApplied,
         // Return the actual output that was written (redacted or original)
         content: outContent,
         metadata: {
@@ -273,10 +317,10 @@ export async function generateDigest(
             workspacePath: '',
             selectedFiles: files.map(f => f.relPath),
             limits: {
-                maxFiles: config.maxFiles,
-                maxTotalSizeBytes: config.maxTotalSizeBytes,
-                maxFileSize: config.maxFileSize,
-                maxDirectoryDepth: config.maxDirectoryDepth,
+                maxFiles: runtimeConfig.maxFiles || config.maxFiles,
+                maxTotalSizeBytes: runtimeConfig.maxTotalSizeBytes || config.maxTotalSizeBytes,
+                maxFileSize: runtimeConfig.maxFileSize || config.maxFileSize,
+                maxDirectoryDepth: runtimeConfig.maxDirectoryDepth || config.maxDirectoryDepth,
             },
             stats: {
                 totalFiles: files.length,

@@ -1,4 +1,5 @@
 import { spawn } from 'child_process';
+import * as vscode from 'vscode';
 import { scrubTokens } from './redaction';
 
 export interface SpawnOptions {
@@ -16,9 +17,22 @@ export function spawnGitPromise(args: string[], opts?: SpawnOptions): Promise<{ 
         if (!Array.isArray(args)) { return reject(new Error('Invalid git args')); }
         for (const a of args) {
             if (typeof a !== 'string') { return reject(new Error('Invalid git arg type')); }
-            if (/[*`$<>|;&\\\n\r]/.test(a)) { return reject(new Error('Suspicious characters in git args')); }
+            // Allow backslashes because Windows paths include '\'. Keep other suspicious chars.
+            if (/[*`$<>|;&\n\r]/.test(a)) { return reject(new Error('Suspicious characters in git args')); }
         }
-        const proc = spawn('git', args, Object.assign({}, opts || {}, { shell: false }) as any);
+    // Respect user's configured git.path in VS Code settings if provided.
+    // Be defensive: tests/partial vscode mocks may not provide workspace.getConfiguration.
+    let gitPath = 'git';
+    try {
+        const cfg = (vscode && vscode.workspace && typeof vscode.workspace.getConfiguration === 'function') ? vscode.workspace.getConfiguration('git') : null;
+        if (cfg && typeof cfg.get === 'function') {
+            const p = cfg.get('path');
+            if (typeof p === 'string' && p.length > 0) { gitPath = p; }
+        }
+    } catch (e) {
+        // swallow and use default 'git'
+    }
+    const proc = spawn(gitPath, args, Object.assign({}, opts || {}, { shell: false }) as any);
         let out = '';
         let err = '';
         if (proc.stdout) {

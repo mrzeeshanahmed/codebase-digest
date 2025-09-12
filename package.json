@@ -1,6 +1,6 @@
  {
   "name": "codebase-digest",
-  "displayName": "Codebase Digest",
+  "displayName": "Code Ingest",
   "description": "Generate LLM-ready codebase digests",
   "version": "0.0.1",
   "engines": {
@@ -18,7 +18,7 @@
       "activitybar": [
         {
           "id": "codebase-digest",
-          "title": "Codebase Digest",
+          "title": "Code Ingest",
           "icon": "resources/icons/icon.svg"
         }
       ]
@@ -27,7 +27,7 @@
       "codebase-digest": [
         {
           "id": "codebaseDigestDashboard",
-          "name": "Codebase Digest",
+          "name": "Code Ingest",
           "type": "webview"
         }
       ]
@@ -100,13 +100,13 @@
     {
       "command": "codebaseDigest.invalidateCache",
       "title": "Clear Cache",
-      "category": "Codebase Digest",
+      "category": "Code Ingest",
       "icon": "trash"
     },
     {
       "command": "codebaseDigest.clearCache",
       "title": "Clear Cache (Alias)",
-      "category": "Codebase Digest",
+      "category": "Code Ingest",
       "icon": "trash"
     },
     {
@@ -115,7 +115,7 @@
     },
     {
       "command": "codebaseDigest.openSettings",
-      "title": "Open Codebase Digest Settings"
+      "title": "Open Code Ingest Settings"
     },
     {
       "command": "codebaseDigest.applyPreset",
@@ -131,11 +131,11 @@
     },
     {
       "command": "codebaseDigest.openDashboardPanel",
-      "title": "Codebase Digest: Open as Panel"
+      "title": "Code Ingest: Open as Panel"
     },
     {
       "command": "codebaseDigest.focusView",
-      "title": "Focus Codebase Digest"
+      "title": "Focus Code Ingest"
     },
     {
       "command": "codebaseDigest.disableRedactionForNextRun",
@@ -160,7 +160,7 @@
       }
     ],
     "configuration": {
-      "title": "Codebase Digest",
+      "title": "Code Ingest",
       "properties": {
         "codebaseDigest.notebookNonTextOutputMaxBytes": {
           "type": "number",
@@ -244,7 +244,7 @@
         "codebaseDigest.openSidebarOnActivate": {
           "type": "boolean",
           "default": true,
-          "description": "Focus the Codebase Digest view in the Primary Sidebar when the extension activates."
+          "description": "Focus the Code Ingest view in the Primary Sidebar when the extension activates."
         },
         "codebaseDigest.outputHeaderTemplate": {
           "type": "string",

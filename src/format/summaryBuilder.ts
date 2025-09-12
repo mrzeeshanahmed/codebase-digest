@@ -14,24 +14,41 @@ export async function buildSummary(cfg: DigestConfig, stats: TraversalStats, fil
         try {
             const langs = listAnalyzers();
             if (langs && langs.length > 0) {
-                // Collect a small sample of candidate files (prefer JS/TS)
-                const candidates = files.filter(f => ['.js', '.ts', '.jsx', '.tsx'].includes((f.name && f.name.split('.').pop() ? '.' + f.name.split('.').pop() : '').toLowerCase()));
+                // Collect a small sample of candidate files driven by registered analyzers.
+                // If analyzers are registered for languages other than JS/TS, include those
+                // languages in the sampling instead of hardcoding a single set.
+                const analyzerLangs = (langs || []).map((l: string) => String(l).toLowerCase());
+                let candidates: FileNode[] = [];
+                if (analyzerLangs.length > 0) {
+                    candidates = files.filter(f => {
+                        const ext = (f.name && f.name.split('.').pop() ? (f.name.split('.').pop() as string).toLowerCase() : '');
+                        return analyzerLangs.includes(ext);
+                    });
+                } else {
+                    // Backwards-compatible fallback: prefer JS/TS when no analyzers are registered
+                    candidates = files.filter(f => ['js', 'ts', 'jsx', 'tsx'].includes((f.name && f.name.split('.').pop() ? (f.name.split('.').pop() as string).toLowerCase() : '')));
+                }
                 const sample = candidates.slice(0, ANALYZER_SAMPLE_LIMIT);
                 const findings: string[] = [];
+                const MAX_FINDING_LEN = 200; // cap per-file summary length to avoid bloating headers
                 for (const f of sample) {
                     const ext = '.' + (f.name.split('.').pop() || '');
                     const lang = ext.replace('.', '');
                     const analyzer = getAnalyzer(lang);
                     if (!analyzer) { continue; }
                     try {
-                        // We don't pass file content here to keep cost low; analyzers may read content themselves if needed
-                        const resAny = await analyzer(f.path, ext).catch(() => ({} as AnalyzerResult));
-                        const res = resAny as AnalyzerResult;
+                        // Lightweight call: do not pass file content (analyzers may choose to read it themselves).
+                        const res = await analyzer(f.path, ext, undefined) as AnalyzerResult;
                         if (res && typeof res.summary === 'string' && res.summary.length > 0) {
-                            findings.push(`${f.relPath}: ${res.summary}`);
+                            // Normalize whitespace and cap length to prevent large summaries from bloating the header
+                            let s = res.summary.replace(/\s+/g, ' ').trim();
+                            if (s.length > MAX_FINDING_LEN) { s = s.slice(0, MAX_FINDING_LEN) + '…'; }
+                            findings.push(`${f.relPath}: ${s}`);
                         }
-                    } catch (_) {
-                        // ignore analyzer errors
+                    } catch (ae) {
+                        // Non-fatal: log analyzer errors in non-production for visibility
+                        try { if (process.env.NODE_ENV !== 'production') { console.warn(`analyzer(${lang}) failed for ${f.relPath}: ${String(ae)}`); } } catch (e) { /* ignore logging errors */ }
+                        continue;
                     }
                 }
                 if (findings.length > 0) {
