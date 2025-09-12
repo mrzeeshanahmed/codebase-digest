@@ -119,6 +119,8 @@ export class CodebaseDigestPanel {
                     settings: {
                         respectGitignore: cfg.get('respectGitignore', cfg.get('gitignore', true)),
                         presets: cfg.get('presets', []),
+                        // Keep backwards-compatibility: expose filterPresets alongside presets
+                        filterPresets: cfg.get('filterPresets', cfg.get('presets', [])),
                         outputFormat: cfg.get('outputFormat', 'text'),
                         tokenModel: cfg.get('tokenModel', 'chars-approx'),
                         binaryFilePolicy: cfg.get('binaryFilePolicy', cfg.get('binaryPolicy', 'skip')),
@@ -155,6 +157,8 @@ export class CodebaseDigestPanel {
                     try { await cfg.update(key, value, vscode.ConfigurationTarget.Workspace); } catch (err) { /* ignore */ }
                 }
             }
+            // After applying changes, push updated config back to the webview so UI stays in sync.
+            try { await this.postConfig(); } catch (e) { try { diagnostics.warn('postConfig after applyConfigChanges failed', e); } catch {} }
         }
 
     private postPreviewState() {
@@ -241,6 +245,7 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                     settings: {
                         respectGitignore: cfg.get('respectGitignore', cfg.get('gitignore', true)),
                         presets: cfg.get('presets', []),
+                        filterPresets: cfg.get('filterPresets', cfg.get('presets', [])),
                         outputFormat: cfg.get('outputFormat', 'text'),
                         tokenModel: cfg.get('tokenModel', 'chars-approx'),
                         binaryFilePolicy: cfg.get('binaryFilePolicy', cfg.get('binaryPolicy', 'skip')),
@@ -288,6 +293,7 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                 const updated = {
                     respectGitignore: cfg.get('respectGitignore', cfg.get('gitignore', true)),
                     presets: cfg.get('presets', []),
+                    filterPresets: cfg.get('filterPresets', cfg.get('presets', [])),
                     outputFormat: cfg.get('outputFormat', 'text'),
                     tokenModel: cfg.get('tokenModel', 'chars-approx'),
                     binaryFilePolicy: cfg.get('binaryFilePolicy', cfg.get('binaryPolicy', 'skip')),

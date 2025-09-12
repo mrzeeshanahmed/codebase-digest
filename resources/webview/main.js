@@ -560,10 +560,22 @@ window.addEventListener('message', event => {
         populateSettings(msg.settings);
         try {
             const settings = msg.settings || {};
-            const active = settings.filterPresets || settings.presets || null;
-            let activePreset = null;
-            if (Array.isArray(active) && active.length > 0) { activePreset = String(active[0]); }
-            else if (typeof active === 'string' && active.trim()) { activePreset = active.trim(); }
+            // Normalize presets: prefer a non-empty filterPresets (new key) but
+            // gracefully fall back to legacy presets. Accept either arrays or
+            // comma-separated strings and normalize to an array for selection.
+            let activeList = [];
+            const asArray = (v) => {
+                if (Array.isArray(v)) { return v.slice(); }
+                if (typeof v === 'string' && v.trim()) { return v.split(',').map(s => s.trim()).filter(Boolean); }
+                return [];
+            };
+            const fp = asArray(settings.filterPresets);
+            if (fp.length > 0) { activeList = fp; }
+            else {
+                const legacy = asArray(settings.presets);
+                if (legacy.length > 0) { activeList = legacy; }
+            }
+            const activePreset = (activeList.length > 0) ? String(activeList[0]) : null;
             togglePresetSelectionUI(activePreset);
         } catch (e) { /* swallow */ }
     } else if (msg.type === 'progress') {

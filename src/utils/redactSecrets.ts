@@ -125,16 +125,23 @@ export function redactSecrets(
                 const flags = re.flags && re.flags.includes('g') ? re.flags : (re.flags + 'g').replace(/[^gimsyu]/g, '');
                 const safeRe = new RegExp(re.source, flags);
                 compiledUserRules.push({ name: 'User pattern', pattern: safeRe });
-                // If the user likely intended \w or \d but wrote w+/d+ (backslash lost), also add an alternate
+                // Only transform explicit, backslash-escaped shorthand sequences (e.g., \w+ or \d+)
+                // into explicit character classes. Avoid transforming raw letters like 'w' or 'd'
+                // to prevent accidental replacements inside complex user patterns.
                 try {
                     let alt = trimmed;
-                    if (alt.indexOf('\\w') === -1 && /w\+/.test(alt)) {
-                        alt = alt.replace(/w\+/g, '[A-Za-z0-9_]+');
+                    let transformed = false;
+                    // Replace literal escaped \w+ occurrences with the explicit class
+                    if (alt.indexOf('\\w') !== -1 && /\\w\+/g.test(alt)) {
+                        alt = alt.replace(/\\w\+/g, '[A-Za-z0-9_]+');
+                        transformed = true;
                     }
-                    if (alt.indexOf('\\d') === -1 && /d\+/.test(alt)) {
-                        alt = alt.replace(/d\+/g, '[0-9]+');
+                    // Replace literal escaped \d+ occurrences with explicit digit class
+                    if (alt.indexOf('\\d') !== -1 && /\\d\+/g.test(alt)) {
+                        alt = alt.replace(/\\d\+/g, '[0-9]+');
+                        transformed = true;
                     }
-                    if (alt !== trimmed) {
+                    if (transformed && alt !== trimmed) {
                         try {
                             const altRe = new RegExp(alt, 'g');
                             compiledUserRules.push({ name: 'User pattern (alt)', pattern: altRe });

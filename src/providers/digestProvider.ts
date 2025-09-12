@@ -269,7 +269,7 @@ export async function generateDigest(
                 totalFiles: files.length,
                 totalSize: files.reduce((acc, f) => acc + (f.size || 0), 0),
                 generatedAt: new Date().toISOString(),
-                workspacePath: '',
+                workspacePath: workspacePath,
                 selectedFiles: files.map(f => f.relPath),
                 limits: {
                     maxFiles: runtimeConfig.maxFiles || config.maxFiles,
@@ -314,7 +314,7 @@ export async function generateDigest(
             totalFiles: files.length,
             totalSize: files.reduce((acc, f) => acc + (f.size || 0), 0),
             generatedAt: new Date().toISOString(),
-            workspacePath: '',
+            workspacePath: workspacePath,
             selectedFiles: files.map(f => f.relPath),
             limits: {
                 maxFiles: runtimeConfig.maxFiles || config.maxFiles,

@@ -132,21 +132,59 @@ export function setWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri
     //  - dist/resources/webview/styles.css
     //  - ../icons/icon.png (relative to webview/index.html)
 
-    // Helper to normalize and return candidate absolute paths
-    const cands: string[] = [];
-    // 1) direct path relative to extension root (e.g., "resources/webview/styles.css")
-    cands.push(path.join(extensionUri.fsPath, normalized));
-    // 2) dist-prefixed variant
-    cands.push(path.join(extensionUri.fsPath, 'dist', normalized));
-    // 3) treat the href as relative to the resources/webview folder (common authoring)
-    cands.push(path.join(extensionUri.fsPath, 'resources', 'webview', normalized));
-    cands.push(path.join(extensionUri.fsPath, 'dist', 'resources', 'webview', normalized));
-    // 4) treat as an icons reference
-    cands.push(path.join(extensionUri.fsPath, 'resources', 'icons', normalized));
-    cands.push(path.join(extensionUri.fsPath, 'dist', 'resources', 'icons', normalized));
+    // Build a deterministic list of candidate locations. When the author
+    // used upward-relative paths (e.g. "../icons/foo.png"), treat those
+    // as relative to the packaged webview resources directory so they do not
+    // accidentally resolve outside the extension root.
+    const candidates: string[] = [];
 
-    // Normalize each candidate (collapses ../ segments) and check existence
-    const normalizedCands = cands.map(p => path.normalize(p));
+    // Helper: ensure a candidate remains inside the extension folder. This
+    // guards against paths that escape via excessive ".." segments.
+    function isInsideExtension(candidateAbs: string) {
+        try {
+            const base = path.resolve(extensionUri.fsPath);
+            const cand = path.resolve(candidateAbs);
+            // On Windows, make comparison case-insensitive
+            const rel = path.relative(base, cand);
+            if (!rel) { return true; }
+            // If relative path starts with '..' then candidate is outside
+            if (rel.split(path.sep)[0] === '..') { return false; }
+            return true;
+        } catch (e) { return false; }
+    }
+
+    // If the href contains parent-directory segments, prefer resolving
+    // it against the resources/webview folder (and its dist/out variants).
+    const looksUp = normalized.indexOf('..') !== -1 && /(^|\/)\.\.(?:\/|$)/.test(normalized);
+    // canonical relative without leading './'
+    let rel = normalized.replace(/^\.\//, '');
+
+    if (looksUp) {
+        candidates.push(path.join(extensionUri.fsPath, 'resources', 'webview', rel));
+        candidates.push(path.join(extensionUri.fsPath, 'dist', 'resources', 'webview', rel));
+        candidates.push(path.join(extensionUri.fsPath, 'out', 'resources', 'webview', rel));
+    }
+
+    // Always include common explicit locations (in this order of preference):
+    candidates.push(path.join(extensionUri.fsPath, 'resources', 'webview', rel));
+    candidates.push(path.join(extensionUri.fsPath, 'dist', 'resources', 'webview', rel));
+    candidates.push(path.join(extensionUri.fsPath, 'out', 'resources', 'webview', rel));
+
+    // Allow direct references rooted at the extension (e.g., "resources/..." or "icons/...")
+    candidates.push(path.join(extensionUri.fsPath, rel));
+    candidates.push(path.join(extensionUri.fsPath, 'dist', rel));
+
+    // If the author referenced icons via a ".../icons/..." segment, check icons folders
+    const iconsMatch = rel.match(/(?:\/(?:icons)\/)(.*)$/i);
+    if (iconsMatch && iconsMatch[1]) {
+        const rest = iconsMatch[1];
+        candidates.push(path.join(extensionUri.fsPath, 'resources', 'icons', rest));
+        candidates.push(path.join(extensionUri.fsPath, 'dist', 'resources', 'icons', rest));
+        candidates.push(path.join(extensionUri.fsPath, 'out', 'resources', 'icons', rest));
+    }
+
+    // Normalize and filter candidates to ensure they don't escape the extension dir
+    const normalizedCands = candidates.map(p => path.normalize(p)).filter(p => isInsideExtension(p));
     return findExisting(normalizedCands);
     }
 
@@ -159,14 +197,21 @@ export function setWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri
     // Remove any existing CSP meta tags (including those our helper may have injected previously).
     html = html.replace(/<meta[^>]+http-equiv=['"]?Content-Security-Policy['"]?[^>]*>/gi, '');
     // Ensure there is only one <head> opening tag: keep the first and remove duplicates to avoid malformed HTML
-    const headMatches = [] as {match:string, idx:number}[];
-    let hMatch: RegExpExecArray | null;
-    const headRe = /<head\b[^>]*>/gi;
-    while ((hMatch = headRe.exec(html)) !== null) { headMatches.push({match: hMatch[0], idx: hMatch.index}); }
-    if (headMatches.length > 1) {
-        // preserve first occurrence, remove others
-        const firstIdx = headMatches[0].idx;
-        html = html.replace(/<head\b[^>]*>/gi, (m:string, offset:number) => offset === firstIdx ? m : '<!-- duplicate <head> removed -->');
+    // Approach: find the first occurrence index, keep that match, then remove any subsequent <head> tags by operating
+    // on the substring after the first match. This avoids relying on replace-callback offsets which can be inconsistent
+    // across JS engines or with large HTML strings.
+    const headRe = /<head\b[^>]*>/i;
+    const firstMatch = headRe.exec(html);
+    if (firstMatch && firstMatch.index !== undefined) {
+        const firstIdx = firstMatch.index;
+        const firstMatched = firstMatch[0];
+        const before = html.slice(0, firstIdx + firstMatched.length);
+        let after = html.slice(firstIdx + firstMatched.length);
+        // Remove any other <head ...> occurrences in the remainder
+        after = after.replace(/<head\b[^>]*>/gi, '<!-- duplicate <head> removed -->');
+        html = before + after;
+    } else {
+        // If no <head> matched case-insensitively, leave html as-is
     }
 
     // Generate a nonce for any inline <style> or <script> we might need to allow.
@@ -308,6 +353,8 @@ export async function processWebviewMessage(msg: any, webview: vscode.Webview, t
             // normalized key names (preferred)
             respectGitignore: cfg.get('respectGitignore', cfg.get('gitignore', true)),
             presets: cfg.get('presets', []),
+            // include filterPresets for UI compatibility; fall back to presets if absent
+            filterPresets: cfg.get('filterPresets', cfg.get('presets', [])),
             outputFormat: cfg.get('outputFormat', 'text'),
             tokenModel: cfg.get('tokenModel', 'chars-approx'),
             binaryFilePolicy: cfg.get('binaryFilePolicy', cfg.get('binaryPolicy', 'skip')),
@@ -422,10 +469,27 @@ export async function processWebviewMessage(msg: any, webview: vscode.Webview, t
             return;
         }
         if (commandMap[msg.actionType]) {
-            if (msg.actionType === 'generateDigest' && msg.overrides) {
-                vscode.commands.executeCommand(commandMap[msg.actionType], targetFolder, msg.overrides);
-            } else {
-                vscode.commands.executeCommand(commandMap[msg.actionType], targetFolder);
+            // For bulk actions like expandAll/collapseAll ensure the command is registered
+            // so we don't attempt to call an unregistered command which would warn in the host.
+            try {
+                const cmdId = commandMap[msg.actionType];
+                // Only special-case expandAll/collapseAll diagnostics; other commands may be safely executed.
+                if (msg.actionType === 'expandAll' || msg.actionType === 'collapseAll') {
+                    // getCommands(false) returns installed commands; includeInternal=false for performance
+                    const registered = (await vscode.commands.getCommands(false));
+                    if (!registered || !registered.includes(cmdId)) {
+                        try { webview.postMessage({ type: 'diagnostic', level: 'warning', message: `command '${cmdId}' not registered; action '${msg.actionType}' ignored.` }); } catch (e) { try { console.warn('webviewHelpers: post diagnostic failed', stringifyError(e)); } catch {} }
+                        return;
+                    }
+                }
+
+                if (msg.actionType === 'generateDigest' && msg.overrides) {
+                    vscode.commands.executeCommand(cmdId, targetFolder, msg.overrides);
+                } else {
+                    vscode.commands.executeCommand(cmdId, targetFolder);
+                }
+            } catch (e) {
+                try { console.warn('webviewHelpers: executeCommand routing failed', stringifyError(e)); } catch {}
             }
             return;
         }

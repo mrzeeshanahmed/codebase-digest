@@ -12,11 +12,27 @@ export function computePreviewState(rootNodes: FileNode[], selectedFiles: FileNo
         : buildTreeLines(rootNodes, 'full', maxLines);
     const chartStats = fileScanner.aggregateStats(selectedFiles.length > 0 ? selectedFiles : rootNodes);
     // Compute a lightweight token estimate for preview/status.
+    // Align the preview heuristic with TokenAnalyzer by using a small in-memory
+    // divisor map for common token models. Respect optional lightweight
+    // `config.tokenDivisorOverrides` when provided (no I/O).
     // Old behavior used config.tokenEstimate as a boolean which produced 0/1 values.
     // New behavior estimates tokens from selected files using a fast heuristic:
-    // - Prefer using file.size as proxy: ceil(size / 4)
-    // - If size missing, fallback to relPath length / 4
+    // - Prefer using file.size as proxy: ceil(size / divisor)
+    // - If size missing, fallback to relPath length / divisor
     // This avoids heavy I/O while producing meaningful counts for the UI.
+    const model = (config && config.tokenModel) || 'chars-approx';
+    const divisorMap: Record<string, number> = {
+        'chars-approx': 4,
+        'gpt-4o': 4,
+        'gpt-3.5': 4,
+        'gpt-4o-mini': 4,
+        'claude-3.5': 4,
+        'o200k': 4,
+        // keep tiktoken default conservative; adapters may provide their own tokenizer
+        'tiktoken': 4
+    };
+    const divisorFromOverrides = config && (config.tokenDivisorOverrides || (config.tokenDivisorOverrides === 0 ? 0 : undefined)) && (config.tokenDivisorOverrides[model] as number);
+    const divisor = (typeof divisorFromOverrides === 'number' && divisorFromOverrides > 0) ? divisorFromOverrides : (divisorMap[model] || 4);
     let tokenEstimate = 0;
     if (selectedFiles.length === 0) {
         // No explicit selection: fall back to a workspace-level heuristic so the UI
@@ -24,19 +40,19 @@ export function computePreviewState(rootNodes: FileNode[], selectedFiles: FileNo
         // Prefer the fileScanner's lastStats.totalSize (accurate) when available,
         // otherwise leave as 0.
         const totalSize = fileScanner?.lastStats?.totalSize;
-        if (typeof totalSize === 'number' && totalSize > 0) {
-            tokenEstimate = Math.ceil(totalSize / 4);
+            if (typeof totalSize === 'number' && totalSize > 0) {
+            tokenEstimate = Math.ceil(totalSize / divisor);
         } else {
             tokenEstimate = 0;
         }
     } else {
         for (const f of selectedFiles) {
             if (typeof f.size === 'number' && f.size > 0) {
-                tokenEstimate += Math.ceil(f.size / 4);
+                tokenEstimate += Math.ceil(f.size / divisor);
             } else if (f.relPath && f.relPath.length > 0) {
-                tokenEstimate += Math.ceil(f.relPath.length / 4);
+                tokenEstimate += Math.ceil(f.relPath.length / divisor);
             } else if (f.path && f.path.length > 0) {
-                tokenEstimate += Math.ceil(f.path.length / 4);
+                tokenEstimate += Math.ceil(f.path.length / divisor);
             }
         }
     }

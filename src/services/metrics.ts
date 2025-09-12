@@ -53,8 +53,8 @@ export class Metrics {
     }
 
     stopTimer(timer: keyof MetricsTimers): void {
-        const startedAt = this.timerStarts[timer];
-        if (startedAt == null) { return; }
+    const startedAt = this.timerStarts[timer];
+    if (startedAt === null || startedAt === undefined) { return; }
         if (this.enabled) {
             // If you adopt performance.now(), switch here too.
             this.timers[timer] += Date.now() - startedAt;
