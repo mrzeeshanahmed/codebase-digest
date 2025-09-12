@@ -1,6 +1,7 @@
 import { DigestConfig, TraversalStats, FileNode } from '../types/interfaces';
 import { Formatters } from '../utils/formatters';
 import { getAnalyzer, listAnalyzers, AnalyzerResult } from '../plugins/index';
+import { env, ExtensionMode } from 'vscode';
 
 // Limit how many files we run analyzers on during summary generation to avoid heavy work
 const ANALYZER_SAMPLE_LIMIT = 20;
@@ -46,8 +47,16 @@ export async function buildSummary(cfg: DigestConfig, stats: TraversalStats, fil
                             findings.push(`${f.relPath}: ${s}`);
                         }
                     } catch (ae) {
-                        // Non-fatal: log analyzer errors in non-production for visibility
-                        try { if (process.env.NODE_ENV !== 'production') { console.warn(`analyzer(${lang}) failed for ${f.relPath}: ${String(ae)}`); } } catch (e) { /* ignore logging errors */ }
+                        // Non-fatal: log analyzer errors in non-Production modes for visibility.
+                        // Use VS Code's extensionMode when available; fall back to process.env if not.
+                        try {
+                            const isProduction = (typeof env !== 'undefined' && typeof ExtensionMode !== 'undefined')
+                                ? ((env as any).extensionMode === ExtensionMode.Production)
+                                : (process && process.env && String(process.env.NODE_ENV).toLowerCase() === 'production');
+                            if (!isProduction) {
+                                console.warn(`analyzer(${lang}) failed for ${f.relPath}: ${String(ae)}`);
+                            }
+                        } catch (e) { /* ignore logging errors */ }
                         continue;
                     }
                 }

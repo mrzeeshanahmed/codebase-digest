@@ -17,6 +17,30 @@ import { Formatters } from '../utils/formatters';
 export class DigestGenerator {
     public contentProcessor: ContentProcessor;
     private tokenAnalyzer: TokenAnalyzer;
+    // Lazily-created shared OutputChannel for all instances to avoid UI spam
+    private static _errorChannel: vscode.OutputChannel | null = null;
+    // Accessor to get or create the shared OutputChannel. Use this instead of
+    // calling vscode.window.createOutputChannel directly so we don't leak channels
+    // by creating many during repeated operations.
+    public static getErrorChannel(): vscode.OutputChannel | null {
+        if (!DigestGenerator._errorChannel) {
+            try {
+                DigestGenerator._errorChannel = vscode.window.createOutputChannel('Code Ingest');
+            } catch (e) {
+                DigestGenerator._errorChannel = null;
+            }
+        }
+        return DigestGenerator._errorChannel;
+    }
+    // Dispose the shared channel when the extension or service is deactivated.
+    public static disposeErrorChannel(): void {
+        try {
+            if (DigestGenerator._errorChannel) {
+                try { DigestGenerator._errorChannel.dispose(); } catch (e) { /* ignore */ }
+                DigestGenerator._errorChannel = null;
+            }
+        } catch (e) { /* ignore */ }
+    }
     // Per-config runtime state to avoid mutating possibly frozen config objects
     private runtimeState: WeakMap<any, { _overrides?: any, _warnedThresholds?: any }> = new WeakMap();
     constructor(contentProcessor: ContentProcessor, tokenAnalyzer: TokenAnalyzer) {
@@ -34,8 +58,8 @@ export class DigestGenerator {
     let outputObjects: { header: string; body: string; imports?: string[] }[] = [];
     let warnings: string[] = [];
     const perFileWarnings: string[] = [];
-    const perFileErrors: { path: string; message: string; stack?: string }[] = [];
-    const errorChannel = vscode.window.createOutputChannel('Code Ingest Errors');
+        const perFileErrors: { path: string; message: string; stack?: string }[] = [];
+    // Use the class-level accessor to obtain the shared error channel when needed.
     const formatter = getFormatter(outputFormat);
         // Preserve file order by relPath
         const sortedFiles = [...files].sort((a, b) => a.relPath.localeCompare(b.relPath));
@@ -84,7 +108,7 @@ export class DigestGenerator {
                         } catch (e) {
                             // If a plugin handler throws while probing, capture and continue
                             // to next plugin rather than aborting the whole generation.
-                            try { const ch = vscode.window.createOutputChannel('Code Ingest'); ch.appendLine('Plugin probe failed: ' + String(e)); } catch {}
+                                    try { const ch = DigestGenerator.getErrorChannel(); ch && ch.appendLine('Plugin probe failed: ' + String(e)); } catch {}
                         }
                     }
                     if (!body) {
@@ -124,7 +148,12 @@ export class DigestGenerator {
             let imports: string[] = [];
             try {
                 imports = await analyzeImports(file.path, ext, body);
-            } catch (e) { imports = []; }
+            } catch (e: any) {
+                // Record analyzeImports failures as per-file errors so they are surfaced in the summary
+                const msg = e && e.message ? String(e.message) : String(e || 'analyzeImports failed');
+                perFileErrors.push({ path: file.relPath, message: `analyzeImports: ${msg}`, stack: e && e.stack ? String(e.stack) : undefined });
+                imports = [];
+            }
             // Token estimation (unchanged semantics)
             let tokenizer = config.tokenModel ? getTokenizer(config.tokenModel) : undefined;
             let fileTokenEstimate = 0;
@@ -139,7 +168,11 @@ export class DigestGenerator {
                 // Only emit determinate progress if we have a positive token limit
                 const shouldEmit = tokenLimit > 0 && (index % 20) === 0;
                 if (shouldEmit) {
-                    const percent = Math.min(100, Math.floor(((tokenEstimate + fileTokenEstimate) / tokenLimit) * 100));
+                    // Compute raw usage percentage. To avoid showing a misleading 100% before
+                    // all files are processed (which can happen when tokenLimit is small),
+                    // clamp intermediate progress to a maximum of 99% unless usage >= 100%.
+                    const rawPercent = ((tokenEstimate + fileTokenEstimate) / tokenLimit) * 100;
+                    const percent = rawPercent >= 100 ? 100 : Math.min(99, Math.floor(rawPercent));
                     emitProgress({ op: 'generate', mode: 'progress', determinate: true, percent, message: 'Estimating tokens' });
                 } else if (tokenLimit > 0 && (index % 20) === 0) {
                     // fallback non-determinate emission path if needed
@@ -218,7 +251,26 @@ export class DigestGenerator {
             if (outputFormat === 'json') {
                 outputObjects.push({ header: r.header, body: r.body, imports: Array.isArray((r as any).imports) ? (r as any).imports : [] });
             } else if (outputFormat === 'markdown' || outputFormat === 'text') {
-                outputChunks.push(r.header + r.body + '\n');
+                // Normalize header/body concatenation to avoid double-blank lines.
+                const hdr = String(r.header || '');
+                const bdy = String(r.body || '');
+                let combined = '';
+                if (!hdr) {
+                    combined = bdy;
+                } else if (hdr.endsWith('\n')) {
+                    // Header already ends with newline(s) — strip leading newlines from body to avoid gaps
+                    combined = hdr + bdy.replace(/^\n+/, '');
+                } else {
+                    // Header doesn't end with newline — ensure single newline between header and body
+                    if (bdy.startsWith('\n')) {
+                        combined = hdr + bdy;
+                    } else {
+                        combined = hdr + '\n' + bdy;
+                    }
+                }
+                // Ensure a single trailing newline so chunks end consistently
+                if (!combined.endsWith('\n')) { combined += '\n'; }
+                outputChunks.push(combined);
             }
         }
 
@@ -244,15 +296,18 @@ export class DigestGenerator {
                 }
             }
             // Log to output channel in a compact form
-            errorChannel.appendLine(`Code Ingest encountered ${dedupedErrors.length} unique file errors:`);
-            for (const e of dedupedErrors) {
-                errorChannel.appendLine(`- ${e.path}: ${e.message}`);
-                if (e.stack) {
-                    errorChannel.appendLine(e.stack);
+            const channel = DigestGenerator.getErrorChannel();
+            if (channel) {
+                channel.appendLine(`Code Ingest encountered ${dedupedErrors.length} unique file errors:`);
+                for (const e of dedupedErrors) {
+                    channel.appendLine(`- ${e.path}: ${e.message}`);
+                    if (e.stack) {
+                        channel.appendLine(e.stack);
+                    }
                 }
+                // Show channel to user non-modally (only when there are errors)
+                try { channel.show(true); } catch (e) { /* best-effort: ignore UI failures */ }
             }
-            // Show channel to user non-modally
-            errorChannel.show(true);
         }
         // Build summary and tree using Formatters
         // For stats, build a TraversalStats object with minimal required fields
@@ -395,7 +450,7 @@ export class DigestGenerator {
                 }
             }
             // Emit guarded diagnostic: counts only, no content
-            try { this.tokenAnalyzer && (this.tokenAnalyzer as any).diagnostics && (this.tokenAnalyzer as any).diagnostics.info && (this.tokenAnalyzer as any).diagnostics.info('Redaction applied', { applied: !!(result as any).redactionApplied, warningsCount: Array.isArray(warnings) ? warnings.length : 0 }); } catch (e) { try { const ch = vscode.window.createOutputChannel('Code Ingest'); ch.appendLine('[DigestGenerator] diagnostics.info failed: ' + String(e)); } catch {} }
+            try { this.tokenAnalyzer && (this.tokenAnalyzer as any).diagnostics && (this.tokenAnalyzer as any).diagnostics.info && (this.tokenAnalyzer as any).diagnostics.info('Redaction applied', { applied: !!(result as any).redactionApplied, warningsCount: Array.isArray(warnings) ? warnings.length : 0 }); } catch (e) { try { const ch = DigestGenerator.getErrorChannel(); ch && ch.appendLine('[DigestGenerator] diagnostics.info failed: ' + String(e)); } catch {} }
 
             // If outputObjects exist (JSON mode), produce a redacted copy so callers that inspect objects see redacted bodies
             if (outputFormat === 'json' && Array.isArray(result.outputObjects) && result.outputObjects.length > 0) {
@@ -493,7 +548,7 @@ export class DigestGenerator {
                                             fallbackApplied = true;
                                             patternAppliedForThisBody = true;
                                         }
-                                    } catch (e) { try { errorChannel.appendLine('Error processing file during generate loop: ' + String(e)); } catch {} }
+                                    } catch (e) { try { const ch = DigestGenerator.getErrorChannel(); ch && ch.appendLine('Error processing file during generate loop: ' + String(e)); } catch {} }
                                     // Record per-pattern report (merge later)
                                     const existing = userPatternReport.find(p => p.pattern === pat);
                                     if (!existing) {
@@ -526,7 +581,10 @@ export class DigestGenerator {
                 // Rebuild canonical JSON from possibly-redacted outputObjects and re-run redactSecrets to ensure final content matches
                 try {
                     if (outputFormat === 'json') {
-                        const canonical2 = { summary, tree, files: result.outputObjects, warnings };
+                        // Rebuild canonical JSON using the final `result` state so any warnings appended during redaction
+                        // or fallback passes are included in the content.
+                        const finalWarnings = Array.isArray((result as any).warnings) ? (result as any).warnings : warnings;
+                        const canonical2 = { summary, tree, files: result.outputObjects, warnings: finalWarnings };
                         const rebuilt = JSON.stringify(canonical2, null, 2);
                         // If showRedacted was requested, skip any further redaction passes
                         if ((redactionCfg as any).showRedacted) {
@@ -598,6 +656,17 @@ export class DigestGenerator {
                             if (!(result as any).redactionReport) { (result as any).redactionReport = {}; }
                             (result as any).redactionReport.finalPatternReport = finalPatternReport;
                         }
+                        // After any user-pattern fallbacks, ensure that the result.content matches the final state of result.warnings
+                        try {
+                            const finalWarnings2 = Array.isArray((result as any).warnings) ? (result as any).warnings : warnings;
+                            const canonicalFinal = { summary, tree, files: result.outputObjects, warnings: finalWarnings2 };
+                            const finalRebuilt = JSON.stringify(canonicalFinal, null, 2);
+                            // Only overwrite if different to avoid unnecessary churn
+                            if (String(result.content || '') !== finalRebuilt) {
+                                result.content = finalRebuilt;
+                                content = finalRebuilt;
+                            }
+                        } catch (e) { /* ignore rebuild errors */ }
                     }
                 } catch (e) {}
             }

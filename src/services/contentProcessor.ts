@@ -35,6 +35,13 @@ export class ContentProcessor {
 
             // Stat for size
             const stat = await FSUtils.safeStat(filePath);
+            // If stat failed (null), treat as a read error instead of
+            // proceeding — this avoids inconsistent behavior where a
+            // subsequent isReadable check may return true but stat info is
+            // not available causing later code to mis-handle the file.
+            if (!stat) {
+                throw new internalErrors.FileReadError(filePath, 'Unable to stat file or permission denied');
+            }
             // Validate readability before attempting to read. If unreadable,
             // throw a typed FileReadError so callers (DigestGenerator) can
             // aggregate the error into per-file results instead of showing
@@ -43,17 +50,25 @@ export class ContentProcessor {
             if (!readable) {
                 throw new internalErrors.FileReadError(filePath, 'Permission denied or unreadable file');
             }
-            const size = stat?.size ?? 0;
+            const size = stat.size ?? 0;
 
             // Binary detection
             const isBinary = await FSUtils.isBinary(filePath);
             if (isBinary && cfg.binaryFilePolicy) {
-                if (cfg.binaryFilePolicy === 'skip') {
+                // Normalize policy string so callers or UI that use 'include'
+                // (labelled "Include Placeholder" in the settings) are treated
+                // the same as the internal 'includePlaceholder' value.
+                let policy = String(cfg.binaryFilePolicy).trim();
+                // Allow legacy/alias 'include' to mean includePlaceholder
+                if (policy.toLowerCase() === 'include') {
+                    policy = 'includePlaceholder';
+                }
+                if (policy === 'skip') {
                     return { content: '[binary file skipped]', isBinary: true };
-                } else if (cfg.binaryFilePolicy === 'includePlaceholder') {
+                } else if (policy === 'includePlaceholder') {
                     const sizeStr = FSUtils.humanFileSize(size);
                     return { content: `[binary file: ${sizeStr}]`, isBinary: true };
-                } else if (cfg.binaryFilePolicy === 'includeBase64') {
+                } else if (policy === 'includeBase64') {
                     const base64 = await FSUtils.readFileBase64(filePath);
                     let fenced = base64;
                     if (cfg.outputFormat === 'markdown') {
@@ -156,7 +171,7 @@ export class ContentProcessor {
                     type: 'file',
                     size: stat?.size,
                     mtime: stat?.mtime,
-                    isSelected: true,
+                    isSelected: false,
                     depth,
                 });
             }

@@ -32,6 +32,7 @@ import { showUserError } from './utils/errors';
 import { setTransientOverride } from './utils/transientOverrides';
 import { WorkspaceManager } from './services/workspaceManager';
 import { clearListeners } from './providers/eventBus';
+import { DigestGenerator } from './services/digestGenerator';
 // DEPRECATED: PreviewPanel import removed.
 
 export function activate(context: vscode.ExtensionContext) {
@@ -619,4 +620,6 @@ try { console.log('[codebase-digest] activate() called'); } catch (e) { try { co
 
 export function deactivate() {
 	try { clearListeners(); } catch (e) { /* ignore */ }
+	// Dispose shared resources from services (avoid leaking OutputChannels)
+	try { if (typeof (DigestGenerator as any).disposeErrorChannel === 'function') { (DigestGenerator as any).disposeErrorChannel(); } } catch (e) { /* ignore */ }
 }

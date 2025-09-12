@@ -48,16 +48,19 @@ export function encodeForDataAttribute(s: string): string {
         return encodeURIComponent(String(s));
     }
 }
-
-export function decodeFromDataAttribute(v: string): string {
-    if (!v) { return ''; }
+export function decodeFromDataAttribute(v: unknown): string {
+    // Null/undefined -> empty string
+    if (v === null || v === undefined) { return ''; }
+    // Coerce non-strings to string so Buffer.from only receives a string
+    const s = typeof v === 'string' ? v : String(v);
     try {
-        // base64url -> base64 (restore padding)
-        const pad = v.length % 4 === 0 ? '' : '='.repeat(4 - (v.length % 4));
-        const b = (v || '').replace(/-/g, '+').replace(/_/g, '/') + pad;
-        return Buffer.from(b, 'base64').toString('utf8');
+        // Attempt base64url -> base64 (restore padding) and decode
+        const pad = s.length % 4 === 0 ? '' : '='.repeat(4 - (s.length % 4));
+        const b64 = s.replace(/-/g, '+').replace(/_/g, '/') + pad;
+        return Buffer.from(b64, 'base64').toString('utf8');
     } catch (e) {
-        try { return decodeURIComponent(String(v)); } catch (ex) { return String(v); }
+        // Single fallback path: try decodeURIComponent, otherwise return the original string
+        try { return decodeURIComponent(s); } catch (ex) { return s; }
     }
 }
 

@@ -22,23 +22,29 @@ export class FSUtils {
      */
     static async isBinary(filePath: string): Promise<boolean> {
         try {
-            const fd = await fsp.open(filePath, 'r');
-            const buf = Buffer.alloc(8192);
-            const { bytesRead } = await fd.read(buf, 0, 8192, 0);
-            await fd.close();
-            let nonTextCount = 0;
-            for (let i = 0; i < bytesRead; i++) {
-                const byte = buf[i];
-                if (byte === 0) { return true; }
-                // Typical text: tab(9), LF(10), CR(13), 32-126 (printable ASCII)
-                if (!(byte === 9 || byte === 10 || byte === 13 || (byte >= 32 && byte <= 126))) {
-                    nonTextCount++;
+            let fd: fsp.FileHandle | undefined;
+            try {
+                fd = await fsp.open(filePath, 'r');
+                const buf = Buffer.alloc(8192);
+                const { bytesRead } = await fd.read(buf, 0, 8192, 0);
+                let nonTextCount = 0;
+                for (let i = 0; i < bytesRead; i++) {
+                    const byte = buf[i];
+                    if (byte === 0) { return true; }
+                    // Typical text: tab(9), LF(10), CR(13), 32-126 (printable ASCII)
+                    if (!(byte === 9 || byte === 10 || byte === 13 || (byte >= 32 && byte <= 126))) {
+                        nonTextCount++;
+                    }
+                }
+                if (bytesRead > 0 && nonTextCount / bytesRead > 0.3) {
+                    return true;
+                }
+                return false;
+            } finally {
+                if (fd) {
+                    try { await fd.close(); } catch (e) { /* ignore close errors */ }
                 }
             }
-            if (bytesRead > 0 && nonTextCount / bytesRead > 0.3) {
-                return true;
-            }
-            return false;
         } catch {
             return false;
         }
@@ -71,11 +77,15 @@ export class FSUtils {
             try {
                 const chunks: string[] = [];
                 const stream = fs.createReadStream(filePath, { encoding: 'utf8' }) as fs.ReadStream & AsyncIterable<string>;
-                for await (const chunkRaw of stream) {
-                    const chunk = typeof chunkRaw === 'string' ? chunkRaw : String(chunkRaw);
-                    chunks.push(chunk);
-                    // Yield control to the event loop between chunks so long-running reads don't starve timers
-                    await new Promise((res) => setImmediate(res));
+                try {
+                    for await (const chunkRaw of stream) {
+                        const chunk = typeof chunkRaw === 'string' ? chunkRaw : String(chunkRaw);
+                        chunks.push(chunk);
+                        // Yield control to the event loop between chunks so long-running reads don't starve timers
+                        await new Promise((res) => setImmediate(res));
+                    }
+                } finally {
+                    try { if (stream && typeof (stream as any).destroy === 'function') { (stream as any).destroy(); } } catch (e) { /* ignore */ }
                 }
                 // Normalize line endings only once after joining
                 return chunks.join('').replace(/\r\n?/g, '\n');

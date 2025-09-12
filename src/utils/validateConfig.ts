@@ -28,6 +28,12 @@ export function validateConfig(cfg: DigestConfig, diagnostics: Diagnostics): voi
         cfg.tokenLimit = 32000;
     }
 
+    // Normalize certain legacy aliases first (e.g., 'include' => 'includePlaceholder')
+    if (typeof cfg.binaryFilePolicy === 'string' && String(cfg.binaryFilePolicy).trim().toLowerCase() === 'include') {
+        diagnostics.warn(`binaryFilePolicy 'include' is deprecated; treating as 'includePlaceholder'.`);
+        cfg.binaryFilePolicy = 'includePlaceholder' as any;
+    }
+
     // Enums: coerce and warn
     if (!VALID_OUTPUT_FORMATS.includes(cfg.outputFormat)) {
         diagnostics.warn(`outputFormat '${cfg.outputFormat}' is invalid. Coercing to 'markdown'. Valid: ${VALID_OUTPUT_FORMATS.join(', ')}`);

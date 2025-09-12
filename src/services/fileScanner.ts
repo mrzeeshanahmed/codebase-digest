@@ -86,7 +86,35 @@ export class FileScanner {
             // patterns that reference this directory or any descendant, we can safely skip
             // recursing into it to save IO. If any explicit negation exists that targets
             // this dir or a child, we must recurse so the negation can take effect.
-            if (matchesExcludePattern) { stats.skippedByIgnore++; return true; }
+            // However, also consider user-provided includePatterns: if any include pattern
+            // targets a file or path under this directory, we must not skip the directory
+            // even if it appears excluded or gitignored. The heuristics below conservatively
+            // detect include patterns that likely reference descendants.
+            const includeTargetsDescendant = (dirKey: string) => {
+                try {
+                    if (!includePatterns || includePatterns.length === 0) { return false; }
+                    // Test each include pattern against a representative descendant path
+                    // under this directory. Use two variants to catch single-level and multi-level matches.
+                    const sample1 = dirKey ? `${dirKey}/__includetest__` : '__includetest__';
+                    const sample2 = dirKey ? `${dirKey}/__includetest__/x` : '__includetest__/x';
+                    for (const p of includePatterns) {
+                        try {
+                            if (typeof p !== 'string') { continue; }
+                            const pat = p.startsWith('!') ? p.slice(1) : p;
+                            if (!pat) { continue; }
+                            if (minimatch(sample1, pat, { dot: true, nocase: false, matchBase: false }) || minimatch(sample2, pat, { dot: true, nocase: false, matchBase: false })) {
+                                return true;
+                            }
+                        } catch (e) { continue; }
+                    }
+                } catch (e) { /* ignore */ }
+                return false;
+            };
+
+            if (matchesExcludePattern) {
+                const dirKey = String(relPosix || '').replace(/^\/+|\/+$/g, '');
+                if (!includeTargetsDescendant(dirKey)) { stats.skippedByIgnore++; return true; }
+            }
             if (gitignoreIgnored) {
                 try {
                     const negs: string[] = typeof this.gitignoreService.listExplicitNegations === 'function' ? this.gitignoreService.listExplicitNegations() : [];
@@ -97,7 +125,9 @@ export class FileScanner {
                         if (dirKey === '') { return true; } // conservatively assume root may be affected
                         return nn === dirKey || nn.startsWith(dirKey + '/');
                     });
-                    if (!hasNegation) { stats.skippedByIgnore++; return true; }
+                    // If explicit gitignore negations don't reference this dir, also check includePatterns
+                    const includeTargets = includeTargetsDescendant(dirKey);
+                    if (!hasNegation && !includeTargets) { stats.skippedByIgnore++; return true; }
                 } catch (e) {
                     // On any error while querying negations, be conservative and do not skip so negations are honoured.
                 }
@@ -112,8 +142,21 @@ export class FileScanner {
             const stat = await fsPromises.lstat(absPath) as fs.Stats;
             try {
                 const fsUtils = require('../utils/fsUtils');
-                const readable = await fsUtils.FSUtils.isReadable(absPath).catch(() => true);
                 const isJest = !!process.env.JEST_WORKER_ID;
+                // Do not swallow errors from isReadable; treat errors as unreadable to avoid
+                // accidentally proceeding on permission-denied or other IO failures.
+                let readable: boolean = false;
+                try {
+                    readable = await fsUtils.FSUtils.isReadable(absPath);
+                } catch (e) {
+                    // If the readability check throws, treat as unreadable and record a warning
+                    try {
+                        if (!stats.warnings.some(w => w.startsWith('Unreadable'))) {
+                            stats.warnings.push(`Unreadable path skipped (error checking readability): ${relPath}`);
+                        }
+                    } catch {}
+                    readable = false;
+                }
                 if (!readable && !isJest) {
                     if (!stats.warnings.some(w => w.startsWith('Unreadable'))) {
                         stats.warnings.push(`Unreadable path skipped: ${relPath}`);
@@ -121,7 +164,11 @@ export class FileScanner {
                     return undefined;
                 }
             } catch {
-                // continue if readability check isn't available
+                // If fsUtils can't be required or other unexpected error, be conservative and treat as unreadable
+                if (!stats.warnings.some(w => w.startsWith('Unreadable'))) {
+                    stats.warnings.push(`Unreadable path skipped (read check failed): ${relPath}`);
+                }
+                return undefined;
             }
             return stat;
         } catch {
@@ -137,9 +184,10 @@ export class FileScanner {
         // maxFileSize
         if (stat.size >= cfg.maxFileSize) {
             stats.skippedBySize++;
+            // Push a single, detailed warning for oversized files to avoid redundant messages
             if (!stats.warnings.some(w => w.startsWith('Skipped oversized file'))) {
-                stats.warnings.push(`Skipped oversized file: ${relPath} (${stat.size} bytes > maxFileSize)`);
-                if (!stats.warnings.some(w => /file size/i.test(w))) { stats.warnings.push(`File size warning: ${relPath} exceeds maxFileSize`); }
+                // keep the phrase 'file size' so callers/tests that search for that term still match
+                stats.warnings.push(`Skipped oversized file (file size: ${stat.size} bytes > maxFileSize): ${relPath}`);
             }
             return { continueScan: false };
         }
@@ -158,9 +206,9 @@ export class FileScanner {
                 this.runtimeState.set(cfg, state);
             } else {
                 stats.skippedByTotalLimit++;
+                // Single warning entry for total-size-based skip
                 if (!stats.warnings.some(w => w.startsWith('Skipped file due to total size limit'))) {
                     stats.warnings.push(`Skipped file due to total size limit: ${relPath} (would exceed maxTotalSizeBytes)`);
-                    if (!stats.warnings.some(w => /total size/i.test(w))) { stats.warnings.push(`Total size warning: scanning would exceed maxTotalSizeBytes`); }
                 }
                 return { continueScan: false };
             }
@@ -232,9 +280,9 @@ export class FileScanner {
                         }
                     } else {
                         stats.skippedByMaxFiles++;
+                        // Consolidate file-count warning into a single message
                         if (!stats.warnings.some(w => w.startsWith('Max file count reached'))) {
                             stats.warnings.push(`Max file count reached: ${cfg.maxFiles}`);
-                            if (!stats.warnings.some(w => /file count/i.test(w))) { stats.warnings.push(`File count warning: more than ${cfg.maxFiles} files`); }
                         }
                         return { continueScan: false, breakAll: true };
                     }
@@ -242,7 +290,6 @@ export class FileScanner {
                     stats.skippedByMaxFiles++;
                     if (!stats.warnings.some(w => w.startsWith('Max file count reached'))) {
                         stats.warnings.push(`Max file count reached: ${cfg.maxFiles}`);
-                        if (!stats.warnings.some(w => /file count/i.test(w))) { stats.warnings.push(`File count warning: more than ${cfg.maxFiles} files`); }
                     }
                     return { continueScan: false, breakAll: true };
                 }
@@ -340,7 +387,10 @@ export class FileScanner {
             preset = FilterService.resolvePreset(presetName as any);
         }
         // Merge preset with user include/exclude
-        const merged = FilterService.processPatterns(cfg.includePatterns, cfg.excludePatterns, preset);
+    // Preserve any explicit negations (patterns starting with '!') so they are
+    // not removed by include-wins deduplication logic inside processPatterns.
+    const explicitNegations = Array.isArray(cfg.includePatterns) ? (cfg.includePatterns as string[]).filter(p => typeof p === 'string' && p.startsWith('!')).map(p => p.slice(1)) : [];
+    const merged = FilterService.processPatterns(cfg.includePatterns, cfg.excludePatterns, preset, undefined, explicitNegations);
     // Use merged patterns for scanning
     const mergedCfg = { ...cfg, includePatterns: Array.from(merged.include), excludePatterns: Array.from(merged.exclude), respectGitignore: true } as any;
     // For scanning, strip user-provided negation patterns (starting with '!') so glob matching works as expected

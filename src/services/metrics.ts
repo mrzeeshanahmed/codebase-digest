@@ -52,20 +52,53 @@ export class Metrics {
         this.timerStarts[timer] = Date.now();
     }
 
-    stopTimer(timer: keyof MetricsTimers) {
-    if (!this.enabled || !this.timerStarts[timer]) { return; }
-        this.timers[timer] += Date.now() - (this.timerStarts[timer] as number);
-        this.timerStarts[timer] = undefined;
+    stopTimer(timer: keyof MetricsTimers): void {
+        const startedAt = this.timerStarts[timer];
+        if (startedAt == null) { return; }
+        if (this.enabled) {
+            // If you adopt performance.now(), switch here too.
+            this.timers[timer] += Date.now() - startedAt;
+        }
+        delete this.timerStarts[timer];
     }
-
     log() {
     if (!this.enabled) { return; }
         // Unified log to output channel
         const details = `Counters: ${JSON.stringify(this.counters)}\nTimers: ${JSON.stringify(this.timers)}`;
-        // Use interactiveMessages for explicit user-visible warnings via the utils barrel
-        const { interactiveMessages } = require('../utils');
-        if (interactiveMessages && typeof interactiveMessages.showUserWarning === 'function') {
-            interactiveMessages.showUserWarning('Performance metrics logged.', [details]);
+        // Write to the Output Channel (non-interactive) instead of showing
+        // long / frequent warning toasts which can spam users. Prefer the
+        // internalErrors helper which appends details to the Output Channel
+        // and shows a brief notification with a 'Show Details' action.
+        // Defensive require: don't allow a failed dynamic import to throw here.
+        let internalErrors: any | undefined;
+        try {
+            const utils = require('../utils');
+            internalErrors = utils && (utils.internalErrors || utils.internalErrors === undefined ? utils.internalErrors : undefined);
+        } catch (err) {
+            internalErrors = undefined;
+        }
+
+        // Simple sampling + time-window throttle to avoid frequent toasts.
+        // Emit either when a) a random 1-in-N sample passes, or b) enough time has passed since last emit.
+        const now = Date.now();
+        const sampleRate = 10; // 1-in-10 by default
+        const minIntervalMs = 60 * 1000; // at most once per minute
+        // Use static-ish storage on the class so all instances share the same throttle
+        (Metrics as any)._lastWarnTime = (Metrics as any)._lastWarnTime || 0;
+        const last = (Metrics as any)._lastWarnTime as number;
+        const samplePass = Math.random() < 1 / sampleRate;
+        const timePass = now - last > minIntervalMs;
+
+        if (internalErrors && typeof internalErrors.showUserWarning === 'function' && (samplePass || timePass)) {
+            try {
+                internalErrors.showUserWarning('Performance metrics logged.', details);
+                (Metrics as any)._lastWarnTime = now;
+            } catch (e) {
+                try { console.debug(details); } catch (_) { /* swallow */ }
+            }
+        } else {
+            // Fallback: write to console.debug so CI logs still have metrics.
+            try { console.debug(details); } catch (_) { /* swallow */ }
         }
     }
 

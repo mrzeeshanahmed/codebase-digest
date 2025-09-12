@@ -14,18 +14,14 @@ export class MarkdownFormatter implements OutputFormatter {
         let body = result.content;
         if (cfg.outputFormat === 'markdown' && !node.isBinary) {
             // Avoid double-fencing if the ContentProcessor (e.g., NotebookProcessor)
-            // already returned fenced content (``` or ~~~). Detect a leading
-            // fence and a matching closing fence before adding an extra wrapper.
+            // already returned fenced content. Previously we checked only for a
+            // leading fence; notebooks and other processors may contain fenced
+            // blocks anywhere in the returned text. Detect any triple-backtick
+            // or triple-tilde fence anywhere and skip adding an extra wrapper.
             try {
-                const trimmed = (body || '').trim();
-                const m = trimmed.match(/^([`~]{3,})\s*(\S+)?/);
-                let alreadyFenced = false;
-                if (m && m[1]) {
-                    const fence = m[1];
-                    const closingRe = new RegExp(fence.replace(/[`~]/g, ch => `\\${ch}`) + "\\s*$", 'm');
-                    if (closingRe.test(trimmed)) { alreadyFenced = true; }
-                }
-                if (!alreadyFenced) {
+                const txt = (body || '');
+                const hasFence = /(^|\n)\s*([`~]{3,})/.test(txt);
+                if (!hasFence) {
                     body = this.formatters.fence(body, ext, 'markdown');
                 }
             } catch (e) {

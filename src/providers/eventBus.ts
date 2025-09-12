@@ -1,3 +1,5 @@
+import { Diagnostics } from '../utils/diagnostics';
+
 export type ProgressEvent = {
     op: 'scan' | 'generate' | string;
     mode: 'start' | 'progress' | 'end' | string;
@@ -37,7 +39,6 @@ export function onProgress(cb: (e: ProgressEvent) => void): Unsubscribe {
     return unsub;
 }
 
-import { Diagnostics } from '../utils/diagnostics';
 const diagnostics = new Diagnostics('debug', 'EventBus');
 
 export function emitProgress(e: ProgressEvent) {

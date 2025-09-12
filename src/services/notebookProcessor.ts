@@ -78,12 +78,19 @@ export class NotebookProcessor {
                                             break;
                                         }
                                     } else if (key === 'text/html') {
+                                        // Treat HTML outputs as plain text (searchable) rather than
+                                        // encoding them to base64 which downstream search/redaction
+                                        // may treat as binary. Respect the maxBytes limit measured
+                                        // on the raw UTF-8 HTML payload.
                                         let html = Array.isArray(out.data[key]) ? out.data[key].join('') : out.data[key];
                                         let htmlBytes = Buffer.byteLength(html, 'utf8');
                                         if (htmlBytes > maxBytes) {
                                             outputs.push(`[non-text output too large, omitted]`);
                                         } else {
-                                            outputs.push(`[base64:text/html]${Buffer.from(html, 'utf8').toString('base64')}`);
+                                            // Prefix with a light marker so callers can recognize
+                                            // this as HTML if needed, but keep the body as plain
+                                            // UTF-8 text so it is indexable/searchable.
+                                            outputs.push(`[html]${html}`);
                                         }
                                         handled = true;
                                         break;
@@ -116,7 +123,12 @@ export class NotebookProcessor {
         const lines: string[] = [];
     const rel = relPath ?? '[notebook]';
     const fmt = format ?? 'markdown';
-    const FENCE_MARKER = '__CODE_FENCE_TRIPLE__';
+    // Generate a unique per-call fence marker that is extremely unlikely
+    // to collide with notebook content. Using a randomized suffix reduces
+    // the chance of accidental replacement if the notebook contains the
+    // same literal token. We'll replace via split/join to avoid regexp
+    // surprises or special-character issues.
+    const FENCE_MARKER = `__CODE_FENCE_TRIPLE__${Date.now()}_${Math.random().toString(36).slice(2)}__`;
         lines.push(`# Jupyter Notebook: ${rel}\n`);
         let cellNum = 1;
         for (const cell of nb.cells) {
@@ -168,8 +180,9 @@ export class NotebookProcessor {
     // the output to avoid inserting raw backticks into intermediate
     // strings (which can be brittle when post-processing). Replace the
     // marker with actual triple-backticks once the document is assembled.
-        const doc = lines.join('');
-        return doc.replace(new RegExp(FENCE_MARKER, 'g'), '```');
+    const doc = lines.join('');
+    // Use split/join which is deterministic and avoids regexp edge-cases.
+    return doc.split(FENCE_MARKER).join('```');
     }
 
     /**

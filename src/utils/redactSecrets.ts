@@ -79,15 +79,16 @@ export function redactSecrets(
     input: string,
     config?: Partial<DigestConfig>
 ): { content: string; applied: boolean } {
-    if (!input || typeof input !== 'string') {
-        return { content: input, applied: false };
+    if (input === null || input === undefined || typeof input !== 'string') {
+        return { content: String(input ?? ''), applied: false };
     }
     if (config?.showRedacted) {
     return { content: input, applied: false };
     }
 
     // Merge user-provided patterns (if any) before the default rules so user intent is prioritized.
-    const placeholder = config?.redactionPlaceholder || '[REDACTED]';
+    // Normalize legacy alias: allow 'redactionPlaceholder' or 'redactionPlaceholder' only.
+    const placeholder = (typeof config?.redactionPlaceholder === 'string' && config!.redactionPlaceholder) ? config!.redactionPlaceholder : '[REDACTED]';
 
     const userPatterns = Array.isArray(config?.redactionPatterns) ? config!.redactionPatterns : [] as any[];
 
@@ -120,7 +121,10 @@ export function redactSecrets(
                 }
             }
             if (re) {
-                compiledUserRules.push({ name: 'User pattern', pattern: re });
+                // Ensure global flag so replace semantics work predictably
+                const flags = re.flags && re.flags.includes('g') ? re.flags : (re.flags + 'g').replace(/[^gimsyu]/g, '');
+                const safeRe = new RegExp(re.source, flags);
+                compiledUserRules.push({ name: 'User pattern', pattern: safeRe });
                 // If the user likely intended \w or \d but wrote w+/d+ (backslash lost), also add an alternate
                 try {
                     let alt = trimmed;
@@ -131,8 +135,12 @@ export function redactSecrets(
                         alt = alt.replace(/d\+/g, '[0-9]+');
                     }
                     if (alt !== trimmed) {
-                        const altRe = new RegExp(alt, 'g');
-                        compiledUserRules.push({ name: 'User pattern (alt)', pattern: altRe });
+                        try {
+                            const altRe = new RegExp(alt, 'g');
+                            compiledUserRules.push({ name: 'User pattern (alt)', pattern: altRe });
+                        } catch (e) {
+                            // ignore alternate compile errors
+                        }
                     }
                 } catch (e) {
                     // ignore alternate compile errors
@@ -149,7 +157,7 @@ export function redactSecrets(
 
     let out = input;
     let applied = false;
-    const lines = out.split('\n');
+    let lines = out.split('\n');
 
     for (const rule of rules) {
         const newLines: string[] = [];
@@ -187,14 +195,17 @@ export function redactSecrets(
                 // Replace the target in the line
                 // We do this carefully to handle multiple matches in a single line
                 if (modifiedLine.includes(target)) {
-                    modifiedLine = modifiedLine.replace(target, placeholder);
+                    // Use a safely-escaped RegExp replace instead of string.replaceAll
+                    const esc = escapeForRegExp(target);
+                    modifiedLine = modifiedLine.replace(new RegExp(esc, 'g'), placeholder);
                     applied = true;
                 }
             }
             newLines.push(modifiedLine);
         }
-        // Update the lines for the next rule
+        // Update the lines for the next rule so replacements accumulate
         out = newLines.join('\n');
+        lines = out.split('\n');
     }
 
     return { content: out, applied };

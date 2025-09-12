@@ -1,6 +1,17 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 
+// Minimal HTML-escaping helper to avoid injecting unescaped paths into webview HTML.
+// Escapes: & < > " '
+function escapeHtml(s: string): string {
+    return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 /**
  * Set HTML for a webview by rewriting resource URIs and injecting a strict CSP.
  */
@@ -35,8 +46,8 @@ export function setWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri
                 nonceAttr = '';
             }
             const cspMeta = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src ${webview.cspSource}${nonce ? ` 'nonce-${nonce}'` : ''}; style-src ${webview.cspSource}${nonce ? ` 'nonce-${nonce}'` : ''}; img-src ${webview.cspSource} data:;">`;
-            const candidatesList = indexCandidates.map(p => `<li><code>${p.replace(/</g,'&lt;')}</code></li>`).join('\n');
-            webview.html = `<!doctype html><html><head>${cspMeta}</head><body><h2>Extension resource missing</h2><p>The webview index.html could not be found. I looked in these locations:</p><ul>${candidatesList}</ul><p>Extension root: <code>${extensionUri.fsPath.replace(/</g,'&lt;')}</code></p><p>To fix this, ensure <code>resources/webview/index.html</code> exists (or check the packaged <code>dist/resources/webview/index.html</code>).</p><pre style="white-space:pre-wrap;">If this keeps failing during development, run the build step that populates the resources (e.g., the extension's build or packaging script).</pre></body></html>`;
+            const candidatesList = indexCandidates.map(p => `<li><code>${escapeHtml(p)}</code></li>`).join('\n');
+            webview.html = `<!doctype html><html><head>${cspMeta}</head><body><h2>Extension resource missing</h2><p>The webview index.html could not be found. I looked in these locations:</p><ul>${candidatesList}</ul><p>Extension root: <code>${escapeHtml(extensionUri.fsPath)}</code></p><p>To fix this, ensure <code>resources/webview/index.html</code> exists (or check the packaged <code>dist/resources/webview/index.html</code>).</p><pre style="white-space:pre-wrap;">If this keeps failing during development, run the build step that populates the resources (e.g., the extension's build or packaging script).</pre></body></html>`;
         } catch (_) {
             // best-effort: if even assigning html fails, swallow to avoid extension crash
         }
