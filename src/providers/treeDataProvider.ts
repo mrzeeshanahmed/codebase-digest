@@ -10,6 +10,7 @@ import { computePreviewState } from './previewState';
 import { ExpandState, MAX_EXPAND_DEPTH } from './expandState';
 import { formatSize, formatTooltip, createTreeIcon, ContextValues } from './treeHelpers';
 import { emitProgress } from './eventBus';
+import { debounce } from '../utils/debounce';
 import { getMutex } from '../utils/asyncLock';
 import { minimatch } from 'minimatch';
 
@@ -45,15 +46,17 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
     private fileScanner: FileScanner;
     private workspaceRoot: string = '';
     // Optional test-injected config (tests may set this directly)
-    public config?: any;
+    public config?: Partial<import('../types/interfaces').DigestConfig>;
     private selectedRelPaths: string[] = [];
     private previewUpdater?: () => void;
     private totalFiles: number = 0;
     private totalSize: number = 0;
-    private lastScanStats: any;
+    private lastScanStats?: import('../types/interfaces').TraversalStats;
     private directoryCache: DirectoryCache;
     private diagnostics: Diagnostics;
     private _watcher?: vscode.FileSystemWatcher | null;
+    // Debounced refresh function to coalesce full workspace scans
+    private debouncedRefresh?: () => void;
     private scanning: boolean = false;
     // Simple cancellation token for scan operations
     private scanToken: { isCancellationRequested?: boolean } | null = null;
@@ -63,10 +66,10 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
     // requests here so many watcher events don't queue up many expensive scans.
     private pendingHydrations: Set<string> = new Set();
     private selectionManager: SelectionManager;
-    // Optional metrics service injected via services bundle
-    private metrics?: any;
+    // Optional metrics service injected via services bundle (opaque to provider)
+    private metrics?: unknown;
 
-    constructor(folder: vscode.WorkspaceFolder, services: any) {
+    constructor(folder: vscode.WorkspaceFolder, services: { gitignoreService: GitignoreService; fileScanner: FileScanner; diagnostics?: Diagnostics; metrics?: unknown }) {
     this.workspaceFolder = folder;
     this.gitignoreService = services.gitignoreService;
     this.fileScanner = services.fileScanner;
@@ -78,8 +81,8 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
     this.expandState = new ExpandState({ maxDepth: MAX_EXPAND_DEPTH, onDidChange: () => this._onDidChangeTreeData.fire(undefined), onPreviewUpdate: () => this.previewUpdater && this.previewUpdater() });
 
         // Register FileSystemWatcher for incremental updates (guard in tests where workspace may be mocked)
-        const watcher = (vscode.workspace && typeof (vscode.workspace as any).createFileSystemWatcher === 'function')
-            ? (vscode.workspace as any).createFileSystemWatcher('**/*')
+        const watcher = (vscode.workspace && typeof vscode.workspace.createFileSystemWatcher === 'function')
+            ? vscode.workspace.createFileSystemWatcher('**/*')
             : null;
     // Store watcher on instance so it can be disposed later
     this._watcher = watcher;
@@ -158,7 +161,7 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
             // Clear existing timer and schedule a new one
             try {
                 const prev = this.debounceTimers.get(key);
-                if (prev) { clearTimeout(prev); }
+                if (prev) { try { clearTimeout(prev); } catch (e) { /* ignore timing clear errors */ } }
             } catch (e) { /* ignore timing clear errors */ }
             const t = setTimeout(async () => {
                 try {
@@ -172,6 +175,20 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
             }, 250);
             this.debounceTimers.set(key, t as ReturnType<typeof setTimeout>);
         };
+        // Create a small debounced refresh so rapid watcher storms don't trigger
+        // many immediate full workspace scans. Use a short delay to remain
+        // responsive but avoid thrashing the worker.
+        // Read configurable debounce delay (ms) with a safe fallback
+        let debounceMs = 300;
+        try {
+            const cfg = vscode.workspace.getConfiguration('codebaseDigest', this.workspaceFolder.uri);
+            const v = cfg.get('watcherDebounceMs', debounceMs) as number;
+            if (typeof v === 'number' && !Number.isNaN(v) && v >= 0) { debounceMs = v; }
+        } catch (e) { /* swallow config read errors */ }
+        this.debouncedRefresh = debounce(() => {
+            try { this.refresh(); } catch (e) { /* swallow */ }
+        }, debounceMs);
+
         if (watcher) {
             watcher.onDidCreate(handleChange);
             watcher.onDidDelete(handleChange);
@@ -182,15 +199,60 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
         // dispose() method below on the class so the vscode.Disposable contract is satisfied.
     }
 
+    // Local helper: extended FileNode that may include virtual metadata for UI-only nodes
+    private static isVirtualFileNode(node: FileNode | unknown): node is FileNode & { virtualType?: string; childCount?: number; totalSize?: number } {
+        if (typeof node !== 'object' || node === null) { return false; }
+        const n = node as Record<string, unknown>;
+        return typeof n.name === 'string' && (typeof n.virtualType === 'string' || typeof n.childCount === 'number' || typeof n.totalSize === 'number');
+    }
+
     public dispose(): void {
+        // Comprehensive cleanup to avoid leaks when provider is disposed
         try {
             // clear debounce timers
-            for (const t of this.debounceTimers.values()) { try { clearTimeout(t as any); } catch {} }
+            for (const t of this.debounceTimers.values()) {
+                try { if (t) { clearTimeout(t); } } catch (e) { /* ignore individual timer errors */ }
+            }
             this.debounceTimers.clear();
         } catch (e) { /* ignore */ }
+
         try { this.pendingHydrations.clear(); } catch (e) { /* ignore */ }
-        try { if (this._watcher && typeof (this._watcher.dispose) === 'function') { this._watcher.dispose(); } } catch (e) { /* ignore */ }
-        try { this._onDidChangeTreeData.dispose(); } catch (e) { /* ignore */ }
+
+        // Dispose watcher (will also remove its event listeners)
+        try {
+            if (this._watcher && typeof (this._watcher.dispose) === 'function') {
+                try { this._watcher.dispose(); } catch (e) { /* ignore */ }
+            }
+            this._watcher = undefined;
+        } catch (e) { /* ignore */ }
+
+        // Dispose the TreeData change emitter
+        try { if (this._onDidChangeTreeData) { this._onDidChangeTreeData.dispose(); } } catch (e) { /* ignore */ }
+
+        // Dispose other disposables if present
+        try { if (this.statusBarItem && typeof (this.statusBarItem.dispose) === 'function') { this.statusBarItem.dispose(); } } catch (e) { /* ignore */ }
+        // Centralized safe disposer to avoid repetitive casting
+        const tryDispose = (o: unknown) => {
+            try {
+                if (o && typeof o === 'object') {
+                    const rec = o as Record<string, unknown>;
+                    const dd = rec['dispose'];
+                    if (typeof dd === 'function') {
+                        try { (dd as Function).call(o); } catch (_) { /* swallow dispose errors */ }
+                    }
+                }
+            } catch (_) { /* swallow */ }
+        };
+
+        tryDispose(this.expandState);
+        tryDispose(this.selectionManager);
+        tryDispose(this.directoryCache);
+        tryDispose(this.diagnostics);
+
+        // Clear preview updater reference and any scan token to avoid holding closures
+        try { this.previewUpdater = undefined; } catch (e) { /* ignore */ }
+        try { this.scanToken = null; } catch (e) { /* ignore */ }
+
         try { emitProgress({ op: 'scan', mode: 'end', determinate: false, message: 'provider disposed' }); } catch (e) { /* ignore */ }
     }
 
@@ -307,7 +369,7 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
     public selectGroupByName(groupName: string): void {
         if (!groupName) { return; }
         // Find the virtual group node at top-level
-        const group = this.rootNodes.find(r => (r as any).virtualType === 'virtualGroup' && r.name === groupName);
+    const group = this.rootNodes.find(r => CodebaseDigestTreeProvider.isVirtualFileNode(r) && r.virtualType === 'virtualGroup' && r.name === groupName);
         if (!group || !group.children) { return; }
         const rels: string[] = [];
         const collect = (n: FileNode) => {
@@ -372,31 +434,43 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
                 const batchDelay = cfg.get('pendingHydrationBatchDelayMs', CodebaseDigestTreeProvider.DEFAULT_PENDING_BATCH_DELAY_MS) as number;
 
                 // Lightweight telemetry hook: prefer an explicitly injected metrics service, otherwise fall back to Diagnostics logging.
-                const metricsSvc = this.metrics || (this as any).services && (this as any).services.metrics;
-                const logTelemetry = (payload: any) => {
+                let metricsSvc: unknown = this.metrics;
+                try {
+                    if (!metricsSvc) {
+                        // Narrow `this` only to the small shape we need: an optional
+                        // `services` container. Keep checks defensive so behavior is unchanged.
+                        const selfRec = this as unknown as { services?: unknown };
+                        if (selfRec.services && typeof selfRec.services === 'object') {
+                            const svcRec = selfRec.services as Record<string, unknown>;
+                            metricsSvc = svcRec['metrics'];
+                        }
+                    }
+                } catch (e) { /* swallow */ }
+                const logTelemetry = (payload: Record<string, unknown>) => {
                     try {
                         // Enrich payload with workspace-level snapshot if available
                         try {
-                            payload.workspace = payload.workspace || {};
-                            payload.workspace.path = this.workspaceRoot;
-                            payload.workspace.totalFiles = this.totalFiles || (this.lastScanStats && this.lastScanStats.totalFiles) || 0;
-                            payload.workspace.totalSize = this.totalSize || (this.lastScanStats && this.lastScanStats.totalSize) || 0;
+                            const ws = (payload.workspace && typeof payload.workspace === 'object') ? payload.workspace as Record<string, unknown> : {};
+                            ws.path = this.workspaceRoot;
+                            ws.totalFiles = this.totalFiles || (this.lastScanStats && this.lastScanStats.totalFiles) || 0;
+                            ws.totalSize = this.totalSize || (this.lastScanStats && this.lastScanStats.totalSize) || 0;
+                            payload.workspace = ws;
                             payload.provider = payload.provider || { pendingHydrationsCount: backlog, rootNodes: (this.rootNodes && this.rootNodes.length) || 0 };
                         } catch (e) { /* swallow enrichment errors */ }
 
-                        if (metricsSvc && typeof metricsSvc.inc === 'function') {
-                            // If metrics exposes counters, increment a lightweight event counter
-                            try { metricsSvc.inc('pendingHydrationsEvents', 1); } catch (e) { /* ignore */ }
-                            // If the metrics service supports logging or flushing, call it
-                            if (typeof (metricsSvc as any).log === 'function') {
-                                try { (metricsSvc as any).log(); } catch (_) { /* ignore */ }
+                        if (metricsSvc) {
+                            // Prefer a small explicit shape for the metrics API we call.
+                            const mrec = metricsSvc as { inc?: (k: string, v?: number) => void; log?: (...args: unknown[]) => void } | undefined;
+                            if (mrec && typeof mrec.inc === 'function') {
+                                try { mrec.inc('pendingHydrationsEvents', 1); } catch (e) { /* ignore */ }
                             }
-                            // Also write structured debug to Diagnostics for easier local inspection
-                            try { this.diagnostics && this.diagnostics.debug ? this.diagnostics.debug('pendingHydrations.telemetry', payload) : console.debug('pendingHydrations.telemetry', payload); } catch (e) { /* swallow */ }
-                        } else {
-                            // Use Diagnostics output channel for structured debug logging
-                            try { this.diagnostics && this.diagnostics.debug ? this.diagnostics.debug('pendingHydrations.telemetry', payload) : console.debug('pendingHydrations.telemetry', payload); } catch (e) { /* swallow */ }
+                            if (mrec && typeof mrec.log === 'function') {
+                                try { mrec.log(); } catch (_) { /* ignore */ }
+                            }
                         }
+
+                        // Also write structured debug to Diagnostics for easier local inspection
+                        try { this.diagnostics && this.diagnostics.debug ? this.diagnostics.debug('pendingHydrations.telemetry', payload) : console.debug('pendingHydrations.telemetry', payload); } catch (e) { /* swallow */ }
                     } catch (e) { /* swallow */ }
                 };
 
@@ -410,7 +484,7 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
                         // Schedule a deferred full refresh to allow the UI to breathe
                         // and to let further watcher events be coalesced into the next scan.
                         setTimeout(() => {
-                            try { this.refresh(); } catch (e) { /* swallow */ }
+                            try { if (this.debouncedRefresh) { this.debouncedRefresh(); } } catch (e) { /* swallow */ }
                         }, 50);
                         try { this.diagnostics && this.diagnostics.warn ? this.diagnostics.warn(`pendingHydrations backlog too large (${backlog}), scheduling full refresh (maxPending=${maxPending})`) : console.warn(`pendingHydrations backlog too large (${backlog}), scheduling full refresh (maxPending=${maxPending})`); } catch {}
                     } catch (e) { /* swallow scheduling errors */ }
@@ -598,7 +672,7 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
                 // compute metadata
                 const childCount = children.length;
                 const totalSize = children.reduce((s, c) => s + (c.size || 0), 0);
-                const groupNode: FileNode = {
+                const groupNode: FileNode & { virtualType: 'virtualGroup'; childCount: number; totalSize: number } = {
                     type: 'directory',
                     name: groupName,
                     relPath: `virtual:${groupName}`,
@@ -607,11 +681,11 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
                     depth: 0,
                     children,
                     // mark as virtual for easier detection
-                    virtualType: 'virtualGroup' as any,
+                    virtualType: 'virtualGroup',
                     // attach metadata
                     childCount,
                     totalSize
-                } as any;
+                };
                 groups.push(groupNode);
             }
         }
@@ -737,7 +811,7 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
                         children: [],
                         virtualType: 'welcomeAction',
                         action: 'openDashboard'
-                    } as any,
+                    } as FileNode & { virtualType: 'welcomeAction'; action?: string },
                     {
                         type: 'file',
                         name: 'Generate Digest',
@@ -748,7 +822,7 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
                         children: [],
                         virtualType: 'welcomeAction',
                         action: 'generate'
-                    } as any,
+                    } as FileNode & { virtualType: 'welcomeAction'; action?: string },
                     {
                         type: 'file',
                         name: 'Ingest Remote Repo',
@@ -759,7 +833,7 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
                         children: [],
                         virtualType: 'welcomeAction',
                         action: 'ingest'
-                    } as any,
+                    } as FileNode & { virtualType: 'welcomeAction'; action?: string },
                     {
                         type: 'file',
                         name: 'Clear Digest Cache',
@@ -770,7 +844,7 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
                         children: [],
                         virtualType: 'welcomeAction',
                         action: 'clearCache'
-                    } as any,
+                    } as FileNode & { virtualType: 'welcomeAction'; action?: string },
                     {
                         type: 'file',
                         name: 'Settings',
@@ -781,7 +855,7 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
                         children: [],
                         virtualType: 'welcomeAction',
                         action: 'settings'
-                    } as any
+                    } as FileNode & { virtualType: 'welcomeAction'; action?: string }
                 ];
             }
             return this.rootNodes;
@@ -830,7 +904,7 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
 
     getTreeItem(element: FileNode): vscode.TreeItem {
         // Use expandedRelPaths to set collapsible state
-        if ((element as any).virtualType === 'welcome' || element.relPath === '__welcome__') {
+            if ((CodebaseDigestTreeProvider.isVirtualFileNode(element) && element.virtualType === 'welcome') || element.relPath === '__welcome__') {
             const item = new vscode.TreeItem(element.name, vscode.TreeItemCollapsibleState.None);
             item.description = 'Generate a digest of your codebase for LLMs. Choose an action below:';
             item.tooltip = 'Welcome to Code Ingest';
@@ -839,16 +913,19 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
             // Clicking the welcome node focuses the sidebar dashboard view
             // Pass the WorkspaceFolder Uri object (not a string) so command
             // handlers can unambiguously scope the action to this provider's folder
-            item.command = {
+            const welcomeCmd: vscode.Command = {
                 command: 'codebaseDigest.focusView',
                 title: 'Focus Code Ingest',
                 arguments: [this.workspaceFolder.uri]
-            } as any;
+            };
+            item.command = welcomeCmd;
             return item;
         }
         // Special-case welcome action rows which are shown below the main welcome node
-        if ((element as any).virtualType === 'welcomeAction') {
-            const act = (element as any).action || '';
+    if (CodebaseDigestTreeProvider.isVirtualFileNode(element) && element.virtualType === 'welcomeAction') {
+        // Narrow the element to the minimal shape we expect for welcome actions.
+        const elRec = element as unknown as { action?: unknown };
+        const act = (typeof elRec.action === 'string') ? elRec.action : '';
             const item = new vscode.TreeItem(element.name, vscode.TreeItemCollapsibleState.None);
             // Map icons per action for better UX
             const iconMap: Record<string, string> = {
@@ -871,14 +948,15 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
             };
             const cmd = cmdMap[act] || 'codebaseDigest.openDashboard';
             // Use Uri so handlers have full workspaceFolder context (multi-root safe)
-            item.command = {
+            const actionCmd: vscode.Command = {
                 command: cmd,
                 title: element.name,
                 arguments: [this.workspaceFolder.uri]
-            } as any;
+            };
+            item.command = actionCmd;
             return item;
         }
-        if ((element as any).virtualType === 'scanning' || element.relPath === '__scanning__') {
+    if ((CodebaseDigestTreeProvider.isVirtualFileNode(element) && element.virtualType === 'scanning') || element.relPath === '__scanning__') {
             const item = new vscode.TreeItem(element.name, vscode.TreeItemCollapsibleState.None);
             item.description = 'Scanning your workspace for files...';
             item.tooltip = 'Scanning in progress';
@@ -897,9 +975,10 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
             collapsibleState
         );
         // If virtual group, show metadata in description
-        if ((element as any).virtualType === 'virtualGroup') {
-            const count = (element as any).childCount || 0;
-            const size = this.formatSize((element as any).totalSize || 0);
+    if (CodebaseDigestTreeProvider.isVirtualFileNode(element) && element.virtualType === 'virtualGroup') {
+        const el = element as unknown as { childCount?: unknown; totalSize?: unknown };
+        const count = typeof el.childCount === 'number' ? el.childCount as number : 0;
+        const size = this.formatSize(typeof el.totalSize === 'number' ? el.totalSize as number : 0);
             treeItem.description = `${count} files · ${size}`;
             treeItem.contextValue = 'virtualGroup';
         }

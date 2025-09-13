@@ -4,10 +4,39 @@ import * as fs from 'fs';
 import * as os from 'os';
 // Track created temp dirs for session-scoped cleanup
 const _createdTmpDirs: string[] = [];
-import { exec } from 'child_process';
 import { internalErrors, interactiveMessages } from '../utils';
 import { spawnGitPromise, safeFetch } from '../utils/procRedact';
 import { scrubTokens } from '../utils/redaction';
+
+// Helpers
+function stringifyErr(e: unknown): string {
+    if (typeof e === 'string') { return e; }
+    if (!e) { return String(e); }
+    if (typeof e === 'object' && 'message' in e) {
+        try { return String((e as { message?: unknown }).message ?? String(e)); } catch (ex) { return String(e); }
+    }
+    try { return String(e); } catch (ex) { return '[unserializable error]'; }
+}
+
+function safeAssignDetails(err: unknown, details: string) {
+    try {
+        if (err && typeof err === 'object' && err !== null) {
+            try { (err as Record<string, unknown>)['details'] = details; } catch (_) { /* ignore */ }
+        }
+    } catch (_) { /* ignore */ }
+}
+
+// Validation helpers to reduce risk of command injection via crafted refs or owner/repo
+function isValidOwnerRepo(s: string): boolean {
+    // Basic owner/repo check: two path segments composed of allowed chars
+    return /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(s);
+}
+
+function isSafeRefName(ref: string): boolean {
+    // Accept simple branch/tag names and full ref names without shell metacharacters.
+    // Allow alphanumerics, /, -, _, ., and refs like refs/heads/foo
+    return /^[A-Za-z0-9_\-\.\/]+$/.test(ref);
+}
 
 export interface RemoteRepoMeta {
     ownerRepo: string;
@@ -45,28 +74,37 @@ export async function authenticate(): Promise<string> {
     return session.accessToken;
 }
 
-async function githubApiRequest(endpoint: string, token: string): Promise<any> {
-    const res = await safeFetch(`https://api.github.com${endpoint}`, {
+async function githubApiRequest(endpoint: string, token: string): Promise<unknown> {
+    const raw = await safeFetch(`https://api.github.com${endpoint}`, {
         headers: { Authorization: `Bearer ${token}` }
     });
-    if (!res.ok) {
-        const isRateLimit = res.status === 429 || (res.status === 403 && res.headers.get('x-ratelimit-remaining') === '0');
+    if (!raw || typeof raw !== 'object') { throw new Error('Unexpected response from GitHub API'); }
+    const res = raw as { ok?: boolean; status?: number; headers?: { get: (k: string) => string | null }; statusText?: string; json?: () => Promise<unknown> };
+    const ok = typeof res.ok === 'boolean' ? res.ok : false;
+    const status = typeof res.status === 'number' ? res.status : 0;
+    const headers = res.headers && typeof res.headers.get === 'function' ? res.headers : undefined;
+    if (!ok) {
+        const isRateLimit = status === 429 || (status === 403 && headers && headers.get('x-ratelimit-remaining') === '0');
         if (isRateLimit) {
-            throw new internalErrors.RateLimitError('GitHub', `GitHub API rate limit exceeded (${res.status}).`);
+            throw new internalErrors.RateLimitError('GitHub', `GitHub API rate limit exceeded (${status}).`);
         }
-        if (res.status === 404) {
+        if (status === 404) {
             throw new Error('Repository or reference not found. Check owner/repo and ref.');
         }
-        if (res.status === 401 || (res.status === 403 && !isRateLimit)) {
-            throw new internalErrors.GitAuthError('github.com', `Authentication failed or insufficient permissions (${res.status}).`);
+        if (status === 401) {
+            throw new internalErrors.GitAuthError('github.com', `Authentication failed or insufficient permissions (${status}).`);
         }
-        throw new Error(`GitHub API error: ${res.status} ${res.statusText}`);
+        throw new Error(`GitHub API error: ${status} ${res.statusText || ''}`);
     }
-    return await res.json();
+    return res.json ? await res.json() : undefined;
 }
 
 export async function resolveRefToSha(ownerRepo: string, ref?: { tag?: string; branch?: string; commit?: string }, token?: string): Promise<string> {
     if (ref?.commit) { return ref.commit; }
+    // Validate owner/repo form to avoid unexpected input reaching git commands
+    if (!isValidOwnerRepo(ownerRepo)) {
+        throw new Error(scrubTokens(`Invalid repository identifier: ${ownerRepo}`));
+    }
     const [owner, repo] = ownerRepo.split('/');
     // Try API if token is present
     if (token) {
@@ -75,25 +113,44 @@ export async function resolveRefToSha(ownerRepo: string, ref?: { tag?: string; b
         while (attempts < 2) {
             try {
                 if (ref?.tag) {
-                    const tags = await githubApiRequest(`/repos/${owner}/${repo}/tags`, currentToken);
-                    const tagObj = tags.find((t: any) => t.name === ref.tag);
-                    if (!tagObj) { throw new Error(scrubTokens(`Tag not found: ${ref.tag}`)); }
-                    return tagObj.commit.sha;
+                    const tagsRes = await githubApiRequest(`/repos/${owner}/${repo}/tags`, currentToken);
+                    if (Array.isArray(tagsRes)) {
+                        const tagObj = tagsRes.find(t => {
+                            if (!t || typeof t !== 'object') { return false; }
+                            const name = (t as Record<string, unknown>)['name'];
+                            return typeof name === 'string' && name === ref.tag;
+                        }) as Record<string, unknown> | undefined;
+                        if (!tagObj) { throw new Error(scrubTokens(`Tag not found: ${ref.tag}`)); }
+                        const commitObj = tagObj['commit'] as Record<string, unknown> | undefined;
+                        return String(commitObj && typeof commitObj['sha'] !== 'undefined' ? String(commitObj['sha']) : '');
+                    }
+                    throw new Error(scrubTokens('Unexpected response when listing tags'));
                 }
                 if (ref?.branch) {
-                    const branch = await githubApiRequest(`/repos/${owner}/${repo}/branches/${ref.branch}`, currentToken);
-                    return branch.commit.sha;
+                    const branchRes = await githubApiRequest(`/repos/${owner}/${repo}/branches/${ref.branch}`, currentToken);
+                    if (branchRes && typeof branchRes === 'object') {
+                        const commitObj = (branchRes as Record<string, unknown>)['commit'] as Record<string, unknown> | undefined;
+                        return String(commitObj && typeof commitObj['sha'] !== 'undefined' ? String(commitObj['sha']) : '');
+                    }
+                    throw new Error(scrubTokens('Unexpected branch response from GitHub API'));
                 }
                 // Default: HEAD of default branch
                 const repoInfo = await githubApiRequest(`/repos/${owner}/${repo}`, currentToken);
-                const branch = await githubApiRequest(`/repos/${owner}/${repo}/branches/${repoInfo.default_branch}`, currentToken);
-                return branch.commit.sha;
-            } catch (apiErr: any) {
+                if (repoInfo && typeof repoInfo === 'object') {
+                    const defaultBranch = (repoInfo as Record<string, unknown>)['default_branch'] as string | undefined;
+                    const branch = await githubApiRequest(`/repos/${owner}/${repo}/branches/${defaultBranch}`, currentToken);
+                    if (branch && typeof branch === 'object') {
+                        const commitObj = (branch as Record<string, unknown>)['commit'] as Record<string, unknown> | undefined;
+                        return String(commitObj && typeof commitObj['sha'] !== 'undefined' ? String(commitObj['sha']) : '');
+                    }
+                }
+                throw new Error(scrubTokens('Unexpected repository response from GitHub API'));
+            } catch (apiErr: unknown) {
                 attempts += 1;
                 if (apiErr instanceof internalErrors.GitAuthError) {
                     // Ask user if they want to re-auth
                     const resp = await interactiveMessages.showUserError(apiErr, scrubTokens('Authentication required to access GitHub repository'));
-                    if (resp && (resp as any).action === 'signIn') {
+                    if (resp && typeof resp === 'object' && (resp as Record<string, unknown>)['action'] === 'signIn') {
                         try {
                             currentToken = await authenticate();
                             continue; // retry with new token
@@ -115,31 +172,42 @@ export async function resolveRefToSha(ownerRepo: string, ref?: { tag?: string; b
     // Fallback: git ls-remote. Prefer using an authenticated URL when we have a token so
     // private repositories can be resolved. We still scrub tokens from any surfaced messages.
     const refName = ref?.tag ? `refs/tags/${ref.tag}` : ref?.branch ? `refs/heads/${ref.branch}` : 'HEAD';
-    try {
-        const remoteUrl = token ? `https://x-access-token:${encodeURIComponent(token)}@github.com/${owner}/${repo}.git` : `https://github.com/${owner}/${repo}.git`;
-        return await spawnGitPromise(['ls-remote', remoteUrl, refName]).then(r => {
-            const match = (r.stdout || '').match(/^([a-f0-9]+)\s+/m);
-            if (match) { return match[1]; }
-            throw new Error(scrubTokens(`Could not resolve ref: ${refName}`));
-        });
-    } catch (lsErr: any) {
+    // Validate refName (skip HEAD which is allowed)
+    if (refName !== 'HEAD') {
+        if (!isSafeRefName(refName)) {
+            throw new Error(scrubTokens(`Invalid ref name: ${refName}`));
+        }
+    }
+            try {
+                const remoteUrl = token ? `https://x-access-token:${encodeURIComponent(token)}@github.com/${owner}/${repo}.git` : `https://github.com/${owner}/${repo}.git`;
+                return await spawnGitPromise(['ls-remote', remoteUrl, refName]).then(r => {
+                    let stdout = '';
+                    if (r && typeof r === 'object') {
+                        const s = (r as Record<string, unknown>)['stdout'];
+                        if (typeof s === 'string') { stdout = s; }
+                    }
+                    const match = stdout.match(/^([a-f0-9]+)\s+/m);
+                    if (match) { return match[1]; }
+                    throw new Error(scrubTokens(`Could not resolve ref: ${refName}`));
+                });
+            } catch (lsErr: unknown) {
         // Scrub any tokens or repo/ref values before throwing up to callers. Provide an actionable message.
         const safeRef = scrubTokens(refName);
-        const rawDetails = lsErr && (lsErr.details || lsErr.message) ? String(lsErr.details || lsErr.message) : String(lsErr || '');
+        const rawDetails = stringifyErr(lsErr);
         const scrubbedDetails = scrubTokens(rawDetails);
         // Detect common platform/tooling issues and give more helpful guidance
         const lower = (scrubbedDetails || '').toLowerCase();
         if (lower.includes('enoent') || lower.includes('spawn git') || lower.includes('not found')) {
             const msg = 'Git executable not found or not available on PATH. Install Git and ensure `git --version` works from your shell.';
             const err = new Error(msg);
-            try { (err as any).details = scrubbedDetails; } catch (_) {}
+            safeAssignDetails(err, scrubbedDetails);
             throw err;
         }
         // Generic actionable message for resolution failures
         const suggestions = ['Ensure the repository and ref exist', 'For private repositories ensure your GitHub authentication token has appropriate scopes (repo)', 'Check network/firewall/proxy settings', `Try running: git ls-remote ${scrubTokens(token ? 'https://<redacted>@github.com/' + owner + '/' + repo + '.git' : 'https://github.com/' + owner + '/' + repo + '.git')} ${safeRef}`];
         const msg = `Could not resolve reference ${safeRef} via git ls-remote. ${suggestions.join('; ')}.`;
         const err = new Error(msg);
-        try { (err as any).details = scrubbedDetails; } catch (_) {}
+        safeAssignDetails(err, scrubbedDetails);
         throw err;
     }
 }
@@ -160,14 +228,14 @@ export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?
         _createdTmpDirs.push(dir);
         // Write a small metadata file so we can later identify the creator process
         try {
-            const meta = {
-                pid: process.pid,
-                ppid: (process as any).ppid || null,
-                createdAt: new Date().toISOString(),
-                exec: process.execPath,
-                stack: (new Error()).stack?.split('\n').slice(2,8)
-            } as any;
-            fs.writeFileSync(path.join(dir, '.codebase-digest-creator.json'), JSON.stringify(meta, null, 2));
+                    const meta: Record<string, unknown> = {
+                        pid: process.pid,
+                        ppid: (process as { ppid?: number }).ppid || null,
+                        createdAt: new Date().toISOString(),
+                        exec: process.execPath,
+                        stack: (new Error()).stack?.split('\n').slice(2,8)
+                    };
+                    fs.writeFileSync(path.join(dir, '.codebase-digest-creator.json'), JSON.stringify(meta, null, 2));
         } catch (e) { /* best-effort, ignore */ }
     }
     let env: any = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
@@ -209,13 +277,13 @@ export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?
                 await spawnGitPromise(baseCloneArgs, { env }).then(() => {});
                 break; // success
             } catch (cloneErr: any) {
-                const details = scrubTokens(String(cloneErr && (cloneErr.details || cloneErr.message) ? (cloneErr.details || cloneErr.message) : cloneErr || ''));
+                    const details = scrubTokens(String(cloneErr && typeof cloneErr === 'object' ? String((cloneErr as Record<string, unknown>)['details'] || (cloneErr as Record<string, unknown>)['message'] || String(cloneErr)) : String(cloneErr || '')));
                 const lower = (details || '').toLowerCase();
                 // Detect missing git executable and rethrow with clearer guidance
-                if (lower.includes('enoent') || lower.includes('spawn git') || lower.includes('not found')) {
+                    if (lower.includes('enoent') || lower.includes('spawn git') || lower.includes('not found')) {
                     const msg = 'Git not found: please install Git and ensure it is available on your PATH. Visit https://git-scm.com/downloads, install Git, then restart Visual Studio Code and retry. Verify by running `git --version` in your terminal.';
                     const err = new Error(msg);
-                    try { (err as any).details = details; } catch (_) {}
+                        safeAssignDetails(err, details);
                     throw err;
                 }
                 // Handle destination-collision cases by retrying with a fresh mkdtemp
@@ -227,21 +295,21 @@ export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?
                     }
                     // Allocate a new temp dir and continue; do not attempt to remove an
                     // externally-created directory. Track newly-created dirs for cleanup.
-                    try {
-                        const newDir = fs.mkdtempSync(path.join(os.tmpdir(), `${sessionPrefix}${repo}-`));
-                        if (!tmpDir) { _createdTmpDirs.push(newDir); }
-                        // Best-effort: annotate dir so future investigations can attribute it
                         try {
-                            const meta = {
-                                pid: process.pid,
-                                ppid: (process as any).ppid || null,
-                                createdAt: new Date().toISOString(),
-                                exec: process.execPath,
-                                stack: (new Error()).stack?.split('\n').slice(2,8)
-                            } as any;
-                            fs.writeFileSync(path.join(newDir, '.codebase-digest-creator.json'), JSON.stringify(meta, null, 2));
-                        } catch (_) { /* ignore */ }
-                        dir = newDir;
+                            const newDir = fs.mkdtempSync(path.join(os.tmpdir(), `${sessionPrefix}${repo}-`));
+                            if (!tmpDir) { _createdTmpDirs.push(newDir); }
+                            // Best-effort: annotate dir so future investigations can attribute it
+                            try {
+                                const meta: Record<string, unknown> = {
+                                    pid: process.pid,
+                                    ppid: (process as { ppid?: number }).ppid || null,
+                                    createdAt: new Date().toISOString(),
+                                    exec: process.execPath,
+                                    stack: (new Error()).stack?.split('\n').slice(2,8)
+                                };
+                                fs.writeFileSync(path.join(newDir, '.codebase-digest-creator.json'), JSON.stringify(meta, null, 2));
+                            } catch (_) { /* ignore */ }
+                            dir = newDir;
                         // Re-write askpass helper if needed so GIT_ASKPASS points to a valid file
                         try { writeAskpass(); } catch (_) { /* ignore */ }
                         // continue loop and retry clone
@@ -291,7 +359,9 @@ export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?
                     }
                 } catch (retryErr: any) {
                     // Propagate a scrubbed retry error so caller can handle cleanup
-                    if (retryErr && retryErr.message) { retryErr.message = scrubTokens(String(retryErr.message)); }
+                    if (retryErr && typeof retryErr === 'object' && 'message' in retryErr) {
+                        try { (retryErr as Record<string, unknown>)['message'] = scrubTokens(String((retryErr as Record<string, unknown>)['message'])); } catch (_) {}
+                    }
                     throw retryErr;
                 }
             }
@@ -307,18 +377,22 @@ export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?
         try {
             if (askpassDir && fs.existsSync(askpassDir)) { fs.rmSync(askpassDir, { recursive: true, force: true }); }
         } catch (_) { /* ignore */ }
+        // As a final best-effort, attempt to clean any session-scoped temp dirs
+        try {
+            cleanupSessionTmpDirs();
+        } catch (_) { /* ignore */ }
         throw err;
     }
     // Step 3: git checkout
     try {
         await spawnGitPromise(['checkout', shaOrRef], { cwd: dir, env }).then(() => {});
     } catch (checkoutErr: any) {
-        const details = scrubTokens(String(checkoutErr && (checkoutErr.details || checkoutErr.message) ? (checkoutErr.details || checkoutErr.message) : checkoutErr || ''));
+        const details = scrubTokens(String(checkoutErr && typeof checkoutErr === 'object' ? String((checkoutErr as Record<string, unknown>)['details'] || (checkoutErr as Record<string, unknown>)['message'] || String(checkoutErr)) : String(checkoutErr || '')));
         const lower = (details || '').toLowerCase();
         if (lower.includes('enoent') || lower.includes('spawn git') || lower.includes('not found')) {
             const msg = 'Git not found: please install Git and ensure it is available on your PATH. Visit https://git-scm.com/downloads, install Git, then restart Visual Studio Code and retry. Verify by running `git --version` in your terminal.';
             const err = new Error(msg);
-            try { (err as any).details = details; } catch (_) {}
+            safeAssignDetails(err, details);
             throw err;
         }
         throw checkoutErr;

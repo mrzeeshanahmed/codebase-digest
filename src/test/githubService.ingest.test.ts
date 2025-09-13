@@ -63,10 +63,23 @@ describe('githubService.ingestRemoteRepo tmp dir cleanup', () => {
       // Act
       await expect(githubService.ingestRemoteRepo('owner/repo', { ref: { branch: 'main' } })).rejects.toThrow(/simulated clone failure/);
 
-    // Assert: cleanup removed any new owner-repo-* tmpDir created during this test
+    // Assert: cleanup removed any new owner-repo-* tmpDir created by THIS process during this test.
+    // Other test workers may create owner-repo-* dirs concurrently; only consider dirs owned by this process
     const afterEntries = fs.readdirSync(os.tmpdir());
     const added = afterEntries.filter(n => !beforeEntries.has(n) && n.startsWith('owner-repo-'));
-    expect(added.length).toBe(0);
+    // Filter to only those tmp dirs that contain our creator metadata file and match our PID
+    const createdByThisProcess = added.filter(name => {
+      try {
+        const metaPath = path.join(os.tmpdir(), name, '.codebase-digest-creator.json');
+        if (!fs.existsSync(metaPath)) { return false; }
+        const txt = fs.readFileSync(metaPath, 'utf8');
+        const meta = JSON.parse(txt);
+        return meta && meta.pid === process.pid;
+      } catch (e) {
+        return false;
+      }
+    });
+    expect(createdByThisProcess.length).toBe(0);
     } finally {
       // Restore spies/mocks
       // nothing to restore for tmpdir snapshot

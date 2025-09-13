@@ -6,6 +6,38 @@ import { setWebviewHtml, wireWebviewMessages } from './webviewHelpers';
 import { Diagnostics } from '../utils/diagnostics';
 const diagnostics = new Diagnostics('debug', 'Code Ingest');
 
+// Small typed payload shapes sent to the webview. Keep these minimal and
+// only include primitives and small arrays to avoid sending large or sensitive
+// objects accidentally.
+interface ProgressEventPayload {
+    type: 'progress';
+    event: { op?: string; mode?: string; [k: string]: unknown };
+}
+
+interface PreviewDeltaPayload {
+    type: 'previewDelta';
+    delta: {
+        selectedCount?: number;
+        totalFiles?: number;
+        selectedSize?: number;
+        tokenEstimate?: number;
+        contextLimit?: number;
+        fileTree?: unknown; // tree may be large; webview is responsible for rendering
+        selectedPaths: string[];
+    };
+}
+
+interface StatePayload {
+    type: 'state';
+    state: unknown;
+}
+
+interface DiagnosticPayload {
+    type: 'diagnostic';
+    level: 'error' | 'warning' | 'info';
+    message: string;
+}
+
 const panels: Map<string, CodebaseDigestPanel> = new Map();
 let registeredDisposable: vscode.Disposable | undefined;
 // Track active sidebar views and their associated folderPath so broadcasts can be scoped.
@@ -23,17 +55,25 @@ export class CodebaseDigestPanel {
     // Support two constructor shapes for backwards compatibility with tests:
     // - new CodebaseDigestPanel(context, extensionUri, treeProvider, folderPath)
     // - legacy: new CodebaseDigestPanel(extensionUri, treeProvider, folderPath)
-    constructor(contextOrExtensionUri: any, extensionUriOrTreeProvider?: any, treeProviderOrFolderPath?: any, folderPathArg?: any) {
+    constructor(contextOrExtensionUri: unknown, extensionUriOrTreeProvider?: unknown, treeProviderOrFolderPath?: unknown, folderPathArg?: unknown) {
         // Detect whether the first argument is an ExtensionContext by duck-typing useful members.
         // Some test harnesses may provide partial contexts; prefer checking for 'subscriptions' (array)
         // and workspaceState having 'get' as a function to be robust across environments.
-        if (contextOrExtensionUri && typeof contextOrExtensionUri === 'object'
-            && Array.isArray((contextOrExtensionUri as any).subscriptions)
-            && (contextOrExtensionUri as any).workspaceState && typeof (contextOrExtensionUri as any).workspaceState.get === 'function') {
-            this.context = contextOrExtensionUri as vscode.ExtensionContext;
-            this.extensionUri = extensionUriOrTreeProvider as vscode.Uri;
-            this.treeProvider = treeProviderOrFolderPath as CodebaseDigestTreeProvider;
-            this.folderPath = folderPathArg as string;
+        type PartialCtx = { subscriptions?: unknown; workspaceState?: { get?: unknown } };
+        if (contextOrExtensionUri && typeof contextOrExtensionUri === 'object') {
+            const maybeCtx = contextOrExtensionUri as PartialCtx;
+            if (Array.isArray(maybeCtx.subscriptions) && maybeCtx.workspaceState && typeof (maybeCtx.workspaceState as { get?: unknown }).get === 'function') {
+                this.context = contextOrExtensionUri as vscode.ExtensionContext;
+                this.extensionUri = extensionUriOrTreeProvider as vscode.Uri;
+                this.treeProvider = treeProviderOrFolderPath as CodebaseDigestTreeProvider;
+                this.folderPath = folderPathArg as string;
+            } else {
+                // Legacy calling shape fallback handled below
+                this.context = undefined;
+                this.extensionUri = contextOrExtensionUri as vscode.Uri;
+                this.treeProvider = extensionUriOrTreeProvider as CodebaseDigestTreeProvider;
+                this.folderPath = treeProviderOrFolderPath as string;
+            }
         } else {
             // Legacy calling shape: (extensionUri, treeProvider, folderPath)
             this.context = undefined;
@@ -48,17 +88,17 @@ export class CodebaseDigestPanel {
             this.panel.reveal(vscode.ViewColumn.One);
             return;
         }
-        // Ensure any previously scheduled interval is cleared before (re)creating
-        if (this.previewInterval) { clearInterval(this.previewInterval as any); this.previewInterval = undefined; }
+    // Ensure any previously scheduled interval is cleared before (re)creating
+        if (this.previewInterval) { try { clearInterval(this.previewInterval); } catch {} this.previewInterval = undefined; }
     this.panel = vscode.window.createWebviewPanel('codebaseDigestPanel', 'Code Ingest', vscode.ViewColumn.One, {
             enableScripts: true,
             localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, 'resources', 'webview'), this.extensionUri]
         });
     this.setHtml(this.panel.webview);
     // Send current configuration to webview immediately so settings UI is populated
-    try { this.postConfig(); } catch (e) { try { diagnostics.error('postConfig failed', String((e && ((e as any).stack || (e as any).message)) || e)); } catch {} }
+    try { this.postConfig(); } catch (e) { try { const em = e && typeof e === 'object' ? String(((e as Record<string, unknown>)['stack'] || (e as Record<string, unknown>)['message']) ?? e) : String(e); diagnostics.error('postConfig failed', em); } catch {} }
         // Wire message routing via shared helper so panel and view remain consistent
-    wireWebviewMessages(this.panel.webview, this.treeProvider, this.folderPath, async (changes: Record<string, any>) => {
+    wireWebviewMessages(this.panel.webview, this.treeProvider, this.folderPath, async (changes: Record<string, unknown>) => {
             await this.applyConfigChanges(changes);
     }, () => this.postPreviewState(), this.context);
         this.panel.onDidDispose(() => {
@@ -72,28 +112,38 @@ export class CodebaseDigestPanel {
     // Forward progress events to the webview
     const disposeProgress = onProgress(e => {
                 if (this.panel) {
-            try { this.panel.webview.postMessage({ type: 'progress', event: e }); } catch (e) { try { diagnostics.warn('postMessage progress failed', e); } catch {} }
+            try {
+                const rawOp = (e && typeof e === 'object') ? (e as Record<string, unknown>)['op'] : undefined;
+                const rawMode = (e && typeof e === 'object') ? (e as Record<string, unknown>)['mode'] : undefined;
+                const evt = { op: typeof rawOp === 'string' ? rawOp : undefined, mode: typeof rawMode === 'string' ? rawMode : undefined };
+                const payload: ProgressEventPayload = { type: 'progress', event: evt };
+                this.panel.webview.postMessage(payload);
+            } catch (err) { try { diagnostics.warn('postMessage progress failed', err); } catch {} }
         }
     });
     // Post an immediate preview delta when scans start or end so chips update promptly
-    const scanProgressDisp = onProgress((ev: any) => {
+    const scanProgressDisp = onProgress((ev: unknown) => {
                 try {
             // Only update preview chips when a scan completes (end) to avoid noisy updates on start
-                if (ev && ev.op === 'scan' && ev.mode === 'end') {
-                try { this.postPreviewDelta(); } catch (inner) { try { diagnostics.warn('postPreviewDelta failed', inner); } catch {} }
+                if (ev && typeof ev === 'object') {
+                const op = (ev as Record<string, unknown>)['op'];
+                const mode = (ev as Record<string, unknown>)['mode'];
+                if (op === 'scan' && mode === 'end') {
+                    try { this.postPreviewDelta(); } catch (inner) { try { diagnostics.warn('postPreviewDelta failed', inner); } catch {} }
+                }
             }
         } catch (ex) { try { diagnostics.error('scanProgress dispatch failed', ex); } catch {} }
     });
     // Send initial full state only if a scan has already populated data; otherwise wait for scan completion to avoid empty first-paint
     try {
-        const previewNow = this.treeProvider.getPreviewData();
+        const previewNow = this.treeProvider.getPreviewData && typeof this.treeProvider.getPreviewData === 'function' ? this.treeProvider.getPreviewData() : null;
         if (previewNow && typeof previewNow.totalFiles === 'number' && previewNow.totalFiles > 0) {
             try { this.postPreviewState(); } catch (e) { try { diagnostics.warn('postPreviewState failed', e); } catch {} }
         }
     } catch (e) { try { diagnostics.warn('getting previewNow failed', e); } catch {} }
     // Periodic heartbeat to refresh stats every 5s
     this.previewInterval = setInterval(() => this.postPreviewDelta(), 5000);
-    this.panel.onDidDispose(() => { try { if (this.previewInterval) { clearInterval(this.previewInterval as any); this.previewInterval = undefined; } } catch (e) { try { diagnostics.warn('clearing previewInterval failed', e); } catch {} } });
+    this.panel.onDidDispose(() => { try { if (this.previewInterval) { try { clearInterval(this.previewInterval as unknown as ReturnType<typeof setInterval>); } catch {} this.previewInterval = undefined; } } catch (e) { try { diagnostics.warn('clearing previewInterval failed', e); } catch {} } });
     this.panel.onDidDispose(() => { try { disposeProgress(); } catch (e) { try { diagnostics.warn('disposeProgress failed', e); } catch {} } });
     this.panel.onDidDispose(() => { try { scanProgressDisp(); } catch (e) { try { diagnostics.warn('scanProgressDisp failed', e); } catch {} } });
     }
@@ -105,10 +155,10 @@ export class CodebaseDigestPanel {
                     // Prefer explicitly flattened settings when present. Fall back to nested
                     // `thresholds` object, then finally to hard defaults. This avoids a stale
                     // thresholds object incorrectly overriding a direct setting.
-                    const thresholds = cfg.get('thresholds') as any || {};
-                    const rawMaxFiles = cfg.get('maxFiles') as any;
-                    const rawMaxTotalSizeBytes = cfg.get('maxTotalSizeBytes') as any;
-                    const rawTokenLimit = cfg.get('tokenLimit') as any;
+            const thresholds = cfg.get<Record<string, unknown> | undefined>('thresholds') || {};
+            const rawMaxFiles = cfg.get<number | undefined>('maxFiles');
+            const rawMaxTotalSizeBytes = cfg.get<number | undefined>('maxTotalSizeBytes');
+            const rawTokenLimit = cfg.get<number | undefined>('tokenLimit');
                     const maxFiles = (typeof rawMaxFiles === 'number') ? rawMaxFiles : (typeof thresholds.maxFiles === 'number' ? thresholds.maxFiles : thresholdsDefault.maxFiles);
                     const maxTotalSizeBytes = (typeof rawMaxTotalSizeBytes === 'number') ? rawMaxTotalSizeBytes : (typeof thresholds.maxTotalSizeBytes === 'number' ? thresholds.maxTotalSizeBytes : thresholdsDefault.maxTotalSizeBytes);
                     const tokenLimit = (typeof rawTokenLimit === 'number') ? rawTokenLimit : (typeof thresholds.tokenLimit === 'number' ? thresholds.tokenLimit : thresholdsDefault.tokenLimit);
@@ -164,23 +214,24 @@ export class CodebaseDigestPanel {
     private postPreviewState() {
         if (!this.panel) { return; }
         const preview = this.treeProvider.getPreviewData();
-    this.panel.webview.postMessage({ type: 'state', state: preview });
+    const statePayload: StatePayload = { type: 'state', state: preview };
+    this.panel.webview.postMessage(statePayload);
     }
 
     private postPreviewDelta() {
         if (!this.panel) { return; }
         const preview = this.treeProvider.getPreviewData();
-        const delta = {
-            selectedCount: preview.selectedCount,
-            totalFiles: preview.totalFiles,
-            selectedSize: preview.selectedSize,
-            tokenEstimate: preview.tokenEstimate,
-            contextLimit: preview.contextLimit,
-                // Send hierarchical tree and selected paths (webview will decide how to render compactly)
-                fileTree: preview.fileTree,
-                selectedPaths: Array.isArray(preview.selectedPaths) ? preview.selectedPaths : []
+        const delta: PreviewDeltaPayload['delta'] = {
+            selectedCount: typeof preview.selectedCount === 'number' ? preview.selectedCount : undefined,
+            totalFiles: typeof preview.totalFiles === 'number' ? preview.totalFiles : undefined,
+            selectedSize: typeof preview.selectedSize === 'number' ? preview.selectedSize : undefined,
+            tokenEstimate: typeof preview.tokenEstimate === 'number' ? preview.tokenEstimate : undefined,
+            contextLimit: typeof preview.contextLimit === 'number' ? preview.contextLimit : undefined,
+            fileTree: preview.fileTree,
+            selectedPaths: Array.isArray(preview.selectedPaths) ? (preview.selectedPaths as unknown[]).map((p: unknown) => String(p)) : []
         };
-        this.panel.webview.postMessage({ type: 'previewDelta', delta });
+        const payload: PreviewDeltaPayload = { type: 'previewDelta', delta };
+        this.panel.webview.postMessage(payload);
     }
     private setHtml(webview: vscode.Webview) {
     // Delegate to shared helper so panel and view rendering stay consistent
@@ -196,13 +247,13 @@ function debounce(fn: () => void, ms: number) {
     // webview-compiled code.
     let t: ReturnType<typeof setTimeout> | null = null;
     return () => {
-        if (t) { clearTimeout(t as any); }
-        t = setTimeout(() => { t = null; fn(); }, ms);
+        if (t) { try { clearTimeout(t as unknown as ReturnType<typeof setTimeout>); } catch {} }
+        t = setTimeout(() => { t = null; fn(); }, ms) as unknown as ReturnType<typeof setTimeout>;
     };
 }
 
 export function registerCodebasePanel(context: vscode.ExtensionContext, extensionUri: vscode.Uri, treeProvider: CodebaseDigestTreeProvider) {
-    const folderPath = treeProvider['workspaceRoot'] || '';
+    const folderPath = (treeProvider && typeof (treeProvider as unknown as Record<string, unknown>)['workspaceRoot'] === 'string') ? String((treeProvider as unknown as Record<string, unknown>)['workspaceRoot']) : '';
     const key = folderPath || String(context.storageUri || context.extensionUri);
     if (panels.has(key)) { return panels.get(key)!; }
     const panel = new CodebaseDigestPanel(context, extensionUri, treeProvider, folderPath);
@@ -212,7 +263,11 @@ export function registerCodebasePanel(context: vscode.ExtensionContext, extensio
 
 export function registerCodebaseView(context: vscode.ExtensionContext, extensionUri: vscode.Uri, treeProvider: CodebaseDigestTreeProvider) {
     // Diagnostic: log when registerCodebaseView is invoked
-    try { console.log('[codebase-digest] registerCodebaseView called for', treeProvider && (treeProvider as any).workspaceRoot); } catch (e) {}
+    try {
+        const tpRec = treeProvider as unknown as { workspaceRoot?: unknown };
+        const wp = tpRec && typeof tpRec.workspaceRoot === 'string' ? tpRec.workspaceRoot : undefined;
+        console.log('[codebase-digest] registerCodebaseView called for', wp);
+    } catch (e) {}
     // If a provider was already registered previously, dispose it so we can re-register with a new treeProvider.
     if (registeredDisposable) {
         try { registeredDisposable.dispose(); } catch (e) { /* ignore */ }
@@ -226,19 +281,19 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
             };
             // Render the same HTML used by the panel via shared helper
             setWebviewHtml(webviewView.webview, extensionUri);
-
-            // Post configuration eagerly so settings UI is populated on first open
+            // Narrow once for the whole resolver and post configuration eagerly so settings UI is populated on first open
+            const tpRec = treeProvider as unknown as { workspaceRoot?: unknown };
             try {
-                const folder = treeProvider['workspaceRoot'] || '';
+                const folder = typeof tpRec.workspaceRoot === 'string' ? String(tpRec.workspaceRoot) : '';
                 const cfg = vscode.workspace.getConfiguration('codebaseDigest', vscode.Uri.file(folder));
                 const thresholdsDefault = { maxFiles: 25000, maxTotalSizeBytes: 536870912, tokenLimit: 32000 };
-                const thresholds = cfg.get('thresholds') as any || {};
-                const rawMaxFiles = cfg.get('maxFiles') as any;
-                const rawMaxTotalSizeBytes = cfg.get('maxTotalSizeBytes') as any;
-                const rawTokenLimit = cfg.get('tokenLimit') as any;
-                const maxFiles = (typeof rawMaxFiles === 'number') ? rawMaxFiles : (typeof thresholds.maxFiles === 'number' ? thresholds.maxFiles : thresholdsDefault.maxFiles);
-                const maxTotalSizeBytes = (typeof rawMaxTotalSizeBytes === 'number') ? rawMaxTotalSizeBytes : (typeof thresholds.maxTotalSizeBytes === 'number' ? thresholds.maxTotalSizeBytes : thresholdsDefault.maxTotalSizeBytes);
-                const tokenLimit = (typeof rawTokenLimit === 'number') ? rawTokenLimit : (typeof thresholds.tokenLimit === 'number' ? thresholds.tokenLimit : thresholdsDefault.tokenLimit);
+                const thresholds = cfg.get<Record<string, unknown> | undefined>('thresholds') || {};
+                const rawMaxFiles = cfg.get<number | undefined>('maxFiles');
+                const rawMaxTotalSizeBytes = cfg.get<number | undefined>('maxTotalSizeBytes');
+                const rawTokenLimit = cfg.get<number | undefined>('tokenLimit');
+                const maxFiles = (typeof rawMaxFiles === 'number') ? rawMaxFiles : (typeof thresholds.maxFiles === 'number' ? (thresholds.maxFiles as number) : thresholdsDefault.maxFiles);
+                const maxTotalSizeBytes = (typeof rawMaxTotalSizeBytes === 'number') ? rawMaxTotalSizeBytes : (typeof thresholds.maxTotalSizeBytes === 'number' ? (thresholds.maxTotalSizeBytes as number) : thresholdsDefault.maxTotalSizeBytes);
+                const tokenLimit = (typeof rawTokenLimit === 'number') ? rawTokenLimit : (typeof thresholds.tokenLimit === 'number' ? (thresholds.tokenLimit as number) : thresholdsDefault.tokenLimit);
                 const payload = {
                     type: 'config',
                     folderPath: folder,
@@ -262,12 +317,12 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
             } catch (e) { /* ignore */ }
 
             // track active view so we can broadcast messages to it later (store advertised folderPath)
-            try { activeViews.set(webviewView, treeProvider['workspaceRoot'] || ''); } catch (e) {}
+                try { activeViews.set(webviewView, typeof tpRec.workspaceRoot === 'string' ? String(tpRec.workspaceRoot) : ''); } catch (e) {}
 
             // Use shared wiring helper for sidebar messages as well
-            wireWebviewMessages(webviewView.webview, treeProvider, treeProvider['workspaceRoot'] || '', async (changes: Record<string, any>) => {
+            wireWebviewMessages(webviewView.webview, treeProvider, typeof tpRec.workspaceRoot === 'string' ? String(tpRec.workspaceRoot) : '', async (changes: Record<string, any>) => {
                 // mirror panel behavior: persist config changes then push updated config
-                const folder = treeProvider['workspaceRoot'] || '';
+                const folder = typeof tpRec.workspaceRoot === 'string' ? String(tpRec.workspaceRoot) : '';
                 const cfg = vscode.workspace.getConfiguration('codebaseDigest', vscode.Uri.file(folder));
                 for (const [key, value] of Object.entries(changes)) {
                     try {
@@ -283,13 +338,13 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                     }
                 }
                 const thresholdsDefault = { maxFiles: 25000, maxTotalSizeBytes: 536870912, tokenLimit: 32000 };
-                const thresholds = cfg.get('thresholds') as any || {};
-                const rawMaxFiles = cfg.get('maxFiles') as any;
-                const rawMaxTotalSizeBytes = cfg.get('maxTotalSizeBytes') as any;
-                const rawTokenLimit = cfg.get('tokenLimit') as any;
-                const maxFiles = (typeof rawMaxFiles === 'number') ? rawMaxFiles : (typeof thresholds.maxFiles === 'number' ? thresholds.maxFiles : thresholdsDefault.maxFiles);
-                const maxTotalSizeBytes = (typeof rawMaxTotalSizeBytes === 'number') ? rawMaxTotalSizeBytes : (typeof thresholds.maxTotalSizeBytes === 'number' ? thresholds.maxTotalSizeBytes : thresholdsDefault.maxTotalSizeBytes);
-                const tokenLimit = (typeof rawTokenLimit === 'number') ? rawTokenLimit : (typeof thresholds.tokenLimit === 'number' ? thresholds.tokenLimit : thresholdsDefault.tokenLimit);
+                const thresholds = cfg.get<Record<string, unknown> | undefined>('thresholds') || {};
+                const rawMaxFiles = cfg.get<number | undefined>('maxFiles');
+                const rawMaxTotalSizeBytes = cfg.get<number | undefined>('maxTotalSizeBytes');
+                const rawTokenLimit = cfg.get<number | undefined>('tokenLimit');
+                const maxFiles = (typeof rawMaxFiles === 'number') ? rawMaxFiles : (typeof thresholds.maxFiles === 'number' ? (thresholds.maxFiles as number) : thresholdsDefault.maxFiles);
+                const maxTotalSizeBytes = (typeof rawMaxTotalSizeBytes === 'number') ? rawMaxTotalSizeBytes : (typeof thresholds.maxTotalSizeBytes === 'number' ? (thresholds.maxTotalSizeBytes as number) : thresholdsDefault.maxTotalSizeBytes);
+                const tokenLimit = (typeof rawTokenLimit === 'number') ? rawTokenLimit : (typeof thresholds.tokenLimit === 'number' ? (thresholds.tokenLimit as number) : thresholdsDefault.tokenLimit);
                 const updated = {
                     respectGitignore: cfg.get('respectGitignore', cfg.get('gitignore', true)),
                     presets: cfg.get('presets', []),
@@ -308,20 +363,29 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                 webviewView.webview.postMessage({ type: 'config', folderPath: folder, settings: updated });
             }, () => {
                 // on getState, send current preview
-                const preview = treeProvider.getPreviewData();
-                webviewView.webview.postMessage({ type: 'state', state: preview });
+                try {
+                    const preview = treeProvider.getPreviewData();
+                    const statePayload: StatePayload = { type: 'state', state: preview };
+                    webviewView.webview.postMessage(statePayload);
+                } catch (e) { /* ignore */ }
             }, context);
 
             // Forward progress events to the sidebar webview with light throttling to avoid UI jank
             ((): void => {
                 let lastSent = 0;
-                let pending: any = null as any;
-                let lastEvent: any = null;
+                let pending: ReturnType<typeof setTimeout> | null = null;
+                let lastEvent: unknown = null;
                 const ms = 200; // minimum interval between posts
-                const send = (ev: any) => {
-                    try { webviewView.webview.postMessage({ type: 'progress', event: ev }); } catch (e) { try { console.warn('codebasePanel: post progress failed', e); } catch {} }
+                const send = (ev: unknown) => {
+                    try {
+                        const rawOp = (ev && typeof ev === 'object') ? (ev as Record<string, unknown>)['op'] : undefined;
+                        const rawMode = (ev && typeof ev === 'object') ? (ev as Record<string, unknown>)['mode'] : undefined;
+                        const evt = { op: typeof rawOp === 'string' ? rawOp : undefined, mode: typeof rawMode === 'string' ? rawMode : undefined };
+                        const payload: ProgressEventPayload = { type: 'progress', event: evt };
+                        webviewView.webview.postMessage(payload);
+                    } catch (e) { try { console.warn('codebasePanel: post progress failed', e); } catch {} }
                 };
-                const disposeProgress = onProgress((ev) => {
+                const disposeProgress = onProgress((ev: unknown) => {
                     const now = Date.now();
                     if (now - lastSent >= ms) {
                         lastSent = now;
@@ -346,22 +410,43 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
             })();
 
             // send an immediate preview delta so chips populate quickly on reveal
-            try {
-                const preview = treeProvider.getPreviewData();
-                const delta = { selectedCount: preview.selectedCount, totalFiles: preview.totalFiles, selectedSize: preview.selectedSize, tokenEstimate: preview.tokenEstimate, contextLimit: preview.contextLimit, fileTree: preview.fileTree, selectedPaths: Array.isArray(preview.selectedPaths) ? preview.selectedPaths : [] };
-                webviewView.webview.postMessage({ type: 'previewDelta', delta });
-            } catch (e) { try { console.warn('codebasePanel: post previewDelta failed', e); } catch {} }
+                try {
+                    const preview = treeProvider.getPreviewData();
+                    const delta: PreviewDeltaPayload['delta'] = {
+                        selectedCount: typeof preview.selectedCount === 'number' ? preview.selectedCount : undefined,
+                        totalFiles: typeof preview.totalFiles === 'number' ? preview.totalFiles : undefined,
+                        selectedSize: typeof preview.selectedSize === 'number' ? preview.selectedSize : undefined,
+                        tokenEstimate: typeof preview.tokenEstimate === 'number' ? preview.tokenEstimate : undefined,
+                        contextLimit: typeof preview.contextLimit === 'number' ? preview.contextLimit : undefined,
+                        fileTree: preview.fileTree,
+                        selectedPaths: Array.isArray(preview.selectedPaths) ? (preview.selectedPaths as unknown[]).map((p: unknown) => String(p)) : []
+                    };
+                    const payload: PreviewDeltaPayload = { type: 'previewDelta', delta };
+                    webviewView.webview.postMessage(payload);
+                } catch (e) { try { console.warn('codebasePanel: post previewDelta failed', e); } catch {} }
 
             // Hook into treeProvider progress to post preview deltas when scans start/end
-            const scanProgressDisp = onProgress((ev: any) => {
+            const scanProgressDisp = onProgress((ev: unknown) => {
                 try {
-                    // Post a preview delta when a scan finishes so chips update to reflect final counts
-                    if (ev && ev.op === 'scan' && ev.mode === 'end') {
-                        try {
-                            const preview = treeProvider.getPreviewData();
-                            const delta = { selectedCount: preview.selectedCount, totalFiles: preview.totalFiles, selectedSize: preview.selectedSize, tokenEstimate: preview.tokenEstimate, contextLimit: preview.contextLimit, fileTree: preview.fileTree, selectedPaths: Array.isArray(preview.selectedPaths) ? preview.selectedPaths : [] };
-                            webviewView.webview.postMessage({ type: 'previewDelta', delta });
-                        } catch (inner) { /* ignore */ }
+                    if (ev && typeof ev === 'object') {
+                        const op = (ev as Record<string, unknown>)['op'];
+                        const mode = (ev as Record<string, unknown>)['mode'];
+                        if (op === 'scan' && mode === 'end') {
+                            try {
+                                const preview = treeProvider.getPreviewData();
+                                const delta: PreviewDeltaPayload['delta'] = {
+                                    selectedCount: typeof preview.selectedCount === 'number' ? preview.selectedCount : undefined,
+                                    totalFiles: typeof preview.totalFiles === 'number' ? preview.totalFiles : undefined,
+                                    selectedSize: typeof preview.selectedSize === 'number' ? preview.selectedSize : undefined,
+                                    tokenEstimate: typeof preview.tokenEstimate === 'number' ? preview.tokenEstimate : undefined,
+                                    contextLimit: typeof preview.contextLimit === 'number' ? preview.contextLimit : undefined,
+                                    fileTree: preview.fileTree,
+                                    selectedPaths: Array.isArray(preview.selectedPaths) ? (preview.selectedPaths as unknown[]).map((p: unknown) => String(p)) : []
+                                };
+                                const payload: PreviewDeltaPayload = { type: 'previewDelta', delta };
+                                webviewView.webview.postMessage(payload);
+                            } catch (inner) { /* ignore */ }
+                        }
                     }
                 } catch (ex) { /* ignore */ }
             });
@@ -370,12 +455,21 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
             // is re-resolved/revealed to avoid duplicate intervals.
             let sidebarInterval: ReturnType<typeof setInterval> | undefined;
             const startSidebarInterval = () => {
-                if (sidebarInterval) { try { clearInterval(sidebarInterval as any); } catch {} sidebarInterval = undefined; }
+                if (sidebarInterval) { try { clearInterval(sidebarInterval as unknown as ReturnType<typeof setInterval>); } catch {} sidebarInterval = undefined; }
                 sidebarInterval = setInterval(() => {
                     try {
                         const preview = treeProvider.getPreviewData();
-                        const delta = { selectedCount: preview.selectedCount, totalFiles: preview.totalFiles, selectedSize: preview.selectedSize, tokenEstimate: preview.tokenEstimate, contextLimit: preview.contextLimit, fileTree: preview.fileTree, selectedPaths: Array.isArray(preview.selectedPaths) ? preview.selectedPaths : [] };
-                        webviewView.webview.postMessage({ type: 'previewDelta', delta });
+                        const delta: PreviewDeltaPayload['delta'] = {
+                            selectedCount: typeof preview.selectedCount === 'number' ? preview.selectedCount : undefined,
+                            totalFiles: typeof preview.totalFiles === 'number' ? preview.totalFiles : undefined,
+                            selectedSize: typeof preview.selectedSize === 'number' ? preview.selectedSize : undefined,
+                            tokenEstimate: typeof preview.tokenEstimate === 'number' ? preview.tokenEstimate : undefined,
+                            contextLimit: typeof preview.contextLimit === 'number' ? preview.contextLimit : undefined,
+                            fileTree: preview.fileTree,
+                            selectedPaths: Array.isArray(preview.selectedPaths) ? (preview.selectedPaths as unknown[]).map((p: unknown) => String(p)) : []
+                        };
+                        const payload: PreviewDeltaPayload = { type: 'previewDelta', delta };
+                        webviewView.webview.postMessage(payload);
                     } catch (e) { /* ignore */ }
                 }, 5000);
             };
@@ -383,7 +477,7 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
             // is disposed very quickly after being resolved. This prevents the
             // interval from continuing when the dispose handler might not yet be
             // registered due to ordering.
-            webviewView.onDidDispose(() => { try { if (sidebarInterval) { clearInterval(sidebarInterval as any); sidebarInterval = undefined; } } catch (e) {} });
+            webviewView.onDidDispose(() => { try { if (sidebarInterval) { try { clearInterval(sidebarInterval as unknown as ReturnType<typeof setInterval>); } catch {} sidebarInterval = undefined; } } catch (e) {} });
             startSidebarInterval();
             webviewView.onDidDispose(() => { try { scanProgressDisp(); } catch (e) {} });
             webviewView.onDidDispose(() => { try { activeViews.delete(webviewView); } catch (e) {} });
@@ -416,13 +510,21 @@ export function broadcastGenerationResult(result: any, folderPath?: string) {
     }
 
     // Post to panels matching inferred folderPath (or all if none/in single-root workspace)
-    for (const [key, panel] of panels.entries()) {
-        try {
-            if (!inferred || key === inferred || (panel as any).folderPath === inferred) {
-                if ((panel as any).panel) { (panel as any).panel.webview.postMessage({ type: 'generationResult', result }); }
-            }
-        } catch (e) { /* ignore */ }
-    }
+        for (const [key, panel] of panels.entries()) {
+            try {
+                type PanelPub = { folderPath?: string; panel?: { webview?: { postMessage?: (p: unknown) => void } } };
+                const pub = panel as unknown as PanelPub;
+                const panelFolder = typeof pub.folderPath === 'string' ? pub.folderPath : key;
+                if (!inferred || panelFolder === inferred || key === inferred) {
+                    try {
+                        const p = pub.panel;
+                        if (p && p.webview && typeof p.webview.postMessage === 'function') {
+                            p.webview.postMessage({ type: 'generationResult', result });
+                        }
+                    } catch (e) { /* ignore */ }
+                }
+            } catch (e) { /* ignore */ }
+        }
     // Post to active sidebar views (filter by inferred when provided)
     for (const [vw, vwFolder] of activeViews.entries()) {
         try {
@@ -435,16 +537,21 @@ export function broadcastGenerationResult(result: any, folderPath?: string) {
 
 // Broadcast a previewDelta to open panels and sidebar views so the UI updates chips
 export function broadcastPreviewDelta(delta: any, folderPath?: string) {
-    try {
-        // Post to panels matching folderPath (or all if not specified)
-        for (const [key, panel] of panels.entries()) {
-            try {
-                if (!folderPath || key === folderPath || (panel as any).folderPath === folderPath) {
-                    if ((panel as any).panel) { (panel as any).panel.webview.postMessage({ type: 'previewDelta', delta }); }
-                }
-            } catch (e) { /* ignore */ }
-        }
-    } catch (e) { /* ignore */ }
+        try {
+            // Post to panels matching folderPath (or all if not specified)
+            for (const [key, panel] of panels.entries()) {
+                try {
+                    const pub = panel as unknown as { folderPath?: string; panel?: { webview?: { postMessage?: (p: unknown) => void } } };
+                    const panelFolder = typeof pub.folderPath === 'string' ? pub.folderPath : key;
+                    if (!folderPath || key === folderPath || panelFolder === folderPath) {
+                        const p = pub.panel;
+                        if (p && p.webview && typeof p.webview.postMessage === 'function') {
+                            p.webview.postMessage({ type: 'previewDelta', delta });
+                        }
+                    }
+                } catch (e) { /* ignore */ }
+            }
+        } catch (e) { /* ignore */ }
     try {
         // Post to active sidebar views, filtered by folderPath when provided
         for (const [vw, vwFolder] of activeViews.entries()) {

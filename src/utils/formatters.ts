@@ -134,12 +134,37 @@ export class Formatters {
      * Builds a file header string for output using config template and token substitution.
      */
     buildFileHeader(node: FileNode, config: DigestConfig): string {
-        const FSUtils = require('./fsUtils').FSUtils;
+        // Load FSUtils if available; prefer a safe runtime check instead of `as any`.
+        let formatMtimeFn: (d: Date) => string = Formatters.formatMtime;
+        try {
+            const maybe = require('./fsUtils');
+            if (maybe && typeof maybe === 'object') {
+                const rec = maybe as Record<string, unknown>;
+                const FSUtilsCtor = rec['FSUtils'];
+                if (FSUtilsCtor && typeof (FSUtilsCtor as Record<string, unknown>)['formatMtime'] === 'function') {
+                    // use the FSUtils.formatMtime implementation if it exists
+                    const boundFn = (FSUtilsCtor as Record<string, unknown>)['formatMtime'] as (d: Date) => string;
+                    formatMtimeFn = boundFn.bind(FSUtilsCtor as unknown);
+                }
+            }
+        } catch {}
+
         const template = config.outputHeaderTemplate || '==== <relPath> (<size>, <modified>) ====';
         let header = template
             .replace(/<relPath>/g, node.relPath)
-            .replace(/<size>/g, node.size ? FSUtils.humanFileSize(node.size) : '')
-            .replace(/<modified>/g, node.mtime ? (typeof (FSUtils as any).formatMtime === 'function' ? (FSUtils as any).formatMtime(node.mtime) : Formatters.formatMtime(node.mtime)) : '');
+            .replace(/<size>/g, node.size ? ((): string => {
+                try {
+                    const fsu = require('./fsUtils');
+                    if (fsu && (typeof fsu.FSUtils === 'object' || typeof fsu.FSUtils === 'function') && fsu.FSUtils) {
+                        const fsUtilsRec = fsu.FSUtils as Record<string, unknown>;
+                        if (typeof fsUtilsRec.humanFileSize === 'function') {
+                            return (fsUtilsRec.humanFileSize as (n: number) => string)(node.size);
+                        }
+                    }
+                } catch (e) {}
+                return '';
+            })() : '')
+            .replace(/<modified>/g, node.mtime ? formatMtimeFn(node.mtime) : '');
         if (node.type === 'symlink') {
             header += ' [symlink]';
         }

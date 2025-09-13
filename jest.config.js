@@ -1,5 +1,8 @@
 module.exports = {
-  preset: 'ts-jest',
+  // Use ts-jest transformer and declare its per-transform config (preferred over deprecated globals)
+  transform: {
+    '^.+\\.tsx?$': ['ts-jest', { tsconfig: 'tsconfig.json' }]
+  },
   testEnvironment: 'node',
   testMatch: ['**/src/test/**/*.test.ts'],
   // Ignore long-running integration tests during regular unit runs
@@ -7,10 +10,5 @@ module.exports = {
   // Map the `vscode` import to the test-local lightweight mock so tests don't import the real vscode API
   moduleNameMapper: {
     '^vscode$': '<rootDir>/src/test/__mocks__/vscode.js'
-  },
-  globals: {
-    'ts-jest': {
-      tsconfig: 'tsconfig.json'
-    }
   }
 };

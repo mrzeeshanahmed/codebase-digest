@@ -157,7 +157,17 @@ export class ContentProcessor {
         const entries = await FSUtils.safeStat(rootDir) ? await fsp.readdir(rootDir, { withFileTypes: true }) : [];
         const root = initialRoot || rootDir;
         for (const entry of entries) {
-            const absPath = path.join(rootDir, entry.name);
+            // Resolve candidate absolute path and ensure it stays within the initial root
+            const candidate = path.resolve(rootDir, entry.name);
+            const resolvedRoot = path.resolve(root);
+            // If the candidate resolves outside the scanned root, skip it to
+            // avoid path traversal attacks or symlink escape.
+            if (!candidate.startsWith(resolvedRoot + path.sep) && candidate !== resolvedRoot) {
+                // best-effort debug; do not throw for traversal to avoid breaking scans
+                console.debug(`[ContentProcessor.scanDirectory] Skipping path outside root: ${candidate}`);
+                continue;
+            }
+            const absPath = candidate;
             if (entry.isDirectory()) {
                 if (depth < (cfg.maxDirectoryDepth ?? 20)) {
                     nodes.push(...await ContentProcessor.scanDirectory(absPath, cfg, depth + 1, root));

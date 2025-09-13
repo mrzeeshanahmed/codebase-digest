@@ -3,8 +3,8 @@ import { FileScanner } from '../services/fileScanner';
 import { buildFileTree } from './treeHelpers';
 import { buildTreeLines } from '../format/treeBuilder';
 
-export function computePreviewState(rootNodes: FileNode[], selectedFiles: FileNode[], fileScanner: FileScanner, config: any) {
-    const maxLines = config.maxSelectedTreeLines || 50;
+export function computePreviewState(rootNodes: FileNode[], selectedFiles: FileNode[], fileScanner: FileScanner, config?: Record<string, unknown>) {
+    const maxLines = (config && typeof config['maxSelectedTreeLines'] === 'number') ? (config['maxSelectedTreeLines'] as number) : 50;
     // Use the single canonical tree builder for both minimal (selected-only)
     // and full tree modes so truncation and CRLF normalization are consistent.
     const minimalSelectedTreeLines = selectedFiles.length > 0
@@ -20,7 +20,7 @@ export function computePreviewState(rootNodes: FileNode[], selectedFiles: FileNo
     // - Prefer using file.size as proxy: ceil(size / divisor)
     // - If size missing, fallback to relPath length / divisor
     // This avoids heavy I/O while producing meaningful counts for the UI.
-    const model = (config && config.tokenModel) || 'chars-approx';
+    const model = (config && typeof config['tokenModel'] === 'string') ? String(config['tokenModel']) : 'chars-approx';
     const divisorMap: Record<string, number> = {
         'chars-approx': 4,
         'gpt-4o': 4,
@@ -31,7 +31,8 @@ export function computePreviewState(rootNodes: FileNode[], selectedFiles: FileNo
         // keep tiktoken default conservative; adapters may provide their own tokenizer
         'tiktoken': 4
     };
-    const divisorFromOverrides = config && (config.tokenDivisorOverrides || (config.tokenDivisorOverrides === 0 ? 0 : undefined)) && (config.tokenDivisorOverrides[model] as number);
+    const overrides = (config && typeof config['tokenDivisorOverrides'] === 'object' && config['tokenDivisorOverrides'] !== null) ? config['tokenDivisorOverrides'] as Record<string, unknown> : undefined;
+    const divisorFromOverrides = overrides && typeof overrides[model] === 'number' ? (overrides[model] as number) : undefined;
     const divisor = (typeof divisorFromOverrides === 'number' && divisorFromOverrides > 0) ? divisorFromOverrides : (divisorMap[model] || 4);
     let tokenEstimate = 0;
     if (selectedFiles.length === 0) {
@@ -57,8 +58,8 @@ export function computePreviewState(rootNodes: FileNode[], selectedFiles: FileNo
         }
     }
     const warnings = fileScanner?.lastStats?.warnings || [];
-    const presetNames = config.filterPresets || [];
-    const contextLimit = config.contextLimit || config.tokenLimit || 0;
+    const presetNames = config && Array.isArray(config['filterPresets']) ? (config['filterPresets'] as unknown[]).map(p => String(p)) : [];
+    const contextLimit = (config && typeof config['contextLimit'] === 'number') ? (config['contextLimit'] as number) : ((config && typeof config['tokenLimit'] === 'number') ? (config['tokenLimit'] as number) : 0);
 
     // totalFiles fallback count
     let totalFiles = fileScanner?.lastStats?.totalFiles;
@@ -100,6 +101,10 @@ export function computePreviewState(rootNodes: FileNode[], selectedFiles: FileNo
         minimalSelectedTreeLines,
     warnings,
     // Extract virtual groups summary if present at top-level
-    virtualGroups: rootNodes.filter(r => (r as any).virtualType === 'virtualGroup').map(g => ({ name: g.name, count: (g as any).childCount || 0, totalSize: (g as any).totalSize || 0 }))
+    virtualGroups: rootNodes
+        .filter(r => typeof r === 'object' && r !== null)
+        .map(r => r as unknown as Record<string, unknown>)
+        .filter(rr => typeof rr['virtualType'] === 'string' && rr['virtualType'] === 'virtualGroup')
+        .map(rr => ({ name: typeof rr['name'] === 'string' ? rr['name'] as string : '', count: typeof rr['childCount'] === 'number' ? rr['childCount'] as number : 0, totalSize: typeof rr['totalSize'] === 'number' ? rr['totalSize'] as number : 0 }))
     };
 }

@@ -21,6 +21,8 @@ export class Metrics {
     counters: MetricsCounters;
     timers: MetricsTimers;
     private timerStarts: Partial<Record<keyof MetricsTimers, number>> = {};
+    // Static throttle state shared across instances
+    private static _lastWarnTime: number = 0;
 
     constructor(enabled: boolean) {
         this.enabled = enabled;
@@ -84,15 +86,14 @@ export class Metrics {
         const sampleRate = 10; // 1-in-10 by default
         const minIntervalMs = 60 * 1000; // at most once per minute
         // Use static-ish storage on the class so all instances share the same throttle
-        (Metrics as any)._lastWarnTime = (Metrics as any)._lastWarnTime || 0;
-        const last = (Metrics as any)._lastWarnTime as number;
+    const last = Metrics._lastWarnTime || 0;
         const samplePass = Math.random() < 1 / sampleRate;
         const timePass = now - last > minIntervalMs;
 
         if (internalErrors && typeof internalErrors.showUserWarning === 'function' && (samplePass || timePass)) {
             try {
                 internalErrors.showUserWarning('Performance metrics logged.', details);
-                (Metrics as any)._lastWarnTime = now;
+                Metrics._lastWarnTime = now;
             } catch (e) {
                 try { console.debug(details); } catch (_) { /* swallow */ }
             }

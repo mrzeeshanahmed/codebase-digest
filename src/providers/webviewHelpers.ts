@@ -12,6 +12,17 @@ function escapeHtml(s: string): string {
         .replace(/'/g, '&#39;');
 }
 
+// Lightweight typed shape for messages we accept from the webview. Additional
+// properties are permitted but treated as untrusted (unknown) until validated.
+export interface WebviewMessage {
+    type: string;
+    [key: string]: unknown;
+}
+
+export function isWebviewMessage(obj: unknown): obj is WebviewMessage {
+    return !!obj && typeof obj === 'object' && typeof (obj as Record<string, unknown>)['type'] === 'string';
+}
+
 /**
  * Set HTML for a webview by rewriting resource URIs and injecting a strict CSP.
  */
@@ -266,7 +277,16 @@ export function setWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri
 }
 
 // Shared wiring for webview message routing to avoid duplication between panel and sidebar view
-export function wireWebviewMessages(webview: vscode.Webview, treeProvider: any, folderPath: string, onConfigSet: (changes: Record<string, any>) => Promise<void>, onGetState?: () => void, context?: vscode.ExtensionContext) {
+// Minimal interface describing the subset of treeProvider we rely on here.
+// Keep it intentionally small to avoid coupling to implementation details.
+export interface TreeProviderLike {
+    refresh?: () => void;
+    getPreviewData?: () => { totalFiles?: number } | null;
+    setSelectionByRelPaths?: (paths: string[]) => void;
+    workspaceRoot?: string;
+}
+
+export function wireWebviewMessages(webview: vscode.Webview, treeProvider: unknown, folderPath: string, onConfigSet: (changes: Record<string, unknown>) => Promise<void>, onGetState?: () => void, context?: vscode.ExtensionContext) {
     // Restore any persisted state for this workspace folder into the webview
     try {
         if (context) {
@@ -288,13 +308,14 @@ export function wireWebviewMessages(webview: vscode.Webview, treeProvider: any, 
         // Wrap the process call so both synchronous errors and promise rejections
         // are caught. This ensures message types like 'configRequest' are always
         // routed and won't cause an unhandled rejection to escape the host.
-        const disp = webview.onDidReceiveMessage((msg: any) => {
+        const disp = webview.onDidReceiveMessage((msg: unknown) => {
             try {
+                if (!isWebviewMessage(msg)) { return; }
                 const res = processWebviewMessage(msg, webview, treeProvider, folderPath, onConfigSet, onGetState, context);
                 // If the handler returns a promise, attach a rejection handler to
                 // avoid unhandled promise rejections bubbling out of the event loop.
-                if (res && typeof (res as any).catch === 'function') {
-                    (res as any).catch((err: any) => {
+                if (res && typeof (res as Promise<unknown>).catch === 'function') {
+                    (res as Promise<unknown>).catch((err: unknown) => {
                         try { console.warn('webviewHelpers: processWebviewMessage rejected', stringifyError(err)); } catch {};
                     });
                 }
@@ -303,8 +324,13 @@ export function wireWebviewMessages(webview: vscode.Webview, treeProvider: any, 
             }
         });
         // If a context is provided, attach the disposable so VS Code will dispose it on deactivation.
-        if (context && Array.isArray((context as any).subscriptions)) {
-            try { (context as any).subscriptions.push(disp); } catch (e) { /* ignore push errors */ }
+        if (context) {
+            try {
+                const ctxRec = context as unknown as { subscriptions?: unknown };
+                if (Array.isArray(ctxRec.subscriptions)) {
+                    try { Array.prototype.push.call(ctxRec.subscriptions, disp); } catch (e) { /* ignore push errors */ }
+                }
+            } catch (e) { /* ignore */ }
         }
     } catch (e) {
         // Best-effort: if registering the listener fails, swallow to avoid crashing the extension
@@ -320,7 +346,7 @@ function stringifyError(e: any): string {
     } catch (_) { try { return String(e); } catch { return '[unserializable error]'; } }
 }
 
-export async function processWebviewMessage(msg: any, webview: vscode.Webview, treeProvider: any, folderPath: string, onConfigSet: (changes: Record<string, any>) => Promise<void>, onGetState?: () => void, context?: vscode.ExtensionContext) {
+export async function processWebviewMessage(msg: WebviewMessage, webview: vscode.Webview, treeProvider: unknown, folderPath: string, onConfigSet: (changes: Record<string, unknown>) => Promise<void>, onGetState?: () => void, context?: vscode.ExtensionContext) {
     // Basic validation: ensure msg is an object
     if (!msg || typeof msg !== 'object') { return; }
     // Whitelist top-level message types we handle to avoid accidental/hostile payloads
@@ -343,7 +369,7 @@ export async function processWebviewMessage(msg: any, webview: vscode.Webview, t
         const cfg = vscode.workspace.getConfiguration('codebaseDigest', vscode.Uri.file(folder));
         const thresholdsDefault = { maxFiles: 25000, maxTotalSizeBytes: 536870912, tokenLimit: 32000 };
         // Provide both legacy and normalized keys to the webview for backwards compatibility.
-        const thresholds = cfg.get('thresholds', thresholdsDefault) as any || {};
+    const thresholds = cfg.get<Record<string, unknown>>('thresholds', thresholdsDefault) || {};
         const maxFiles = cfg.get('maxFiles', thresholds.maxFiles || thresholdsDefault.maxFiles) as number;
         const maxTotalSizeBytes = cfg.get('maxTotalSizeBytes', thresholds.maxTotalSizeBytes || thresholdsDefault.maxTotalSizeBytes) as number;
         const tokenLimit = cfg.get('tokenLimit', thresholds.tokenLimit || thresholdsDefault.tokenLimit) as number;
@@ -375,19 +401,24 @@ export async function processWebviewMessage(msg: any, webview: vscode.Webview, t
     if (msg.type === 'config' && msg.action === 'set' && msg.changes) {
         // Sanitize incoming changes: only allow known keys and simple scalar types
     const safeKeys = ['respectGitignore','outputFormat','tokenModel','binaryFilePolicy','maxFiles','maxTotalSizeBytes','tokenLimit','presets','showRedacted','redactionPatterns','redactionPlaceholder','filterPresets','contextLimit'];
-        const safeChanges: Record<string, any> = {};
+        const safeChanges: Record<string, unknown> = {};
             try {
-                for (const k of Object.keys(msg.changes || {})) {
-                if (!safeKeys.includes(k)) { continue; }
-                const v = msg.changes[k];
-                // Basic type checks
-                if (v === null || v === undefined) { safeChanges[k] = v; continue; }
-                if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') { safeChanges[k] = v; }
-                else if (Array.isArray(v)) { safeChanges[k] = v.slice(0, 100).map(x => (typeof x === 'string' ? x : String(x))); }
-                // ignore objects and functions
-            }
-            // delegate persistence to caller with sanitized payload
-            (async () => { try { await onConfigSet(safeChanges); } catch (e) { try { console.warn('webviewHelpers: onConfigSet failed', stringifyError(e)); } catch {} } })();
+                // Coerce to unknown and validate per-key rather than using unsafe casts
+                const changesRaw = msg.changes as unknown;
+                if (changesRaw && typeof changesRaw === 'object') {
+                    const changes = changesRaw as Record<string, unknown>;
+                    for (const k of Object.keys(changes)) {
+                        if (!safeKeys.includes(k)) { continue; }
+                        const v = changes[k];
+                        // Basic type checks
+                        if (v === null || v === undefined) { safeChanges[k] = v; continue; }
+                        if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') { safeChanges[k] = v; }
+                        else if (Array.isArray(v)) { safeChanges[k] = v.slice(0, 100).map(x => (typeof x === 'string' ? x : String(x))); }
+                        // ignore objects and functions
+                    }
+                }
+                // delegate persistence to caller with sanitized payload
+                (async () => { try { await onConfigSet(safeChanges); } catch (e) { try { console.warn('webviewHelpers: onConfigSet failed', stringifyError(e)); } catch {} } })();
         } catch (e) { /* swallow malformed changes */ }
         return;
     }
@@ -401,35 +432,57 @@ export async function processWebviewMessage(msg: any, webview: vscode.Webview, t
             generateDigest: 'codebaseDigest.generateDigest',
             tokenCount: 'codebaseDigest.estimateTokens'
         };
-        const targetFolder = (msg && (msg.folderPath || msg.folder)) || folderPath || treeProvider['workspaceRoot'] || '';
+    const folderFromMsg = (typeof (msg.folderPath) === 'string') ? msg.folderPath : (typeof (msg.folder) === 'string' ? msg.folder : undefined);
+    // Narrow the unknown treeProvider to the minimal TreeProviderLike we can rely on.
+    const tp: TreeProviderLike | undefined = (treeProvider && typeof treeProvider === 'object') ? (treeProvider as TreeProviderLike) : undefined;
+    const targetFolder = folderFromMsg || folderPath || (tp && typeof tp.workspaceRoot === 'string' ? tp.workspaceRoot : '') || '';
 
-        if (msg.actionType === 'pauseScan') {
-            vscode.commands.executeCommand('codebaseDigest.pauseScan', targetFolder);
+    const actionType = typeof msg.actionType === 'string' ? msg.actionType : undefined;
+    if (actionType === 'pauseScan') {
+            try {
+                const { safeExecuteCommand } = require('../utils/safeExecuteCommand');
+                await safeExecuteCommand('codebaseDigest.pauseScan', targetFolder);
+            } catch (err) {
+                try { webview.postMessage({ type: 'diagnostic', level: 'error', message: `pauseScan failed: ${stringifyError(err)}` }); } catch (e) { try { console.warn('webviewHelpers: post diagnostic failed', stringifyError(e)); } catch {} }
+                try { vscode.window.showErrorMessage(`pauseScan failed: ${stringifyError(err)}`); } catch (e) { /* swallow */ }
+            }
             return;
         }
         // Apply a named preset (e.g., Code/Docs/Tests) persisted per-workspace
-        if (msg.actionType === 'applyPreset' && typeof msg.preset === 'string') {
+    if (actionType === 'applyPreset' && typeof msg.preset === 'string') {
             const allowed = ['default', 'codeOnly', 'docsOnly', 'testsOnly'];
             const preset = msg.preset;
             if (!allowed.includes(preset)) { return; }
             try {
                 const cfg = vscode.workspace.getConfiguration('codebaseDigest', vscode.Uri.file(targetFolder || ''));
                 await cfg.update('filterPresets', [preset], vscode.ConfigurationTarget.Workspace);
-                try { if (treeProvider && typeof treeProvider.refresh === 'function') { treeProvider.refresh(); } } catch (e) { try { console.warn('webviewHelpers: treeProvider.refresh failed', stringifyError(e)); } catch {} }
+                try { if (tp && typeof tp.refresh === 'function') { tp.refresh(); } } catch (e) { try { console.warn('webviewHelpers: treeProvider.refresh failed', stringifyError(e)); } catch {} }
                 try { webview.postMessage({ type: 'config', folderPath: targetFolder, settings: { filterPresets: cfg.get('filterPresets', []) } }); } catch (e) { try { console.warn('webviewHelpers: post config failed', stringifyError(e)); } catch {} }
                 return;
             } catch (err) {
                 // fallback to command if direct persistence fails
-                try { await vscode.commands.executeCommand('codebaseDigest.applyPreset', targetFolder, preset); } catch (e) { try { console.warn('webviewHelpers: applyPreset executeCommand failed', stringifyError(e)); } catch {} }
+                try {
+                    const { safeExecuteCommand } = require('../utils/safeExecuteCommand');
+                    await safeExecuteCommand('codebaseDigest.applyPreset', targetFolder, preset);
+                } catch (e) {
+                    try { webview.postMessage({ type: 'diagnostic', level: 'error', message: `applyPreset failed: ${stringifyError(e)}` }); } catch (ee) { try { console.warn('webviewHelpers: post diagnostic failed', stringifyError(ee)); } catch {} }
+                    try { console.warn('webviewHelpers: applyPreset executeCommand failed', stringifyError(e)); } catch {}
+                }
                 return;
             }
         }
-        if (msg.actionType === 'resumeScan') {
-            vscode.commands.executeCommand('codebaseDigest.resumeScan', targetFolder);
+    if (actionType === 'resumeScan') {
+            try {
+                const { safeExecuteCommand } = require('../utils/safeExecuteCommand');
+                await safeExecuteCommand('codebaseDigest.resumeScan', targetFolder);
+            } catch (err) {
+                try { webview.postMessage({ type: 'diagnostic', level: 'error', message: `resumeScan failed: ${stringifyError(err)}` }); } catch (e) { try { console.warn('webviewHelpers: post diagnostic failed', stringifyError(e)); } catch {} }
+                try { vscode.window.showErrorMessage(`resumeScan failed: ${stringifyError(err)}`); } catch (e) { /* swallow */ }
+            }
             return;
         }
         // Allow webview to request cancellation of long writes
-        if (msg.actionType === 'cancelWrite') {
+    if (actionType === 'cancelWrite') {
             try {
                 // defer require to avoid circular deps at module init
                 const eb = require('../providers/eventBus');
@@ -439,40 +492,74 @@ export async function processWebviewMessage(msg: any, webview: vscode.Webview, t
             } catch (e) { /* swallow */ }
             return;
         }
-        if (msg.actionType === 'ingestRemote' && msg.repo) {
-            const params = { repo: msg.repo, ref: msg.ref, subpath: msg.subpath, includeSubmodules: !!msg.includeSubmodules };
-                vscode.commands.executeCommand('codebaseDigest.ingestRemoteRepoProgrammatic', params).then((result: any) => {
-                try { webview.postMessage({ type: 'ingestPreview', payload: result }); } catch (e) { try { console.warn('webviewHelpers: post ingestPreview failed', stringifyError(e)); } catch {} }
-            }, (err: any) => { try { webview.postMessage({ type: 'ingestError', error: String(err) }); } catch (e) { try { console.warn('webviewHelpers: post ingestError failed', stringifyError(e)); } catch {} } });
+        if (actionType === 'ingestRemote' && typeof msg.repo === 'string') {
+            const params = { repo: msg.repo as string, ref: typeof msg.ref === 'string' ? msg.ref as string : undefined, subpath: typeof msg.subpath === 'string' ? msg.subpath as string : undefined, includeSubmodules: !!msg.includeSubmodules };
+                (async () => {
+                    try {
+                        const { safeExecuteCommand } = require('../utils/safeExecuteCommand');
+                        const result: any = await safeExecuteCommand('codebaseDigest.ingestRemoteRepoProgrammatic', params);
+                        try { webview.postMessage({ type: 'ingestPreview', payload: result }); } catch (e) { try { console.warn('webviewHelpers: post ingestPreview failed', stringifyError(e)); } catch {} }
+                    } catch (err) {
+                        try { webview.postMessage({ type: 'ingestError', error: String(err) }); } catch (e) { try { console.warn('webviewHelpers: post ingestError failed', stringifyError(e)); } catch {} }
+                    }
+                })();
             return;
         }
 
-        if (msg.actionType === 'setSelection' && Array.isArray(msg.relPaths)) {
+    if (actionType === 'setSelection' && Array.isArray(msg.relPaths)) {
             // Apply selection only when provider appears to have roots.
             // The webview side implements replay/retry logic; avoid scheduling
             // additional retries here to prevent duplicate attempts and UI churn.
             try {
-                const preview = (typeof treeProvider.getPreviewData === 'function') ? treeProvider.getPreviewData() : null;
+                const preview = tp && typeof tp.getPreviewData === 'function' ? tp.getPreviewData() : null;
                 const totalFiles = preview && typeof preview.totalFiles === 'number' ? preview.totalFiles : undefined;
-                const hasRoots = Array.isArray((treeProvider as any).rootNodes) ? ((treeProvider as any).rootNodes.length > 0) : (typeof totalFiles === 'number' ? totalFiles > 0 : undefined);
+                // Prefer explicit rootNodes when available, but this property may be
+                // private on some provider implementations. Use a defensive 'in'
+                // check and runtime guard to avoid relying on typings here.
+                let hasRoots: boolean | undefined;
+                try {
+                    if (treeProvider && typeof treeProvider === 'object') {
+                        const tpObj = treeProvider as unknown as { rootNodes?: unknown };
+                        if (Array.isArray(tpObj.rootNodes)) {
+                            hasRoots = (tpObj.rootNodes as unknown[]).length > 0;
+                        } else {
+                            hasRoots = typeof totalFiles === 'number' ? totalFiles > 0 : undefined;
+                        }
+                    } else {
+                        hasRoots = typeof totalFiles === 'number' ? totalFiles > 0 : undefined;
+                    }
+                } catch (e) {
+                    hasRoots = typeof totalFiles === 'number' ? totalFiles > 0 : undefined;
+                }
                 if (!hasRoots) { return; }
             } catch (e) { /* swallow detection errors */ }
 
             try {
-                treeProvider.setSelectionByRelPaths(msg.relPaths);
+                if (tp && typeof tp.setSelectionByRelPaths === 'function') {
+                    tp.setSelectionByRelPaths(msg.relPaths as string[]);
+                }
             } catch (e) { /* ignore provider errors */ }
-            try { const preview = typeof treeProvider.getPreviewData === 'function' ? treeProvider.getPreviewData() : null; if (preview) { webview.postMessage({ type: 'state', state: preview }); } } catch (e) { try { console.warn('webviewHelpers: post state failed', stringifyError(e)); } catch {} }
+            try {
+                const preview = tp && typeof tp.getPreviewData === 'function' ? tp.getPreviewData() : null;
+                if (preview) { webview.postMessage({ type: 'state', state: preview }); }
+            } catch (e) { try { console.warn('webviewHelpers: post state failed', stringifyError(e)); } catch {} }
             return;
         }
-        if (msg.actionType === 'toggleExpand' && typeof msg.relPath === 'string') {
-            vscode.commands.executeCommand('codebaseDigest.toggleExpand', targetFolder, msg.relPath);
+    if (actionType === 'toggleExpand' && typeof msg.relPath === 'string') {
+            try {
+                const { safeExecuteCommand } = require('../utils/safeExecuteCommand');
+                await safeExecuteCommand('codebaseDigest.toggleExpand', targetFolder, msg.relPath);
+            } catch (err) {
+                try { webview.postMessage({ type: 'diagnostic', level: 'error', message: `toggleExpand failed: ${stringifyError(err)}` }); } catch (e) { try { console.warn('webviewHelpers: post diagnostic failed', stringifyError(e)); } catch {} }
+                try { vscode.window.showErrorMessage(`toggleExpand failed: ${stringifyError(err)}`); } catch (e) { /* swallow */ }
+            }
             return;
         }
-        if (commandMap[msg.actionType]) {
+    if (actionType && commandMap[actionType]) {
             // For bulk actions like expandAll/collapseAll ensure the command is registered
             // so we don't attempt to call an unregistered command which would warn in the host.
             try {
-                const cmdId = commandMap[msg.actionType];
+                const cmdId = commandMap[actionType as string];
                 // Only special-case expandAll/collapseAll diagnostics; other commands may be safely executed.
                 if (msg.actionType === 'expandAll' || msg.actionType === 'collapseAll') {
                     // getCommands(false) returns installed commands; includeInternal=false for performance
@@ -483,10 +570,29 @@ export async function processWebviewMessage(msg: any, webview: vscode.Webview, t
                     }
                 }
 
-                if (msg.actionType === 'generateDigest' && msg.overrides) {
-                    vscode.commands.executeCommand(cmdId, targetFolder, msg.overrides);
-                } else {
-                    vscode.commands.executeCommand(cmdId, targetFolder);
+                try {
+                    const { safeExecuteCommand } = require('../utils/safeExecuteCommand');
+                    if (actionType === 'generateDigest' && msg.overrides) {
+                            // Validate overrides come in as a simple map of primitive values.
+                            const ovRaw = msg.overrides as unknown;
+                            const overrides: Record<string, unknown> = {};
+                            if (ovRaw && typeof ovRaw === 'object') {
+                                for (const k of Object.keys(ovRaw as Record<string, unknown>)) {
+                                    const v = (ovRaw as Record<string, unknown>)[k];
+                                    if (v === null || v === undefined) { overrides[k] = v; continue; }
+                                    if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') { overrides[k] = v; continue; }
+                                    // flatten arrays to string[] if present
+                                    if (Array.isArray(v)) { overrides[k] = (v as unknown[]).slice(0, 200).map(x => (typeof x === 'string' ? x : String(x))); continue; }
+                                    // otherwise ignore complex values
+                                }
+                            }
+                            await safeExecuteCommand(cmdId, targetFolder, overrides);
+                        } else {
+                            await safeExecuteCommand(cmdId, targetFolder);
+                        }
+                } catch (err) {
+                    try { webview.postMessage({ type: 'diagnostic', level: 'error', message: `${cmdId} failed: ${stringifyError(err)}` }); } catch (e) { try { console.warn('webviewHelpers: post diagnostic failed', stringifyError(e)); } catch {} }
+                    try { vscode.window.showErrorMessage(`${cmdId} failed: ${stringifyError(err)}`); } catch (e) { /* swallow */ }
                 }
             } catch (e) {
                 try { console.warn('webviewHelpers: executeCommand routing failed', stringifyError(e)); } catch {}

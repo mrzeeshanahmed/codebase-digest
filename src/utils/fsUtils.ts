@@ -85,7 +85,12 @@ export class FSUtils {
                         await new Promise((res) => setImmediate(res));
                     }
                 } finally {
-                    try { if (stream && typeof (stream as any).destroy === 'function') { (stream as any).destroy(); } } catch (e) { /* ignore */ }
+                        try {
+                            // stream is a fs.ReadStream; prefer narrowing to that type rather than using `any`
+                            if (stream && typeof (stream as fs.ReadStream).destroy === 'function') {
+                                (stream as fs.ReadStream).destroy();
+                            }
+                        } catch (e) { /* ignore close errors */ }
                 }
                 // Normalize line endings only once after joining
                 return chunks.join('').replace(/\r\n?/g, '\n');

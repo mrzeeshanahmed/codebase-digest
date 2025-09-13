@@ -1,10 +1,13 @@
 import { FileNode, DigestConfig, TraversalStats } from '../types/interfaces';
 import { FilterService } from './filterService';
+import { GitignoreService } from './gitignoreService';
+import { Diagnostics } from '../utils/diagnostics';
 import { minimatch } from 'minimatch';
 import * as fsPromises from 'fs/promises';
 import * as fs from 'fs';
 import * as path from 'path';
 import { emitProgress } from '../providers/eventBus';
+import type { ProgressEvent } from '../providers/eventBus';
 import * as vscode from 'vscode';
 
 /**
@@ -13,14 +16,27 @@ import * as vscode from 'vscode';
 export class FileScanner {
 
     public lastStats?: TraversalStats;
-    private gitignoreService: any;
-    private diagnostics: any;
+    private gitignoreService: GitignoreService;
+    // Accept either the Diagnostics helper or a lightweight logger-compatible shape
+    private diagnostics: Diagnostics | { info?: (msg: string, extra?: unknown) => void; warn?: (msg: string, extra?: unknown) => void; debug?: (msg: string, extra?: unknown) => void };
+    // Throttle progress emissions to avoid spamming UI for large repos
+    private lastProgressEmitMs: number = 0;
+    private progressMinIntervalMs: number = 200; // emit at most every 200ms
     // Per-config runtime state to avoid mutating user/VSCode config objects which may be frozen/proxied
-    private runtimeState: WeakMap<any, { _overrides?: any, _warnedThresholds?: any }> = new WeakMap();
+    private runtimeState: WeakMap<DigestConfig, { _overrides?: Record<string, unknown>; _warnedThresholds?: Record<string, boolean> }> = new WeakMap();
 
-    constructor(gitignoreService: any, diagnostics: any) {
+    constructor(gitignoreService: GitignoreService, diagnostics: Diagnostics | { info?: (msg: string, extra?: unknown) => void; warn?: (msg: string, extra?: unknown) => void; debug?: (msg: string, extra?: unknown) => void }) {
         this.gitignoreService = gitignoreService;
         this.diagnostics = diagnostics;
+    }
+
+    // Type guard to narrow unknown nodes to FileNode
+    private static isFileNode(obj: unknown): obj is FileNode {
+        if (typeof obj !== 'object' || obj === null) { return false; }
+        const rec = obj as Record<string, unknown>;
+        if (!('type' in rec)) { return false; }
+        const t = rec['type'];
+        return typeof t === 'string' && (t === 'file' || t === 'directory' || t === 'symlink');
     }
 
     /**
@@ -141,13 +157,48 @@ export class FileScanner {
         try {
             const stat = await fsPromises.lstat(absPath) as fs.Stats;
             try {
-                const fsUtils = require('../utils/fsUtils');
+                const fsUtilsMod = require('../utils/fsUtils') as unknown;
                 const isJest = !!process.env.JEST_WORKER_ID;
                 // Do not swallow errors from isReadable; treat errors as unreadable to avoid
                 // accidentally proceeding on permission-denied or other IO failures.
                 let readable: boolean = false;
                 try {
-                    readable = await fsUtils.FSUtils.isReadable(absPath);
+                    // Defensive: the utils module may export FSUtils as a property or export
+                    // a bare isReadable function. Narrow shapes at runtime and prefer the
+                    // explicit isReadable function when available. Fall back to a simple
+                    // fs.access check when no helper is present.
+                    let isReadableFn: ((p: string) => Promise<boolean>) | undefined;
+                    if (fsUtilsMod && typeof fsUtilsMod === 'object') {
+                        const rec = fsUtilsMod as Record<string, unknown>;
+                        const maybeFSUtils = rec['FSUtils'];
+                        if (maybeFSUtils && typeof (maybeFSUtils as Record<string, unknown>)['isReadable'] === 'function') {
+                            // Wrap the FSUtils isReadable implementation with a properly-typed wrapper
+                            const fn = (maybeFSUtils as Record<string, unknown>)['isReadable'];
+                            if (typeof fn === 'function') {
+                                isReadableFn = (p: string) => (fn as (p: string) => Promise<boolean>)(p);
+                            }
+                } else if (typeof rec['isReadable'] === 'function') {
+                    const fn = rec['isReadable'];
+                    // Wrap runtime value defensively and coerce parameter safely to string when calling
+                    if (typeof fn === 'function') {
+                    isReadableFn = (p: string) => Promise.resolve((fn as Function)(String(p))).then(res => Boolean(res));
+                    }
+                        }
+                    }
+                    if (isReadableFn) {
+                        readable = await isReadableFn(absPath);
+                    } else {
+                        // Fallback: attempt a permissions check using fs.access
+                        try {
+                            // Read fs.constants safely (no double-cast)
+                            const maybeConstants = (fs as { constants?: Record<string, number> }).constants;
+                            const accessMode = maybeConstants && typeof maybeConstants.R_OK === 'number' ? maybeConstants.R_OK : 4;
+                            await fsPromises.access(absPath, accessMode);
+                            readable = true;
+                        } catch (_) {
+                            readable = false;
+                        }
+                    }
                 } catch (e) {
                     // If the readability check throws, treat as unreadable and record a warning
                     try {
@@ -179,6 +230,22 @@ export class FileScanner {
         }
     }
 
+    // Throttled progress emitter: emits at most once per progressMinIntervalMs
+    private emitProgressThrottled(e: ProgressEvent) {
+        try {
+            const now = Date.now();
+            if (now - this.lastProgressEmitMs >= this.progressMinIntervalMs) {
+                this.lastProgressEmitMs = now;
+                try { emitProgress(e); } catch (err) {
+                    try {
+                        if (this.diagnostics && typeof this.diagnostics.warn === 'function') { this.diagnostics.warn('emitProgress failed', err); }
+                        else { console.warn('emitProgress failed', err); }
+                    } catch {}
+                }
+            }
+        } catch (ex) { try { this.diagnostics && this.diagnostics.warn && this.diagnostics.warn('emitProgressThrottled failed', ex); } catch {} }
+    }
+
     // Check size and file-count thresholds and warn/override as original logic; returns control flags
     private async checkAndWarnLimits(stat: fs.Stats, relPath: string, cfg: DigestConfig, stats: TraversalStats): Promise<{ continueScan: boolean, breakAll?: boolean }> {
         // maxFileSize
@@ -196,7 +263,7 @@ export class FileScanner {
         const projectedTotal = stats.totalSize + stat.size;
         const sizeLimit = cfg.maxTotalSizeBytes || Number.MAX_SAFE_INTEGER;
         const sizePercent = sizeLimit > 0 ? projectedTotal / sizeLimit : 0;
-        try { if (stats.totalFiles % 50 === 0) { emitProgress({ op: 'scan', mode: 'progress', determinate: true, percent: Math.min(100, Math.floor(sizePercent * 100)), message: 'Scanning (size)', totalFiles: stats.totalFiles, totalSize: stats.totalSize }); } } catch (e) {}
+    try { if (stats.totalFiles % 50 === 0) { this.emitProgressThrottled({ op: 'scan', mode: 'progress', determinate: true, percent: Math.min(100, Math.floor(sizePercent * 100)), message: 'Scanning (size)', totalFiles: stats.totalFiles, totalSize: stats.totalSize }); } } catch (e) {}
 
         if (sizePercent >= 1) {
             const state = this.runtimeState.get(cfg) || {};
@@ -213,12 +280,20 @@ export class FileScanner {
                 return { continueScan: false };
             }
         } else if (sizePercent >= 0.8) {
-            const state = this.runtimeState.get(cfg) || {};
-            const warned = state._warnedThresholds && state._warnedThresholds.size;
+                const state = this.runtimeState.get(cfg) || {};
+                const warned = state._warnedThresholds && state._warnedThresholds.size;
             if (!warned) {
                 state._warnedThresholds = { ...(state._warnedThresholds || {}), size: true };
                 this.runtimeState.set(cfg, state);
-                const promptsEnabled = !!(cfg as any).promptsOnThresholds;
+                    // Safely read optional boolean flag from cfg without double-cast
+                    let promptsEnabled = false;
+                    try {
+                        const maybeCfg = cfg as unknown;
+                        if (maybeCfg && typeof maybeCfg === 'object' && 'promptsOnThresholds' in maybeCfg) {
+                            const val = (maybeCfg as Record<string, unknown>)['promptsOnThresholds'];
+                            promptsEnabled = typeof val === 'boolean' ? val : false;
+                        }
+                    } catch {}
                 const isJest = !!process.env.JEST_WORKER_ID;
                 if (isJest || !promptsEnabled) {
                     if (!stats.warnings.some(w => w.startsWith('Approaching total size limit'))) {
@@ -227,7 +302,7 @@ export class FileScanner {
                     state._overrides = { ...(state._overrides || {}), allowSizeOnce: true };
                     this.runtimeState.set(cfg, state);
                 } else {
-                    const pick = await vscode.window.showQuickPick([
+                            const pick = await vscode.window.showQuickPick([
                         { label: 'Override once and continue', id: 'override' },
                         { label: 'Cancel scan', id: 'cancel' }
                     ], { placeHolder: `Scanning would use ${(sizePercent * 100).toFixed(0)}% of maxTotalSizeBytes. Choose an action.`, ignoreFocusOut: true });
@@ -243,7 +318,7 @@ export class FileScanner {
 
         // File count checks and throttled file progress
         const filePercent = cfg.maxFiles > 0 ? stats.totalFiles / cfg.maxFiles : 0;
-        try { if (stats.totalFiles % 50 === 0) { emitProgress({ op: 'scan', mode: 'progress', determinate: true, percent: Math.min(100, Math.floor(filePercent * 100)), message: 'Scanning (files)', totalFiles: stats.totalFiles, totalSize: stats.totalSize }); } } catch (e) {}
+    try { if (stats.totalFiles % 50 === 0) { this.emitProgressThrottled({ op: 'scan', mode: 'progress', determinate: true, percent: Math.min(100, Math.floor(filePercent * 100)), message: 'Scanning (files)', totalFiles: stats.totalFiles, totalSize: stats.totalSize }); } } catch (e) {}
 
         if (stats.totalFiles >= cfg.maxFiles) {
             const state = this.runtimeState.get(cfg) || {};
@@ -258,7 +333,15 @@ export class FileScanner {
                     if (!warned) {
                         state._warnedThresholds = { ...(state._warnedThresholds || {}), files: true };
                         this.runtimeState.set(cfg, state);
-                        const promptsEnabled = !!(cfg as any).promptsOnThresholds;
+                        // Safely read optional boolean flag from cfg without double-cast
+                        let promptsEnabled = false;
+                        try {
+                            const maybeCfg = cfg as unknown;
+                            if (maybeCfg && typeof maybeCfg === 'object' && 'promptsOnThresholds' in maybeCfg) {
+                                const val = (maybeCfg as Record<string, unknown>)['promptsOnThresholds'];
+                                promptsEnabled = typeof val === 'boolean' ? val : false;
+                            }
+                        } catch {}
                         const isJest = !!process.env.JEST_WORKER_ID;
                         if (isJest || !promptsEnabled) {
                             if (!stats.warnings.some(w => w.startsWith('Approaching file count'))) {
@@ -343,10 +426,10 @@ export class FileScanner {
             isSelected: false,
             isBinary: false,
         }, stats);
-        // Emit progress every 100 files
+        // Emit progress every 100 files (throttled)
         if (stats.totalFiles % 100 === 0) {
             try {
-                emitProgress({ op: 'scan', mode: 'progress', determinate: true, percent: 0, message: 'Scanning...', totalFiles: stats.totalFiles, totalSize: stats.totalSize });
+                this.emitProgressThrottled({ op: 'scan', mode: 'progress', determinate: true, percent: 0, message: 'Scanning...', totalFiles: stats.totalFiles, totalSize: stats.totalSize });
             } catch (e) { try { this.diagnostics && this.diagnostics.warn ? this.diagnostics.warn('readDir failed', e) : console.warn('readDir failed', e); } catch {} }
         }
     }
@@ -379,37 +462,43 @@ export class FileScanner {
         // Integrate filter preset
         let presetName: string | undefined;
         try {
-            const userPresets = (cfg as any).filterPresets as string[] | undefined;
-            presetName = Array.isArray(userPresets) && userPresets.length > 0 ? userPresets[0] : undefined;
+            // Read filterPresets defensively from cfg without double-cast.
+            const maybeCfg = cfg as unknown;
+            if (maybeCfg && typeof maybeCfg === 'object') {
+                const rec = maybeCfg as Record<string, unknown>;
+                const maybe = rec['filterPresets'];
+                const userPresets = Array.isArray(maybe) ? maybe.filter((x: unknown) => typeof x === 'string').map(x => String(x)) : undefined;
+                presetName = Array.isArray(userPresets) && userPresets.length > 0 ? userPresets[0] : undefined;
+            }
         } catch {}
         let preset: { include?: string[], exclude?: string[] } = {};
         if (presetName && typeof presetName === 'string') {
-            preset = FilterService.resolvePreset(presetName as any);
+            preset = FilterService.resolvePreset(presetName);
         }
         // Merge preset with user include/exclude
     // Preserve any explicit negations (patterns starting with '!') so they are
     // not removed by include-wins deduplication logic inside processPatterns.
     const explicitNegations = Array.isArray(cfg.includePatterns) ? (cfg.includePatterns as string[]).filter(p => typeof p === 'string' && p.startsWith('!')).map(p => p.slice(1)) : [];
     const merged = FilterService.processPatterns(cfg.includePatterns, cfg.excludePatterns, preset, undefined, explicitNegations);
-    // Use merged patterns for scanning
-    const mergedCfg = { ...cfg, includePatterns: Array.from(merged.include), excludePatterns: Array.from(merged.exclude), respectGitignore: true } as any;
+    // Use merged patterns for scanning and type the merged config more precisely
+    const mergedCfg: DigestConfig & { includePatterns: string[]; excludePatterns: string[] } = Object.assign({}, cfg, { includePatterns: Array.from(merged.include), excludePatterns: Array.from(merged.exclude), respectGitignore: true });
     // For scanning, strip user-provided negation patterns (starting with '!') so glob matching works as expected
-    const scanCfg = { ...mergedCfg, excludePatterns: Array.from((mergedCfg.excludePatterns || []).filter((p: string) => !(typeof p === 'string' && p.startsWith('!')))) } as any;
+    const scanCfg: DigestConfig & { includePatterns: string[]; excludePatterns: string[] } = Object.assign({}, mergedCfg, { excludePatterns: Array.from((mergedCfg.excludePatterns || []).filter((p: string) => !(typeof p === 'string' && p.startsWith('!')))) });
     // DEBUG: log merged exclude/include patterns
-    try { console.debug('[FileScanner.scanRoot] mergedCfg.excludePatterns=', mergedCfg.excludePatterns, 'includePatterns=', mergedCfg.includePatterns); } catch (e) { try { this.diagnostics && this.diagnostics.debug && this.diagnostics.debug('scanRoot debug failed', String(e)); } catch {} }
+    try { console.debug('[FileScanner.scanRoot] mergedCfg.excludePatterns=', mergedCfg.excludePatterns, 'includePatterns=', mergedCfg.includePatterns); } catch (e) { try { this.diagnostics?.debug && this.diagnostics.debug('scanRoot debug failed', String(e)); } catch {} }
         const start = Date.now();
     const nodes = await this.scanDir(rootPath, rootPath, 0, scanCfg, stats, token);
         stats.durationMs = Date.now() - start;
-        this.diagnostics.info('File scan complete', stats);
+    try { this.diagnostics?.info && this.diagnostics.info('File scan complete', stats); } catch {}
         this.lastStats = stats;
         // Post-scan: if any explicit negation in gitignore refers to a file present at root, ensure it's included
         try {
-            const negs = this.gitignoreService.listExplicitNegations();
+            const negs: string[] = this.gitignoreService.listExplicitNegations();
             for (const n of negs) {
                 // If the user provided an explicit negation in cfg.excludePatterns (e.g. '!path'),
                 // do not inject it here because the user's exclude/include semantics should take precedence.
                 try {
-                    if (Array.isArray((mergedCfg as any).excludePatterns) && (mergedCfg as any).excludePatterns.some((p: string) => p === '!' + n || p === n)) {
+                    if (Array.isArray(mergedCfg.excludePatterns) && mergedCfg.excludePatterns.some((p: string) => p === '!' + n || p === n)) {
                         continue;
                     }
                 } catch (e) { try { this.diagnostics && this.diagnostics.warn && this.diagnostics.warn('negation check failed', e); } catch {} }
@@ -420,7 +509,7 @@ export class FileScanner {
                         // If user provided an exclude pattern that positively matches this rel (and isn't itself a negation),
                         // do not inject the file since user exclusion should take precedence.
                         try {
-                            const excludes: string[] = Array.isArray((mergedCfg as any).excludePatterns) ? (mergedCfg as any).excludePatterns : [];
+                            const excludes: string[] = Array.isArray(mergedCfg.excludePatterns) ? mergedCfg.excludePatterns : [];
                             const posExcludes = excludes.filter(p => typeof p === 'string' && !p.startsWith('!'));
                             if (posExcludes.some(p => {
                                 try { return minimatch(rel, p, { dot: true, nocase: false, matchBase: false }); } catch (err) { return false; }
@@ -430,23 +519,23 @@ export class FileScanner {
                         } catch (e) { try { this.diagnostics && this.diagnostics.warn && this.diagnostics.warn('exclude match failed', e); } catch {} }
                         // Ensure it exists in the hierarchical nodes; if absent, inject minimal node at correct place
                         const lstat = await fsPromises.lstat(candidate);
-                        const inject: any = { path: candidate, relPath: rel, name: path.basename(candidate), type: lstat.isDirectory() ? 'directory' : 'file', size: lstat.size, mtime: lstat.mtime, depth: 0, isSelected: false, isBinary: false };
+                        const inject: FileNode = { path: candidate, relPath: rel, name: path.basename(candidate), type: lstat.isDirectory() ? 'directory' : 'file', size: lstat.size, mtime: lstat.mtime, depth: 0, isSelected: false, isBinary: false };
                         const parts = rel.split('/');
                         let parentList = nodes;
                         for (let i = 0; i < parts.length - 1; i++) {
                             const seg = parts[i];
-                            let dir = parentList.find((n: any) => n.type === 'directory' && n.name === seg);
+                            let dir = parentList.find((n: unknown) => FileScanner.isFileNode(n) && n.type === 'directory' && n.name === seg) as FileNode | undefined;
                             if (!dir) {
                                 // create a new directory node
-                                const newDir: any = { type: 'directory', name: seg, relPath: parts.slice(0, i + 1).join('/'), path: path.join(rootPath, parts.slice(0, i + 1).join(path.sep)), size: 0, depth: i, isSelected: false, isBinary: false, children: [] };
-                                parentList.push(newDir as FileNode);
-                                dir = newDir as FileNode;
+                                const newDir: FileNode = { type: 'directory', name: seg, relPath: parts.slice(0, i + 1).join('/'), path: path.join(rootPath, parts.slice(0, i + 1).join(path.sep)), size: 0, depth: i, isSelected: false, isBinary: false, children: [] } as FileNode;
+                                parentList.push(newDir);
+                                dir = newDir;
                             }
                             // dir is now guaranteed
                             dir.children = dir.children || [];
                             parentList = dir.children;
                         }
-                        if (!parentList.some((n: any) => n.relPath === rel)) {
+                        if (!parentList.some((n: unknown) => (FileScanner.isFileNode(n) ? n.relPath === rel : false))) {
                             parentList.push(inject);
                         }
                     }
@@ -462,7 +551,7 @@ export class FileScanner {
         }
     // Replace stats.warnings with deduped list
     stats.warnings = deduped;
-    try { console.debug('[FileScanner.scanRoot] returning nodes count=', nodes.length, 'nodes=', nodes.map((n: any) => n.relPath || n.name)); } catch (e) { try { this.diagnostics && this.diagnostics.debug && this.diagnostics.debug('scanRoot returning debug failed', String(e)); } catch {} }
+    try { console.debug('[FileScanner.scanRoot] returning nodes count=', nodes.length, 'nodes=', nodes.map((n: FileNode) => n.relPath || n.name)); } catch (e) { try { this.diagnostics?.debug && this.diagnostics.debug('scanRoot returning debug failed', String(e)); } catch {} }
     return nodes;
     }
 
@@ -502,10 +591,10 @@ export class FileScanner {
                 // Abort early if cancellation requested
                 throw new Error('Cancelled');
             }
-            const entries = await fsPromises.readdir(dirAbs, { withFileTypes: true });
-            try { console.debug('[FileScanner.scanDir] dir=', dirAbs, 'entries=', entries.map(e => e.name)); } catch (e) {}
-            for (const entry of entries) {
-                if (token && token.isCancellationRequested) { throw new Error('Cancelled'); }
+            const dirHandle = await fsPromises.opendir(dirAbs);
+            try { console.debug('[FileScanner.scanDir] opendir=', dirAbs); } catch (e) {}
+            for await (const entry of dirHandle) {
+                if (token && token.isCancellationRequested) { await dirHandle.close(); throw new Error('Cancelled'); }
                 const absPath = path.join(dirAbs, entry.name);
                 const relPath = path.relative(rootPath, absPath).replace(/\\/g, '/');
                 const isDir = entry.isDirectory();
@@ -537,8 +626,22 @@ export class FileScanner {
                     await this.handleFile(entry, absPath, relPath, stat, depth, results, stats);
                 }
             }
+            try { await dirHandle.close(); } catch (_) {}
         } catch (e) {
-            try { console.debug('[FileScanner.scanDir] caught error', e && ((e as any).stack || String(e))); } catch (ex) {}
+            try {
+                // Safely extract stack or string from unknown error without `as any`
+                let errInfo: string = '';
+                try {
+                    if (e && typeof e === 'object' && 'stack' in (e as Record<string, unknown>) && typeof (e as Record<string, unknown>)['stack'] === 'string') {
+                        errInfo = (e as Record<string, unknown>)['stack'] as string;
+                    } else {
+                        errInfo = String(e);
+                    }
+                } catch (_) {
+                    errInfo = String(e);
+                }
+                console.debug('[FileScanner.scanDir] caught error', errInfo);
+            } catch (ex) {}
             if (String(e) === 'Error: Cancelled') {
                 // Propagate cancellation upwards
                 this.lastStats = stats;
@@ -557,8 +660,9 @@ export function flattenTree(nodes: FileNode[]): FileNode[] {
     const flat: FileNode[] = [];
     const walk = (nlist: FileNode[]) => {
         for (const n of nlist) {
-            const copy: any = { ...n };
-            delete copy.children;
+            // Create a shallow copy without children while preserving FileNode shape
+            const { children, ...rest } = n as FileNode;
+            const copy: FileNode = { ...rest } as FileNode;
             flat.push(copy);
             if (n.children && n.children.length > 0) { walk(n.children); }
         }

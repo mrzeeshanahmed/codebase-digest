@@ -5,8 +5,17 @@ import { minimatch } from 'minimatch';
 /**
  * Lightweight gitignore-like matcher used by tests.
  */
+type Matcher = {
+    raw: string;
+    isNegation: boolean;
+    cleaned: string;
+    anchored: boolean;
+    directoryOnly: boolean;
+    matcher: (inputPath: string, isDir: boolean) => boolean;
+};
+
 export class GitignoreService {
-    private matchersByDir: Map<string, Array<any>> = new Map();
+    private matchersByDir: Map<string, Array<Matcher>> = new Map();
     private loadedDirs: Set<string> = new Set();
     private workspaceRoot?: string;
 
@@ -22,7 +31,7 @@ export class GitignoreService {
 
     loadIgnoreFile(fileOrDir: string, content: string) {
         const lines = String(content || '').split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.startsWith('#'));
-        this.addIgnoreFile(fileOrDir, lines as any);
+        this.addIgnoreFile(fileOrDir, lines);
     }
 
     async loadRoot(rootPath: string, fileNames: string[] = ['.gitignore', '.gitingestignore']) {
@@ -50,8 +59,8 @@ export class GitignoreService {
         this.loadedDirs.add(norm);
     }
 
-    getEffectiveMatchers(relPath: string) {
-        const all: Array<{ dir: string; matchers: any[] }> = [];
+    getEffectiveMatchers(relPath: string): Matcher[] {
+        const all: Array<{ dir: string; matchers: Matcher[] }> = [];
         const looksAbsolute = !!relPath && (relPath.startsWith('/') || /^[A-Za-z]:\\/.test(relPath));
         if (looksAbsolute) {
             const full = this.normalizeAbs(relPath);
@@ -62,10 +71,10 @@ export class GitignoreService {
             for (const [dir, matchers] of this.matchersByDir.entries()) { all.push({ dir, matchers }); }
         }
         all.sort((a, b) => a.dir.length - b.dir.length);
-        return all.reduce((acc, x) => acc.concat(x.matchers), [] as any[]);
+        return all.reduce((acc, x) => acc.concat(x.matchers), [] as Matcher[]);
     }
 
-    private compilePatternsToMatchers(patterns: string[], dirKey: string) {
+    private compilePatternsToMatchers(patterns: string[], dirKey: string): Matcher[] {
         return (patterns || []).map(raw => {
             const pat = raw.replace(/\\/g, '/');
             const isNeg = pat.startsWith('!');
@@ -140,7 +149,7 @@ export class GitignoreService {
     }
 
     // Public evaluate used by tests: apply matchers with last-rule-wins logic
-    evaluate(relPath: string, isDir: boolean, matchers: any[]): boolean {
+    evaluate(relPath: string, isDir: boolean, matchers: Matcher[]): boolean {
         let ignored: boolean | undefined = undefined;
         for (const pat of matchers) {
             try {
@@ -155,14 +164,25 @@ export class GitignoreService {
     clear() {
         // If called as instance method, 'this' will have maps
         try {
-            if ((this as any) && (this as any).matchersByDir instanceof Map) { (this as any).matchersByDir.clear(); }
-            if ((this as any) && (this as any).loadedDirs instanceof Set) { (this as any).loadedDirs.clear(); }
+            const selfAny: unknown = this;
+            if (selfAny && typeof selfAny === 'object') {
+                const selfRec = selfAny as Record<string, unknown>;
+                const m = selfRec['matchersByDir'];
+                const l = selfRec['loadedDirs'];
+                if (m instanceof Map) { try { (m as Map<string, Matcher[]>).clear(); } catch {} }
+                if (l instanceof Set) { try { (l as Set<string>).clear(); } catch {} }
+            }
         } catch (e) { }
         // Also attempt to clear any maps attached to the class prototype (older tests call GitignoreService.prototype.clear())
         try {
-            const proto: any = (GitignoreService as any).prototype;
-            if (proto && proto.matchersByDir instanceof Map) { proto.matchersByDir.clear(); }
-            if (proto && proto.loadedDirs instanceof Set) { proto.loadedDirs.clear(); }
+            const proto = Object.getPrototypeOf(this);
+            if (proto && typeof proto === 'object') {
+                const protoRec = proto as Record<string, unknown>;
+                const pm = protoRec['matchersByDir'];
+                const pl = protoRec['loadedDirs'];
+                if (pm instanceof Map) { try { (pm as Map<string, Matcher[]>).clear(); } catch {} }
+                if (pl instanceof Set) { try { (pl as Set<string>).clear(); } catch {} }
+            }
         } catch (e) { }
     }
 

@@ -1,6 +1,34 @@
 import * as vscode from 'vscode';
 import { onProgress } from '../providers/eventBus';
 
+// Minimal stream-like shape used for defensive narrowing in tests/mocks
+type WriteStreamLike = {
+    write?: (chunk: Buffer | string) => boolean;
+    once?: (ev: string, fn: (...args: unknown[]) => void) => void;
+    on?: (ev: string, fn: (...args: unknown[]) => void) => void;
+    removeListener?: (ev: string, fn: (...args: unknown[]) => void) => void;
+    end?: () => void;
+};
+
+// Small runtime guard to narrow unknown stream-like values to our minimal shape.
+function toWriteStreamLike(stream: unknown): WriteStreamLike | undefined {
+    try {
+        if (stream === null || stream === undefined) {
+            return undefined;
+        }
+        const s = stream as any;
+        if (typeof s !== 'object' && typeof s !== 'function') {
+            return undefined;
+        }
+        if (typeof s.write === 'function' || typeof s.once === 'function' || typeof s.on === 'function' || typeof s.removeListener === 'function' || typeof s.end === 'function') {
+            return s as WriteStreamLike;
+        }
+        return undefined;
+    } catch {
+        return undefined;
+    }
+}
+
 export class OutputWriter {
     async write(output: string, config: any): Promise<void> {
         // Do not mutate the provided config object (it may be a WorkspaceConfiguration or frozen).
@@ -40,10 +68,15 @@ export class OutputWriter {
                         canceled = true;
                         try {
                             // If stream exists and supports write, append footer immediately for human formats
-                            if (!appendedFooter && stream && typeof (stream.write) === 'function') {
+                            if (!appendedFooter && stream) {
                                 const formatNow = config && config.outputFormat ? String(config.outputFormat).toLowerCase() : '';
                                 if (formatNow !== 'json') {
-                                    try { stream.write(Buffer.from('\n---\nDigest canceled. Output may be incomplete.', 'utf8')); appendedFooter = true; } catch (e) { /* ignore write errors */ }
+                                    // Narrow to our minimal WriteStreamLike shape using a small runtime guard instead
+                                    // of blanket `as unknown as` casts. This keeps behavior for partial mocks used in tests.
+                                    const w = toWriteStreamLike(stream);
+                                    if (w && typeof w.write === 'function') {
+                                        try { w.write(Buffer.from('\n---\nDigest canceled. Output may be incomplete.', 'utf8')); appendedFooter = true; } catch (e) { /* ignore write errors */ }
+                                    }
                                 }
                                 // Also write companion .partial metadata file immediately if possible
                                 try {
@@ -63,20 +96,28 @@ export class OutputWriter {
                 try {
                     stream = fs.createWriteStream(uri.fsPath);
                     // Decide whether to stream progressively based on threshold
-                    const writeOrAwaitDrain = (data: Buffer | string) => {
+                            const writeOrAwaitDrain = (data: Buffer | string) => {
                         return new Promise<void>((resolve) => {
-                            const w = stream!;
-                            const ok = w.write(data);
+                            const w = toWriteStreamLike(stream);
+                            const writeFn = w && typeof w.write === 'function' ? w.write : undefined;
+                            let ok = false;
+                            try { ok = typeof writeFn === 'function' ? (writeFn as (c: Buffer | string) => boolean).call(w, data) : true; } catch { ok = false; }
                             if (ok) { resolve(); } else {
                                 try {
-                                    if (typeof w.once === 'function') {
-                                        w.once('drain', () => resolve());
-                                    } else if (typeof (w as any).on === 'function') {
+                                    if (w && typeof w.once === 'function') {
+                                        try { w.once('drain', () => resolve()); } catch { resolve(); }
+                                    } else if (w && typeof w.on === 'function') {
                                         const handler = () => {
-                                            try { (w as any).removeListener && (w as any).removeListener('drain', handler); } catch {}
+                                            try {
+                                                if (typeof w.removeListener === 'function') {
+                                                    try { w.removeListener('drain', handler); } catch {}
+                                                }
+                                            } catch {}
                                             resolve();
                                         };
-                                        (w as any).on('drain', handler);
+                                        try { w.on('drain', handler); } catch {
+                                            resolve();
+                                        }
                                     } else {
                                         // Stream mock doesn't expose drain events; fall back.
                                         resolve();
@@ -147,8 +188,13 @@ export class OutputWriter {
                         }
                     }
                 } finally {
-                    if (stream) { stream.end(); }
-                    try { unsub(); } catch (e) { /* ignore */ }
+                    if (stream) {
+                        try {
+                            const s = toWriteStreamLike(stream);
+                            if (s && typeof s.end === 'function') { try { s.end(); } catch {} }
+                        } catch {}
+                    }
+                    try { if (typeof unsub === 'function') { unsub(); } } catch (e) { /* ignore */ }
                 }
                 vscode.window.showInformationMessage(`Digest saved to ${uri.fsPath}`);
             }

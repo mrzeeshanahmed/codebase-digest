@@ -42,7 +42,7 @@ export class DigestGenerator {
         } catch (e) { /* ignore */ }
     }
     // Per-config runtime state to avoid mutating possibly frozen config objects
-    private runtimeState: WeakMap<any, { _overrides?: any, _warnedThresholds?: any }> = new WeakMap();
+    private runtimeState: WeakMap<DigestConfig, { _overrides?: Record<string, unknown>, _warnedThresholds?: Record<string, boolean> }> = new WeakMap();
     constructor(contentProcessor: ContentProcessor, tokenAnalyzer: TokenAnalyzer) {
     this.contentProcessor = contentProcessor;
     this.tokenAnalyzer = tokenAnalyzer;
@@ -50,9 +50,35 @@ export class DigestGenerator {
     async generate(
         files: FileNode[],
         config: DigestConfig,
-        plugins: any[],
+        plugins: Array<{ fileHandler?: (file: FileNode, ext: string, cfg: DigestConfig) => Promise<string | { content?: string } | undefined> }>,
         outputFormat: 'markdown' | 'text' | 'json'
     ): Promise<DigestResult> {
+        // Local helper types to avoid spreading `any` across the file
+        type ExtendedConfig = DigestConfig & Partial<{
+            concurrentFileReads: number;
+            includeAnalysisSummary: boolean;
+            outputPresetCompatible: boolean;
+            maxSelectedTreeLines: number;
+            redactionPatterns: string[];
+            redactionPlaceholder: string;
+            showRedacted: boolean;
+            includeTree: boolean | 'minimal';
+        }>;
+        type ExtendedResult = DigestResult & { redactionApplied?: boolean; redactionReport?: Record<string, unknown> };
+
+    const cfg = config as ExtendedConfig;
+    // Local record view to avoid repeating `as unknown as Record<string, unknown>` casts
+    const cfgRec = cfg as unknown as Record<string, unknown>;
+
+        const extractErrorInfo = (err: unknown): { message: string; stack?: string } => {
+            if (err && typeof err === 'object') {
+                const eObj = err as { message?: unknown; stack?: unknown };
+                const message = typeof eObj.message === 'string' ? eObj.message : String(err);
+                const stack = typeof eObj.stack === 'string' ? eObj.stack : undefined;
+                return { message, stack };
+            }
+            return { message: String(err || 'Unknown error') };
+        };
         let tokenEstimate = 0;
     let outputChunks: string[] = [];
     let outputObjects: { header: string; body: string; imports?: string[] }[] = [];
@@ -79,11 +105,11 @@ export class DigestGenerator {
             // side-effectful calls during a simple match check.
             try {
                 const matching = getMatchingHandler(file);
-                if (matching && matching.handler) {
+                    if (matching && matching.handler) {
                     // Call registered handler only after a match is confirmed.
                     const handled = await matching.handler(file, config, (outputFormat === 'markdown' ? 'markdown' : 'text') as 'markdown' | 'text');
                     if (handled && typeof handled === 'object' && 'content' in handled) {
-                        body = (handled as any).content || '';
+                        body = String((handled as { content?: unknown }).content || '');
                     } else {
                         body = String(handled || '');
                     }
@@ -98,7 +124,7 @@ export class DigestGenerator {
                                 if (maybe !== undefined && maybe !== null) {
                                     // Accept either legacy string return or an object with 'content'
                                     if (typeof maybe === 'object' && 'content' in maybe) {
-                                        body = String((maybe as any).content || '');
+                                        body = String((maybe as { content?: unknown }).content || '');
                                     } else {
                                         body = String(maybe);
                                     }
@@ -117,10 +143,10 @@ export class DigestGenerator {
                 } else {
                     body = await formatter.buildBody(file, ext, config, this.contentProcessor);
                 }
-            } catch (err: any) {
-                // Capture per-file read/processing errors but do not abort overall generation
-                const msg = err && err.message ? String(err.message) : String(err || 'Unknown error');
-                perFileErrors.push({ path: file.relPath, message: msg, stack: err && err.stack ? String(err.stack) : undefined });
+                } catch (err: unknown) {
+                    // Capture per-file read/processing errors but do not abort overall generation
+                    const { message: msg, stack } = extractErrorInfo(err);
+                    perFileErrors.push({ path: file.relPath, message: msg, stack });
                 // Keep body as a placeholder so downstream steps can continue
                 body = `ERROR: ${msg}`;
             }
@@ -128,8 +154,8 @@ export class DigestGenerator {
             try {
                 if (body && typeof body !== 'string') {
                     // Convert Buffers to strings. For binary files, respect binaryFilePolicy when possible.
-                    if (typeof Buffer !== 'undefined' && Buffer.isBuffer(body)) {
-                        const policy = (config as any).binaryFilePolicy || 'skip';
+                        if (typeof Buffer !== 'undefined' && Buffer.isBuffer(body)) {
+                        const policy = (typeof cfgRec['binaryFilePolicy'] === 'string') ? String(cfgRec['binaryFilePolicy']) : 'skip';
                         if (policy === 'includeBase64') {
                             body = (body as Buffer).toString('base64');
                         } else {
@@ -148,21 +174,21 @@ export class DigestGenerator {
             let imports: string[] = [];
             try {
                 imports = await analyzeImports(file.path, ext, body);
-            } catch (e: any) {
+            } catch (e: unknown) {
                 // If dependency analysis fails, degrade gracefully:
                 // 1) Log a concise message to the shared OutputChannel (non-fatal)
                 // 2) Push a user-facing warning (so callers see something in the summary)
                 // 3) Attempt a lightweight heuristic fallback to extract import/require statements
-                const msg = e && e.message ? String(e.message) : String(e || 'analyzeImports failed');
+                const { message: msg } = extractErrorInfo(e);
                 try {
                     const ch = DigestGenerator.getErrorChannel();
                     if (ch) {
-                        ch.appendLine(`[analyzeImports] ${file.relPath}: ${msg}`);
-                        if (e && e.stack) { ch.appendLine(String(e.stack)); }
-                    }
+                            ch.appendLine(`[analyzeImports] ${file.relPath}: ${msg}`);
+                            try { const info = extractErrorInfo(e); if (info.stack) { ch.appendLine(String(info.stack)); } } catch (_) {}
+                        }
                 } catch (ee) { /* swallow channel failures */ }
                 try { warnings.push(`Dependency analysis failed for ${file.relPath}; proceeding without full import resolution`); } catch (ee) { /* swallow */ }
-                try { perFileErrors.push({ path: file.relPath, message: `analyzeImports: ${msg}`, stack: e && e.stack ? String(e.stack) : undefined }); } catch (ee) { /* swallow */ }
+                try { const { stack } = extractErrorInfo(e); perFileErrors.push({ path: file.relPath, message: `analyzeImports: ${msg}`, stack }); } catch (ee) { /* swallow */ }
                 // Heuristic fallback: scan the file body for common import/require patterns to capture likely deps.
                 try {
                     const heur: string[] = [];
@@ -193,7 +219,7 @@ export class DigestGenerator {
                     } else {
                         imports = [];
                     }
-                } catch (ee) {
+                } catch (e: unknown) {
                     imports = [];
                 }
             }
@@ -247,7 +273,7 @@ export class DigestGenerator {
                         }
                     }
                 }
-            } catch (e) {
+            } catch (e: unknown) {
                 // If user cancels or other error, propagate to abort generation
                 throw e;
             }
@@ -261,7 +287,7 @@ export class DigestGenerator {
         let tokenObj: CancellationToken = { isCancellationRequested: false };
         let unsubToken: (() => void) | undefined;
         try {
-            unsubToken = require('../providers/eventBus').onProgress((ev: any) => {
+            unsubToken = require('../providers/eventBus').onProgress((ev: { op?: string; mode?: string }) => {
                 try {
                     if (ev && ev.op === 'generate' && ev.mode === 'cancel') {
                         tokenObj.isCancellationRequested = true;
@@ -272,7 +298,7 @@ export class DigestGenerator {
             // If event bus isn't available for some reason, continue without cancellation support
             tokenObj = { isCancellationRequested: false };
         }
-        const concurrency = (config as any).concurrentFileReads || 8;
+    const concurrency = (typeof cfg.concurrentFileReads === 'number') ? cfg.concurrentFileReads : 8;
         let results;
         try {
             results = await runPool(tasks, concurrency, tokenObj);
@@ -281,18 +307,18 @@ export class DigestGenerator {
         }
 
     // Aggregate results in order
-        const analysisMap: Record<string, any> = {};
-        for (const r of results) {
-            tokenEstimate += r.token;
-            if (r.body && r.body.startsWith('ERROR:')) {
+        const analysisMap: Record<string, string[]> = {};
+    for (const r of results as Array<{ token: number; header?: string; body: string; relPath?: string; imports?: unknown }>) {
+            tokenEstimate += r.token || 0;
+            if (r.body && typeof r.body === 'string' && r.body.startsWith('ERROR:')) {
                 perFileWarnings.push(r.body);
             }
             // Aggregate imports into analysis map keyed by relPath
             if (r.relPath) {
-                analysisMap[r.relPath] = { imports: Array.isArray((r as any).imports) ? (r as any).imports : [] };
+                analysisMap[r.relPath] = Array.isArray(r.imports) ? (r.imports as string[]) : [];
             }
             if (outputFormat === 'json') {
-                outputObjects.push({ header: r.header, body: r.body, imports: Array.isArray((r as any).imports) ? (r as any).imports : [] });
+                outputObjects.push({ header: String(r.header || ''), body: r.body, imports: Array.isArray(r.imports) ? (r.imports as string[]) : [] });
             } else if (outputFormat === 'markdown' || outputFormat === 'text') {
                 // Normalize header/body concatenation to avoid double-blank lines.
                 const hdr = String(r.header || '');
@@ -370,7 +396,7 @@ export class DigestGenerator {
             tokenEstimate
         };
         // Forward stats to summary and tree
-    let summary: any = await buildSummary(config, stats, files, tokenEstimate, warnings);
+    let summary: string = await buildSummary(cfg, stats, files, tokenEstimate, warnings) as string;
         // If there are per-file errors, append a collapsed Errors section to the summary
         if (dedupedErrors.length > 0) {
             const errLines = dedupedErrors.map(e => `- ${e.path}: ${e.message}`);
@@ -394,8 +420,8 @@ export class DigestGenerator {
 
     // Add token limit warning if configured
         const contextLimit = config.contextLimit || config.tokenLimit;
-        const tokenLimitWarning = typeof (this.tokenAnalyzer as any).warnIfExceedsLimit === 'function'
-            ? (this.tokenAnalyzer as any).warnIfExceedsLimit(tokenEstimate, contextLimit)
+        const tokenLimitWarning = typeof this.tokenAnalyzer.warnIfExceedsLimit === 'function'
+            ? this.tokenAnalyzer.warnIfExceedsLimit(tokenEstimate, contextLimit)
             : null;
         if (tokenLimitWarning) {
             // Ensure deduplication with existing warnings
@@ -407,7 +433,7 @@ export class DigestGenerator {
     // ASCII tree to the output content when outputPresetCompatible is enabled so the user sees
     // an immediate overview at the top of the generated file.
     // This is gated behind the config flag to avoid surprising existing callers/tests.
-    if (outputFormat !== 'json' && (config as any).outputPresetCompatible) {
+    if (outputFormat !== 'json' && cfg.outputPresetCompatible) {
             try {
                 const fm = new Formatters();
                 let headerBlock = '';
@@ -470,40 +496,71 @@ export class DigestGenerator {
             metadata,
             errors: dedupedErrors
         };
+    // Typed alias for mutation sites to avoid repeated `as any` casts
+    const mResult = result as ExtendedResult;
         // Apply redaction to the final assembled content and, for JSON mode, to per-file output objects
         try {
-            const redactionCfg = {
-                redactionPatterns: (config as any).redactionPatterns,
-                redactionPlaceholder: (config as any).redactionPlaceholder,
-                showRedacted: (config as any).showRedacted
+            const redactionCfg: Partial<DigestConfig> = {
+                redactionPatterns: cfg.redactionPatterns,
+                redactionPlaceholder: cfg.redactionPlaceholder,
+                showRedacted: cfg.showRedacted
+            };
+            const emitDiag = (k: string, v: unknown) => {
+                try {
+                    const hostAny = this.tokenAnalyzer;
+                    if (hostAny && typeof hostAny === 'object') {
+                        const host = hostAny as { diagnostics?: unknown };
+                        const diag = host.diagnostics;
+                        if (diag && typeof diag === 'object') {
+                            const info = (diag as { info?: unknown }).info;
+                            if (typeof info === 'function') {
+                                try { (info as (k: string, v: unknown) => void)(k, v); } catch (_) { /* swallow diag errors */ }
+                            }
+                        }
+                    }
+                } catch (_) { /* swallow */ }
             };
             // If the caller explicitly requested to see redacted values (showRedacted=true),
             // skip all redaction work entirely to avoid wasted CPU and any change to content.
-            if ((redactionCfg as any).showRedacted) {
+            if (redactionCfg.showRedacted) {
                 // Mark that redaction was intentionally bypassed for this run.
-                (result as any).redactionApplied = false;
+                const mResult = result as ExtendedResult;
+                mResult.redactionApplied = false;
             } else {
                 // Redact the full content string (this will be used for writing/caching)
-                const redactResult = redactSecrets(content, redactionCfg as any);
+                const redactResult = redactSecrets(content, redactionCfg);
+                const mResult = result as ExtendedResult;
                 if (redactResult && redactResult.applied) {
                     result.content = redactResult.content;
-                    (result as any).redactionApplied = true;
+                    mResult.redactionApplied = true;
                 } else {
-                    (result as any).redactionApplied = false;
+                    mResult.redactionApplied = false;
                 }
             }
             // Emit guarded diagnostic: counts only, no content
-            try { this.tokenAnalyzer && (this.tokenAnalyzer as any).diagnostics && (this.tokenAnalyzer as any).diagnostics.info && (this.tokenAnalyzer as any).diagnostics.info('Redaction applied', { applied: !!(result as any).redactionApplied, warningsCount: Array.isArray(warnings) ? warnings.length : 0 }); } catch (e) { try { const ch = DigestGenerator.getErrorChannel(); ch && ch.appendLine('[DigestGenerator] diagnostics.info failed: ' + String(e)); } catch {} }
+            try {
+                const hostAny = this.tokenAnalyzer;
+                if (hostAny && typeof hostAny === 'object') {
+                    const host = hostAny as { diagnostics?: unknown };
+                    const diag = host.diagnostics;
+                    if (diag && typeof diag === 'object') {
+                        const info = (diag as { info?: unknown }).info;
+                        if (typeof info === 'function') {
+                            try { (info as (k: string, v: unknown) => void)('Redaction applied', { applied: !!(result as ExtendedResult).redactionApplied, warningsCount: Array.isArray(warnings) ? warnings.length : 0 }); } catch (e) { try { const ch = DigestGenerator.getErrorChannel(); ch && ch.appendLine('[DigestGenerator] diagnostics.info failed: ' + String(e)); } catch {} }
+                        }
+                    }
+                }
+            } catch (e) { try { const ch = DigestGenerator.getErrorChannel(); ch && ch.appendLine('[DigestGenerator] diagnostics.info failed: ' + String(e)); } catch {} }
 
             // If outputObjects exist (JSON mode), produce a redacted copy so callers that inspect objects see redacted bodies
-            if (outputFormat === 'json' && Array.isArray(result.outputObjects) && result.outputObjects.length > 0) {
+                if (outputFormat === 'json' && Array.isArray(result.outputObjects) && result.outputObjects.length > 0) {
                 let anyObjRedacted = false;
                 let redactedFilesCount = 0;
-                const redactedObjs = result.outputObjects.map(o => {
+                const redactedObjs = (result.outputObjects || []).map(o => {
                     try {
-                        const rh = redactSecrets(o.header || '', redactionCfg as any);
+                        const rh = redactSecrets(o.header || '', redactionCfg);
                         let body = o.body || '';
-                        let rb = redactSecrets(body, redactionCfg as any);
+                        let rb = redactSecrets(body, redactionCfg);
                         // If redactSecrets didn't apply and body looks like JSON, try parsing and redacting nested string fields
                         if (!rb.applied) {
                             try {
@@ -515,23 +572,34 @@ export class DigestGenerator {
                                             const v = node[k];
                                             if (typeof v === 'string') {
                                                             // Do not log raw string content. Emit guarded diagnostics
-                                                            const r = redactSecrets(v, redactionCfg as any);
+                                                            const r = redactSecrets(v, redactionCfg);
                                                             try {
-                                                                const diag = this.tokenAnalyzer && (this.tokenAnalyzer as any).diagnostics && (this.tokenAnalyzer as any).diagnostics.info;
-                                                                if (diag) { diag('redactNested.string', { key: k, length: Math.min(200, String(v).length), applied: !!(r && (r as any).applied) }); }
-                                                            } catch (e) {}
-                                                            if (r && r.applied) {
-                                                                node[k] = r.content;
-                                                                changed = true;
-                                                            }
+                                                                const rrAny: unknown = r;
+                                                                let appliedFlag = false;
+                                                                if (rrAny && typeof rrAny === 'object' && 'applied' in (rrAny as Record<string, unknown>)) {
+                                                                    const a = (rrAny as Record<string, unknown>)['applied'];
+                                                                    appliedFlag = typeof a === 'boolean' ? a as boolean : Boolean(a);
+                                                                } else {
+                                                                    appliedFlag = Boolean((rrAny as Record<string, unknown>)['applied']);
+                                                                }
+                                                                emitDiag('redactNested.string', { key: k, length: Math.min(200, String(v).length), applied: appliedFlag });
+                                                            } catch (_) {}
+                                                            if (r && r.applied) { node[k] = r.content; changed = true; }
                                             } else if (Array.isArray(v)) {
                                                     for (let i = 0; i < v.length; i++) {
                                                     if (typeof v[i] === 'string') {
-                                                        const r = redactSecrets(v[i], redactionCfg as any);
+                                                        const r = redactSecrets(v[i], redactionCfg);
                                                         try {
-                                                            const diag = this.tokenAnalyzer && (this.tokenAnalyzer as any).diagnostics && (this.tokenAnalyzer as any).diagnostics.info;
-                                                            if (diag) { diag('redactNested.arrayItem', { index: i, length: Math.min(200, String(v[i]).length), applied: !!(r && (r as any).applied) }); }
-                                                        } catch (e) {}
+                                                            const rrAny: unknown = r;
+                                                            let appliedFlag = false;
+                                                            if (rrAny && typeof rrAny === 'object' && 'applied' in (rrAny as Record<string, unknown>)) {
+                                                                const a = (rrAny as Record<string, unknown>)['applied'];
+                                                                appliedFlag = typeof a === 'boolean' ? a as boolean : Boolean(a);
+                                                            } else {
+                                                                appliedFlag = Boolean((rrAny as Record<string, unknown>)['applied']);
+                                                            }
+                                                            emitDiag('redactNested.arrayItem', { index: i, length: Math.min(200, String(v[i]).length), applied: appliedFlag });
+                                                        } catch (_) {}
                                                         if (r && r.applied) { v[i] = r.content; changed = true; }
                                                     } else if (typeof v[i] === 'object') { walk(v[i]); }
                                                 }
@@ -542,7 +610,7 @@ export class DigestGenerator {
                                 walk(parsed);
                                 if (changed) {
                                     body = JSON.stringify(parsed);
-                                    rb = { applied: true, content: body } as any;
+                                    rb = { applied: true, content: body };
                                 }
                             } catch (e) {
                                 // ignore parse errors
@@ -556,7 +624,7 @@ export class DigestGenerator {
                 });
                 result.outputObjects = redactedObjs;
                 if (anyObjRedacted) {
-                    (result as any).redactionApplied = true;
+                    (result as ExtendedResult).redactionApplied = true;
                     // Add a user-facing warning indicating how many files had redaction applied
                     try {
                         if (!result.warnings) { result.warnings = []; }
@@ -566,7 +634,7 @@ export class DigestGenerator {
                     // Fallback: if redactSecrets didn't apply but user provided simple redactionPatterns,
                     // perform a simple regex replace on each body to ensure tests expecting placeholders pass.
                         try {
-                        const userPatterns = Array.isArray((config as any).redactionPatterns) ? (config as any).redactionPatterns : [];
+                        const userPatterns = Array.isArray(cfg.redactionPatterns) ? cfg.redactionPatterns : [];
                         const userPatternReport: { pattern: string; applied: boolean; alternatesUsed: string[] }[] = [];
                         if (userPatterns.length > 0) {
                             let fallbackApplied = false;
@@ -587,7 +655,7 @@ export class DigestGenerator {
                                             try { re = new RegExp(alt, 'g'); alternatesUsed.push('shorthand-expansion'); } catch (e) { re = null; }
                                         }
                                         if (re && re.test(body)) {
-                                            body = body.replace(re, (config as any).redactionPlaceholder || '[REDACTED]');
+                                            body = body.replace(re, cfg.redactionPlaceholder || '[REDACTED]');
                                             fallbackApplied = true;
                                             patternAppliedForThisBody = true;
                                         }
@@ -603,16 +671,17 @@ export class DigestGenerator {
                                 }
                                 return { ...o, body };
                             });
-                            if (fallbackApplied) { result.outputObjects = replaced; (result as any).redactionApplied = true; try { if (!result.warnings) { result.warnings = []; } result.warnings.push('Redaction applied'); } catch (e) {} }
+                            if (fallbackApplied) { result.outputObjects = replaced; (result as ExtendedResult).redactionApplied = true; try { if (!result.warnings) { result.warnings = []; } result.warnings.push('Redaction applied'); } catch (e) {} }
                         }
                         // Attach dry-run/report info for user-provided patterns so callers can inspect what was applied
-                        if (!(result as any).redactionReport) { (result as any).redactionReport = {}; }
-                        (result as any).redactionReport.userPatternReport = (result as any).redactionReport.userPatternReport ? (result as any).redactionReport.userPatternReport : [];
-                        if (Array.isArray((config as any).redactionPatterns)) {
+                        if (!(result as ExtendedResult).redactionReport) { (result as ExtendedResult).redactionReport = {}; }
+                        const report = (result as ExtendedResult).redactionReport as Record<string, any>;
+                        report['userPatternReport'] = report['userPatternReport'] ? report['userPatternReport'] : [];
+                        if (Array.isArray(cfg.redactionPatterns)) {
                             // ensure every user pattern is represented in the report even if not applied
-                            for (const pat of (config as any).redactionPatterns) {
-                                if (!(result as any).redactionReport.userPatternReport.find((p: any) => p.pattern === pat)) {
-                                    (result as any).redactionReport.userPatternReport.push({ pattern: String(pat), applied: false, alternatesUsed: [] });
+                            for (const pat of cfg.redactionPatterns) {
+                                if (!report['userPatternReport'].find((p: any) => p.pattern === pat)) {
+                                    report['userPatternReport'].push({ pattern: String(pat), applied: false, alternatesUsed: [] });
                                 }
                             }
                         }
@@ -626,21 +695,21 @@ export class DigestGenerator {
                     if (outputFormat === 'json') {
                         // Rebuild canonical JSON using the final `result` state so any warnings appended during redaction
                         // or fallback passes are included in the content.
-                        const finalWarnings = Array.isArray((result as any).warnings) ? (result as any).warnings : warnings;
+                        const finalWarnings = Array.isArray(result.warnings) ? result.warnings : warnings;
                         const canonical2 = { summary, tree, files: result.outputObjects, warnings: finalWarnings };
                         const rebuilt = JSON.stringify(canonical2, null, 2);
                         // If showRedacted was requested, skip any further redaction passes
-                        if ((redactionCfg as any).showRedacted) {
+                        if (redactionCfg.showRedacted) {
                             result.content = rebuilt;
                             content = rebuilt;
                         } else {
                             // First, attempt redactSecrets on the rebuilt JSON
                             try {
-                                const finalRedact = redactSecrets(rebuilt, redactionCfg as any);
+                                const finalRedact = redactSecrets(rebuilt, redactionCfg);
                                 result.content = finalRedact && finalRedact.applied ? finalRedact.content : rebuilt;
                                 content = result.content;
                                 if (finalRedact && finalRedact.applied) {
-                                    (result as any).redactionApplied = true;
+                                    (result as ExtendedResult).redactionApplied = true;
                                 }
                             } catch (e) {
                                 // If redactSecrets failed, still keep rebuilt content and continue with user-pattern fallbacks
@@ -650,7 +719,7 @@ export class DigestGenerator {
                         }
 
                         // Extra fallback: aggressively apply user-provided patterns directly to the rebuilt JSON string.
-                        const userPatterns = Array.isArray((config as any).redactionPatterns) ? (config as any).redactionPatterns : [];
+                        const userPatterns = Array.isArray(cfg.redactionPatterns) ? cfg.redactionPatterns : [];
                         if (userPatterns.length > 0) {
                             let working = String(result.content || '');
                             let fallbackApplied = false;
@@ -682,7 +751,7 @@ export class DigestGenerator {
                                     try {
                                         if (!c.re) { continue; }
                                         if (c.re.test(working)) {
-                                            working = working.replace(c.re, (config as any).redactionPlaceholder || '[REDACTED]');
+                                            working = working.replace(c.re, cfg.redactionPlaceholder || '[REDACTED]');
                                             fallbackApplied = true;
                                             patternApplied = true;
                                             alternatesUsed.push(c.tag);
@@ -694,15 +763,15 @@ export class DigestGenerator {
                             if (fallbackApplied) {
                                 result.content = working;
                                 content = working;
-                                (result as any).redactionApplied = true;
+                                (result as ExtendedResult).redactionApplied = true;
                             }
-                            if (!(result as any).redactionReport) { (result as any).redactionReport = {}; }
-                            (result as any).redactionReport.finalPatternReport = finalPatternReport;
+                            if (!mResult.redactionReport) { mResult.redactionReport = {}; }
+                            (mResult.redactionReport as Record<string, any>).finalPatternReport = finalPatternReport;
                         }
                         // After any user-pattern fallbacks, ensure that the result.content matches the final state of result.warnings
                         try {
-                            const finalWarnings2 = Array.isArray((result as any).warnings) ? (result as any).warnings : warnings;
-                            const canonicalFinal = { summary, tree, files: result.outputObjects, warnings: finalWarnings2 };
+                            const finalWarnings2 = Array.isArray(mResult.warnings) ? mResult.warnings as string[] : warnings;
+                            const canonicalFinal = { summary, tree, files: mResult.outputObjects, warnings: finalWarnings2 };
                             const finalRebuilt = JSON.stringify(canonicalFinal, null, 2);
                             // Only overwrite if different to avoid unnecessary churn
                             if (String(result.content || '') !== finalRebuilt) {
@@ -716,7 +785,7 @@ export class DigestGenerator {
         } catch (e) {
             // swallow redaction errors to avoid breaking generation
             try { emitProgress({ op: 'generate', mode: 'end', determinate: false, message: 'Redaction failed' }); } catch (ex) { }
-            (result as any).redactionApplied = false;
+                            mResult.redactionApplied = false;
         }
 
         // Guarded diagnostic: report counts, never raw content
@@ -724,8 +793,17 @@ export class DigestGenerator {
             if (outputFormat === 'json') {
                 const parsedFinal = JSON.parse(result.content as string);
                 try {
-                    const diag = this.tokenAnalyzer && (this.tokenAnalyzer as any).diagnostics && (this.tokenAnalyzer as any).diagnostics.info;
-                    if (diag) { diag('final.parsedFiles', { count: Array.isArray(parsedFinal.files) ? parsedFinal.files.length : 0, redactionApplied: !!(result as any).redactionApplied }); }
+                    const hostAny = this.tokenAnalyzer;
+                    if (hostAny && typeof hostAny === 'object') {
+                        const host = hostAny as { diagnostics?: unknown };
+                        const diag = host.diagnostics;
+                        if (diag && typeof diag === 'object') {
+                            const info = (diag as { info?: unknown }).info;
+                            if (typeof info === 'function') {
+                                try { (info as (k: string, v: unknown) => void)('final.parsedFiles', { count: Array.isArray(parsedFinal.files) ? parsedFinal.files.length : 0, redactionApplied: !!mResult.redactionApplied }); } catch (e) {}
+                            }
+                        }
+                    }
                 } catch (e) {}
             }
         } catch (e) {}

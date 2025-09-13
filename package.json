@@ -337,7 +337,9 @@
         },
         "codebaseDigest.maxFiles": {
           "type": "number",
-          "default": 25000,
+          "minimum": 1,
+          "maximum": 100000,
+          "default": 1000,
           "description": "Maximum number of files to include."
         },
         "codebaseDigest.maxTotalSizeBytes": {
@@ -457,6 +459,11 @@
           "type": "number",
           "default": 25,
           "description": "Milliseconds to wait between pending hydration batches to yield to the event loop."
+        },
+        "codebaseDigest.watcherDebounceMs": {
+          "type": "number",
+          "default": 300,
+          "description": "Debounce delay (ms) used to coalesce rapid watcher-triggered full workspace refreshes."
         },
         "codebaseDigest.redactionPatterns": {
           "type": "array",

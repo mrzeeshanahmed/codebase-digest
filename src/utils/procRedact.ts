@@ -1,11 +1,8 @@
-import { spawn } from 'child_process';
+import { spawn, SpawnOptions as NodeSpawnOptions } from 'child_process';
 import * as vscode from 'vscode';
 import { scrubTokens } from './redaction';
 
-export interface SpawnOptions {
-    cwd?: string;
-    env?: NodeJS.ProcessEnv;
-}
+export type SpawnOptions = NodeSpawnOptions;
 
 /**
  * Spawn git with args and return a promise that resolves with stdout on success,
@@ -32,7 +29,8 @@ export function spawnGitPromise(args: string[], opts?: SpawnOptions): Promise<{ 
     } catch (e) {
         // swallow and use default 'git'
     }
-    const proc = spawn(gitPath, args, Object.assign({}, opts || {}, { shell: false }) as any);
+    const spawnOpts: NodeSpawnOptions = Object.assign({}, opts || {}, { shell: false });
+    const proc = spawn(gitPath, args, spawnOpts);
         let out = '';
         let err = '';
         if (proc.stdout) {
@@ -41,9 +39,16 @@ export function spawnGitPromise(args: string[], opts?: SpawnOptions): Promise<{ 
         if (proc.stderr) {
             proc.stderr.on('data', (d: Buffer) => { err += d.toString(); });
         }
-        proc.on('error', (e: any) => {
-            const msg = scrubTokens(String(e && e.message ? e.message : e));
-            reject(new Error(msg));
+        proc.on('error', (e: unknown) => {
+            let msg = '';
+            try {
+                if (e && typeof e === 'object' && e !== null && 'message' in e) {
+                    msg = String((e as Record<string, unknown>)['message']);
+                } else {
+                    msg = String(e);
+                }
+            } catch { msg = String(e); }
+            reject(new Error(scrubTokens(msg)));
         });
         proc.on('exit', (code: number) => {
             if (code !== 0) {
@@ -60,22 +65,23 @@ export function spawnGitPromise(args: string[], opts?: SpawnOptions): Promise<{ 
 /**
  * Wrapper around global fetch that scrubs error messages before rethrowing.
  */
-export async function safeFetch(input: any, init?: any): Promise<any> {
+export async function safeFetch(input: unknown, init?: unknown): Promise<unknown> {
     try {
-        // forward to global fetch (may be mocked in tests)
-        // @ts-ignore
-        const res: any = await fetch(input as any, init as any);
+    // Resolve global fetch robustly (may be polyfilled or mocked in tests)
+    const maybeFetch = (globalThis as unknown);
+    const nativeFetch = maybeFetch && typeof (maybeFetch as Record<string, unknown>)['fetch'] === 'function' ? (maybeFetch as Record<string, unknown>)['fetch'] as (i: unknown, init?: unknown) => Promise<unknown> : undefined;
+    if (!nativeFetch) { throw new Error('fetch is not available in this environment'); }
+    const res = await nativeFetch(input, init);
         return res;
-    } catch (e: any) {
-        const msg = scrubTokens(String(e && e.message ? e.message : e));
-        // Avoid leaking raw header values. If caller provided init/headers include a scrubbed summary.
+    } catch (e: unknown) {
+        let msg = '';
         try {
-            const safeHdrs = scrubHeaders(init);
-            const detail = safeHdrs ? ` [headers: ${safeHdrs}]` : '';
-            throw new Error(msg + detail);
-        } catch (_) {
-            throw new Error(msg);
-        }
+            if (e && typeof e === 'object' && e !== null && 'message' in e) { msg = String((e as Record<string, unknown>)['message']); }
+            else { msg = String(e); }
+        } catch { msg = String(e); }
+        const safeHdrs = scrubHeaders(init);
+        const detail = safeHdrs ? ` [headers: ${safeHdrs}]` : '';
+        throw new Error(scrubTokens(msg) + detail);
     }
 }
 
@@ -83,18 +89,34 @@ export async function safeFetch(input: any, init?: any): Promise<any> {
  * Produce a scrubbed, one-line summary of request headers suitable for diagnostics.
  * Header values are passed through scrubTokens to remove tokens before including.
  */
-export function scrubHeaders(init?: any): string {
+export function scrubHeaders(init?: unknown): string {
     try {
-        if (!init || !init.headers) { return ''; }
-        const headers = init.headers as any;
+        if (!init || typeof init !== 'object') { return ''; }
+    const hdrs = (init as Record<string, unknown>)['headers'];
+    if (!hdrs) { return ''; }
         const parts: string[] = [];
-        if (typeof headers.forEach === 'function') {
+        // Headers instance
+        if (hdrs) {
+            const hdrRec = hdrs as Record<string, unknown>;
             try {
-                headers.forEach((v: any, k: string) => { parts.push(`${k}: ${scrubTokens(String(v))}`); });
+                // Headers-like objects often provide a forEach method; check and call if present
+                const hdrLike = hdrRec as { forEach?: unknown };
+                const maybeForEach = hdrLike.forEach;
+                if (typeof maybeForEach === 'function') {
+                    // Call with a properly-typed callback
+                    (maybeForEach as (cb: (v: unknown, k: string) => void) => void)((v: unknown, k: string) => { parts.push(`${k}: ${scrubTokens(String(v))}`); });
+                }
             } catch (_) { /* ignore iteration errors */ }
-        } else if (typeof headers === 'object') {
-            for (const k of Object.keys(headers)) {
-                try { parts.push(`${k}: ${scrubTokens(String((headers as any)[k]))}`); } catch (_) { parts.push(k + ': [unavailable]'); }
+        } else if (Array.isArray(hdrs)) {
+        } else if (Array.isArray(hdrs)) {
+            for (const item of hdrs as Array<unknown>) {
+                if (Array.isArray(item) && item.length >= 2) {
+                    try { parts.push(`${String(item[0])}: ${scrubTokens(String(item[1]))}`); } catch (_) { /* ignore */ }
+                }
+            }
+        } else if (typeof hdrs === 'object') {
+            for (const k of Object.keys(hdrs as Record<string, unknown>)) {
+                try { parts.push(`${k}: ${scrubTokens(String((hdrs as Record<string, unknown>)[k] ?? ''))}`); } catch (_) { parts.push(k + ': [unavailable]'); }
             }
         }
         return parts.join(', ');

@@ -49,7 +49,16 @@ export function emitProgress(e: ProgressEvent) {
         } catch (err) {
             // Surface listener errors to diagnostics so they are visible during
             // development and test runs while keeping delivery to other listeners.
-            try { diagnostics.error('emitProgress listener threw', String((err && ((err as any).stack || (err as any).message)) || err)); } catch {}
+            try {
+                let msg = '';
+                if (err && typeof err === 'object' && err !== null) {
+                    const rec = err as Record<string, unknown>;
+                    msg = String(rec.stack || rec.message || JSON.stringify(rec));
+                } else {
+                    msg = String(err);
+                }
+                diagnostics.error('emitProgress listener threw', msg);
+            } catch {}
         }
     }
 }

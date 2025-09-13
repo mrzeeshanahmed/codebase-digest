@@ -57,7 +57,9 @@ export async function generateDigest(
         try { broadcastGenerationResult({ error: 'No services found for workspace folder.' }, workspacePath); } catch (e) { try { console.warn('digestProvider: broadcastGenerationResult failed', e); } catch {} }
         return;
     }
-    const config: DigestConfig = vscode.workspace.getConfiguration('codebaseDigest', workspaceFolder.uri) as any;
+    // Read workspace configuration and defensively narrow to DigestConfig at runtime
+    const rawCfg = vscode.workspace.getConfiguration('codebaseDigest', workspaceFolder.uri);
+    const config: DigestConfig = (rawCfg && typeof rawCfg === 'object') ? (rawCfg as unknown as DigestConfig) : ({} as DigestConfig);
     // runtimeConfig merges saved workspace settings with transient overrides for this run only
     // Note: overrides is intentionally transient (one-shot) and should not be persisted back
     // to the user's WorkspaceConfiguration. This ensures the "Disable redaction for this run"
@@ -192,8 +194,8 @@ export async function generateDigest(
     } catch (err: any) {
         // If generation was canceled via the event bus, ensure partial artifacts are removed and inform the user
         const details = String(err || 'Generation failed');
-        try { diagnostics && diagnostics.error && diagnostics.error('Generation failed or canceled: ' + details); } catch (e) {}
-        try { errorsUtil.showUserError('Digest generation failed or canceled.', details, diagnostics as any); } catch (e) {}
+    try { diagnostics && diagnostics.error && diagnostics.error('Generation failed or canceled: ' + details); } catch (e) {}
+    try { errorsUtil.showUserError('Digest generation failed or canceled.', details, diagnostics); } catch (e) {}
         // If cache files were partially written, attempt to remove them to avoid leaving stale artifacts
         try {
             if (fs.existsSync(cacheOutPath)) { await fsp.unlink(cacheOutPath).catch(() => {}); }
@@ -209,19 +211,25 @@ export async function generateDigest(
     emitProgress({ op: 'generate', mode: 'end', determinate: false, message: 'Digest generation complete' });
     // Compute total token estimate (sum of file estimates). Ensure digest.tokenEstimate is always set.
     let totalTokenEstimate: number = 0;
-    if (typeof digest.tokenEstimate === 'number') {
-        totalTokenEstimate = digest.tokenEstimate;
-    } else if (Array.isArray((digest as any).outputObjects) && (digest as any).outputObjects.length > 0) {
-        try {
-            totalTokenEstimate = (digest as any).outputObjects.reduce((acc: number, o: any) => acc + (typeof o?.tokenEstimate === 'number' ? o.tokenEstimate : 0), 0);
-        } catch (e) {
-            totalTokenEstimate = 0;
+    try {
+    const digestRecLocal = (digest && typeof digest === 'object') ? (digest as unknown as Record<string, unknown>) : undefined;
+        if (digestRecLocal && typeof digestRecLocal.tokenEstimate === 'number') {
+            totalTokenEstimate = Number(digestRecLocal.tokenEstimate);
+        } else if (digestRecLocal && Array.isArray(digestRecLocal.outputObjects)) {
+            const arr = digestRecLocal.outputObjects as unknown[];
+            totalTokenEstimate = arr.reduce((acc: number, item: unknown) => {
+                if (item && typeof item === 'object') {
+                    const irec = item as Record<string, unknown>;
+                    return acc + (typeof irec.tokenEstimate === 'number' ? (irec.tokenEstimate as number) : 0);
+                }
+                return acc;
+            }, 0);
         }
-    } else {
+    } catch (e) {
         totalTokenEstimate = 0;
     }
     // Persist the computed token estimate back onto the digest so callers can rely on it
-    try { (digest as any).tokenEstimate = totalTokenEstimate; } catch (e) { /* ignore */ }
+    try { if (digest && typeof digest === 'object') { (digest as unknown as Record<string, unknown>).tokenEstimate = totalTokenEstimate; } } catch (e) { /* ignore */ }
     // Optionally warn if over tokenLimit
     let tokenLimitWarning = null;
     const numericTokenLimit = Number((runtimeConfig && runtimeConfig.tokenLimit) ?? (config && config.tokenLimit) ?? 0);
@@ -234,13 +242,25 @@ export async function generateDigest(
     }
     // If metrics collection is enabled, append perf summary to summary and expose a view action
     try {
-        const metrics = (services as any).metrics as import('../services/metrics').Metrics | undefined;
+        // Safely narrow metrics from services without using `as any`
+        let metrics: import('../services/metrics').Metrics | undefined;
+        try {
+            const srec = services as unknown as Record<string, unknown>;
+            if (srec && srec.metrics && typeof srec.metrics === 'object') {
+                metrics = srec.metrics as import('../services/metrics').Metrics;
+            }
+        } catch (_) { /* swallow narrowing errors */ }
+
         if (config.performanceCollectMetrics && metrics) {
             const perfBlock = metrics.getPerfSummary();
             if (perfBlock && perfBlock.length > 0) {
                 digest.summary = (digest.summary || '') + '\n' + perfBlock;
                 // Expose a metadata flag so callers/UI can offer a 'View metrics' action
-                (digest as any).viewMetricsAvailable = true;
+                try {
+                    if (digest && typeof digest === 'object') {
+                        (digest as unknown as Record<string, unknown>).viewMetricsAvailable = true;
+                    }
+                } catch (_) { /* swallow */ }
             }
             // Also attempt to log metrics to output based on configured log level
             try { metrics.log(); } catch (e) { /* swallow logging errors */ }
@@ -265,7 +285,8 @@ export async function generateDigest(
                 files: digest.outputObjects,
                 warnings: digest.warnings,
                 metadata: {
-                    redactionApplied: !!(digest as any).redactionApplied,
+                    // Ensure we read redactionApplied defensively
+                    redactionApplied: !!(digest && typeof digest === 'object' ? (digest as unknown as Record<string, unknown>).redactionApplied : false),
                 totalFiles: files.length,
                 totalSize: files.reduce((acc, f) => acc + (f.size || 0), 0),
                 generatedAt: new Date().toISOString(),
@@ -279,7 +300,7 @@ export async function generateDigest(
                 },
                 format: runtimeConfig.outputFormat || config.outputFormat,
             }
-        } as any;
+    } as unknown as Record<string, unknown>;
             // Write cache atomically: write to temp files then rename into place
             const tmpJson = cachePath + '.tmp';
             const tmpOut = cacheOutPath + '.tmp';
@@ -303,41 +324,55 @@ export async function generateDigest(
     if (remoteTmpDir) {
         await cleanupRemoteTmp(remoteTmpDir);
     }
-    const finalResult = {
-    ...digest,
-    // Mirror redactionApplied at top-level for compatibility with UI that expects it
-    redactionApplied: !!(digest as any).redactionApplied,
-        // Return the actual output that was written (redacted or original)
-        content: outContent,
-        metadata: {
-            redactionApplied: !!(digest as any).redactionApplied,
+    // Use a local narrowed view for digest to read flags safely
+    const digestRec = (digest && typeof digest === 'object') ? (digest as unknown as Record<string, unknown>) : {} as Record<string, unknown>;
+
+    // Build a properly-typed metadata object that matches DigestResult.metadata
+        const finalMetadata: DigestResult['metadata'] & { redactionApplied?: boolean } = {
+            // Expose whether redaction was applied so callers/tests can inspect it
+            redactionApplied: !!digestRec.redactionApplied,
+            totalFiles: files.length,
+        totalSize: files.reduce((acc, f) => acc + (f.size || 0), 0),
+        generatedAt: new Date().toISOString(),
+        workspacePath: workspacePath,
+        selectedFiles: files.map(f => f.relPath),
+        limits: {
+            maxFiles: (runtimeConfig && (runtimeConfig as any).maxFiles) || config.maxFiles,
+            maxTotalSizeBytes: (runtimeConfig && (runtimeConfig as any).maxTotalSizeBytes) || config.maxTotalSizeBytes,
+            maxFileSize: (runtimeConfig && (runtimeConfig as any).maxFileSize) || config.maxFileSize,
+            maxDirectoryDepth: (runtimeConfig && (runtimeConfig as any).maxDirectoryDepth) || config.maxDirectoryDepth,
+        },
+        stats: {
             totalFiles: files.length,
             totalSize: files.reduce((acc, f) => acc + (f.size || 0), 0),
-            generatedAt: new Date().toISOString(),
-            workspacePath: workspacePath,
-            selectedFiles: files.map(f => f.relPath),
-            limits: {
-                maxFiles: runtimeConfig.maxFiles || config.maxFiles,
-                maxTotalSizeBytes: runtimeConfig.maxTotalSizeBytes || config.maxTotalSizeBytes,
-                maxFileSize: runtimeConfig.maxFileSize || config.maxFileSize,
-                maxDirectoryDepth: runtimeConfig.maxDirectoryDepth || config.maxDirectoryDepth,
-            },
-            stats: {
-                totalFiles: files.length,
-                totalSize: files.reduce((acc, f) => acc + (f.size || 0), 0),
-                skippedBySize: 0,
-                skippedByTotalLimit: 0,
-                skippedByMaxFiles: 0,
-                skippedByDepth: 0,
-                skippedByIgnore: 0,
-                directories: 0,
-                symlinks: 0,
-                warnings: digest.warnings,
-                durationMs: 0,
-                tokenEstimate: totalTokenEstimate
-            },
-            format: runtimeConfig.outputFormat || config.outputFormat,
-        } as any
+            skippedBySize: 0,
+            skippedByTotalLimit: 0,
+            skippedByMaxFiles: 0,
+            skippedByDepth: 0,
+            skippedByIgnore: 0,
+            directories: 0,
+            symlinks: 0,
+            warnings: Array.isArray(digest?.warnings) ? (digest!.warnings as string[]) : [],
+            durationMs: 0,
+            tokenEstimate: totalTokenEstimate,
+        },
+        format: (runtimeConfig && (runtimeConfig as any).outputFormat) || config.outputFormat,
+    };
+
+    // Construct a DigestResult with defensive reads from the generator output so
+    // the object is structurally compatible with the declared return type.
+    const finalResult: DigestResult = {
+        summary: typeof (digest as any)?.summary === 'string' ? (digest as any).summary : '',
+        tree: typeof (digest as any)?.tree === 'string' ? (digest as any).tree : '',
+        content: outContent,
+        chunks: Array.isArray((digest as any)?.chunks) ? (digest as any).chunks : undefined,
+        outputObjects: Array.isArray((digest as any)?.outputObjects) ? (digest as any).outputObjects : undefined,
+        warnings: Array.isArray((digest as any)?.warnings) ? (digest as any).warnings : [],
+        tokenEstimate: typeof (digest as any)?.tokenEstimate === 'number' ? (digest as any).tokenEstimate : totalTokenEstimate,
+        errors: Array.isArray((digest as any)?.errors) ? (digest as any).errors : undefined,
+        metadata: finalMetadata,
+        analysis: (digest as any)?.analysis ? (digest as any).analysis : undefined,
+        redactionApplied: !!digestRec.redactionApplied,
     };
 
     // Broadcast generation result to any open panels or sidebar views so webviews can react (e.g., show redaction toast)

@@ -10,6 +10,7 @@
 		"resolveJsonModule": true,
 		"sourceMap": true,
 		"strict": true,
+		"isolatedModules": true,
 		"forceConsistentCasingInFileNames": true,
 		"types": ["node", "vscode", "jest"],
 		"skipLibCheck": true

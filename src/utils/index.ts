@@ -6,3 +6,5 @@ export * as internalErrors from './errors';
 export * as interactiveMessages from './userMessages';
 export * from './diagnostics';
 export * from './asyncPool';
+// Re-export the streaming helper for reading large files.
+export { streamLargeFile } from './streaming';

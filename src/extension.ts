@@ -14,6 +14,7 @@ import { TokenAnalyzer } from './services/tokenAnalyzer';
 // The module 'vscode' contains the VS Code extensibility API
 // Import the module and reference it with the alias vscode in your code below
 import * as vscode from 'vscode';
+import { safeExecuteCommand } from './utils/safeExecuteCommand';
 
 
 import { CodebaseDigestTreeProvider } from './providers/treeDataProvider';
@@ -35,31 +36,80 @@ import { clearListeners } from './providers/eventBus';
 import { DigestGenerator } from './services/digestGenerator';
 // DEPRECATED: PreviewPanel import removed.
 
+// Lightweight runtime interface used during early activation when full provider
+// instances may not yet be available.
+interface MiniTreeProvider {
+	workspaceRoot: string;
+	getPreviewData(): { selectedCount: number; totalFiles: number; selectedSize: number | string; tokenEstimate: number; contextLimit: number };
+	setPreviewUpdater(): void;
+	selectAll(): void;
+	clearSelection(): void;
+	expandAll(): void;
+	collapseAll(): void;
+}
+
+// Narrow runtime shape for provider-like objects we interact with at activation time
+interface TreeLike extends Partial<MiniTreeProvider> {
+	refresh?: () => void;
+	pauseScan?: () => void;
+	resumeScan?: () => void;
+	dispose?: () => void;
+	viewTitleSetter?: () => void;
+	statusBarItem?: vscode.StatusBarItem;
+	updateCounts?: () => void;
+	toggleExpand?: (relPath: string) => void;
+}
+
+interface PanelLike {
+	reveal?: () => void;
+}
+
+function stringifyErr(err: unknown): string {
+	try {
+		if (!err) { return String(err); }
+		if (typeof err === 'string') { return err; }
+		if (typeof err === 'object' && err !== null) {
+			const maybeMsg = (err as { message?: unknown }).message;
+			if (typeof maybeMsg === 'string' && maybeMsg.length > 0) { return maybeMsg; }
+			try { return JSON.stringify(err); } catch { return String(err); }
+		}
+		return String(err);
+	} catch { return String(err); }
+}
+
 export function activate(context: vscode.ExtensionContext) {
 try { console.log('[codebase-digest] activate() called'); } catch (e) { try { console.debug('extension.activate log failed', e); } catch {} }
 	// Surface any uncaught promise rejections or exceptions during extension runtime
-	const onUnhandledRejection = (reason: any, promise: Promise<any>) => {
+	const onUnhandledRejection = (reason: unknown, _promise: Promise<unknown>) => {
 		try {
-			const msg = reason && reason.message ? reason.message : String(reason);
-			try { showUserError('An internal error occurred', String(msg)); } catch (e) { try { console.error('UnhandledRejection', msg); } catch {} }
-		} catch (e) {}
+			const msg = stringifyErr(reason);
+			try { showUserError('An internal error occurred', msg); } catch (err) { try { console.error('UnhandledRejection', msg, err); } catch {} }
+		} catch (e) { /* ignore */ }
 	};
-	const onUncaughtException = (err: any) => {
+	const onUncaughtException = (err: unknown) => {
 		try {
-			const msg = err && err.message ? err.message : String(err);
-			try { showUserError('An unexpected error occurred', String(msg)); } catch (e) { try { console.error('UncaughtException', msg); } catch {} }
-		} catch (e) {}
+			const msg = stringifyErr(err);
+			try { showUserError('An unexpected error occurred', msg); } catch (e) { try { console.error('UncaughtException', msg, e); } catch {} }
+		} catch (e) { /* ignore */ }
 	};
 	try {
-		(global as any).process && typeof (global as any).process.on === 'function' && (global as any).process.on('unhandledRejection', onUnhandledRejection);
-		(global as any).process && typeof (global as any).process.on === 'function' && (global as any).process.on('uncaughtException', onUncaughtException);
-		context.subscriptions.push({ dispose: () => { try { (global as any).process && typeof (global as any).process.removeListener === 'function' && (global as any).process.removeListener('unhandledRejection', onUnhandledRejection); } catch {} try { (global as any).process && typeof (global as any).process.removeListener === 'function' && (global as any).process.removeListener('uncaughtException', onUncaughtException); } catch {} } });
+		// Safely access global.process without double-casting; build a small wrapper so
+		// we can remove listeners reliably while avoiding brittle casts.
+		const gRec = global as unknown as Record<string, unknown> | undefined;
+		const globalProcess = gRec && typeof gRec['process'] === 'object' ? (gRec['process'] as NodeJS.Process) : undefined;
+		if (globalProcess && typeof globalProcess.on === 'function') {
+			const handleUnhandled = (reason: unknown, p?: Promise<unknown>) => { try { onUnhandledRejection(reason, p as Promise<unknown>); } catch { onUnhandledRejection(reason, Promise.resolve()); } };
+			const handleUncaught = (err: unknown) => onUncaughtException(err);
+			try { globalProcess.on('unhandledRejection', handleUnhandled); } catch {}
+			try { globalProcess.on('uncaughtException', handleUncaught); } catch {}
+			context.subscriptions.push({ dispose: () => { try { if (typeof globalProcess.removeListener === 'function') { try { globalProcess.removeListener('unhandledRejection', handleUnhandled); } catch {} try { globalProcess.removeListener('uncaughtException', handleUncaught); } catch {} } } catch {} } });
+		}
 	} catch (e) {}
 	// Ensure the sidebar view has a provider as early as possible so VS Code doesn't report "no data provider"
 	try {
 		const { registerCodebaseView } = require('./providers/codebasePanel');
 		if (typeof registerCodebaseView === 'function') {
-			const earlyDummy: any = {
+			const earlyDummy: MiniTreeProvider = {
 				workspaceRoot: '',
 				getPreviewData: () => ({ selectedCount: 0, totalFiles: 0, selectedSize: 0, tokenEstimate: 0, contextLimit: 0 }),
 				setPreviewUpdater: () => { },
@@ -117,7 +167,12 @@ try { console.log('[codebase-digest] activate() called'); } catch (e) { try { co
 		const resolvedPath = getFolderPath(folderPath);
 		if (!resolvedPath || !relPath) { return; }
 		const tp = treeProviders.get(resolvedPath);
-		if (tp && typeof (tp as any).toggleExpand === 'function') { (tp as any).toggleExpand(relPath); }
+		if (tp) {
+			const tRec = tp as unknown as TreeLike;
+			if (tRec && typeof tRec.toggleExpand === 'function') {
+				try { tRec.toggleExpand!(relPath); } catch {}
+			}
+		}
 	}));
 
 	// Pause/Resume scanning commands (invoked from panel)
@@ -125,13 +180,23 @@ try { console.log('[codebase-digest] activate() called'); } catch (e) { try { co
 		const resolvedPath = getFolderPath(folderPath);
 		if (!resolvedPath) { return; }
 		const tp = treeProviders.get(resolvedPath);
-		if (tp && typeof (tp as any).pauseScan === 'function') { (tp as any).pauseScan(); }
+		if (tp) {
+			const tRec = tp as unknown as TreeLike;
+			if (tRec && typeof tRec.pauseScan === 'function') {
+				try { tRec.pauseScan!(); } catch {}
+			}
+		}
 	}));
 	context.subscriptions.push(vscode.commands.registerCommand('codebaseDigest.resumeScan', async (folderPath?: string) => {
 		const resolvedPath = getFolderPath(folderPath);
 		if (!resolvedPath) { return; }
 		const tp = treeProviders.get(resolvedPath);
-		if (tp && typeof (tp as any).resumeScan === 'function') { (tp as any).resumeScan(); }
+		if (tp) {
+			const tRec = tp as unknown as TreeLike;
+			if (tRec && typeof tRec.resumeScan === 'function') {
+				try { tRec.resumeScan!(); } catch {}
+			}
+		}
 	}));
 	context.subscriptions.push(vscode.commands.registerCommand('codebaseDigest.collapseAll', async (folderPath?: string) => {
 		const resolvedPath = getFolderPath(folderPath);
@@ -161,7 +226,7 @@ try { console.log('[codebase-digest] activate() called'); } catch (e) { try { co
 			const treeProvider = new CodebaseDigestTreeProvider(folder, services);
 			treeProviders.set(folder.uri.fsPath, treeProvider);
 			// Ensure the provider's disposable (watcher/timers) is disposed on extension deactivation
-			try { context.subscriptions.push({ dispose: () => { try { if (typeof (treeProvider as any).dispose === 'function') { (treeProvider as any).dispose(); } } catch (e) {} } }); } catch (e) {}
+			try { context.subscriptions.push({ dispose: () => { try { const tpRec = treeProvider as unknown as Record<string, unknown>; if (tpRec && typeof tpRec['dispose'] === 'function') { try { (tpRec['dispose'] as () => void)(); } catch (e) {} } } catch (e) {} } }); } catch (e) {}
 			// Initial scan so the tree appears at activation
 			treeProvider.refresh();
 
@@ -178,11 +243,12 @@ try { console.log('[codebase-digest] activate() called'); } catch (e) { try { co
 
 			// On activation, optionally focus the contributed Primary Sidebar view (config validation runs later once Diagnostics is available)
 			try {
-				const cfg = vscode.workspace.getConfiguration('codebaseDigest', folder.uri) as any;
-				const openSidebar = cfg.get ? cfg.get('openSidebarOnActivate', true) : true;
+				const cfg = vscode.workspace.getConfiguration('codebaseDigest', folder.uri);
+				const openSidebar = typeof cfg.get === 'function' ? cfg.get('openSidebarOnActivate', true) : true;
 				if (openSidebar) {
 					try {
-						vscode.commands.executeCommand('workbench.view.extension.codebase-digest').then(undefined, () => {});
+						// best-effort: avoid unhandled rejections
+						safeExecuteCommand('workbench.view.extension.codebase-digest').then(() => {/*noop*/});
 					} catch (err) {
 						// ignore
 					}
@@ -196,7 +262,7 @@ try { console.log('[codebase-digest] activate() called'); } catch (e) { try { co
 		try {
 			const { registerCodebaseView } = require('./providers/codebasePanel');
 			if (typeof registerCodebaseView === 'function') {
-				const dummyProvider: any = {
+				const dummyProvider: MiniTreeProvider = {
 					workspaceRoot: '',
 					getPreviewData: () => ({ selectedCount: 0, totalFiles: 0, selectedSize: 0, tokenEstimate: 0, contextLimit: 0 }),
 					setPreviewUpdater: () => { },
@@ -219,7 +285,12 @@ try { console.log('[codebase-digest] activate() called'); } catch (e) { try { co
 		// Create and reveal the panel when explicitly requested by the user.
 		const panel = registerCodebasePanel(context, context.extensionUri, tp);
 		try {
-			if (panel && typeof (panel as any).reveal === 'function') { (panel as any).reveal(); }
+			if (panel) {
+				const pRec = panel as unknown as PanelLike;
+				if (pRec && typeof pRec.reveal === 'function') {
+					try { pRec.reveal!(); } catch {}
+				}
+			}
 		} catch (e) {
 			// If reveal fails for any reason, silently ignore so the rest of the extension still works.
 		}
@@ -251,7 +322,7 @@ try { console.log('[codebase-digest] activate() called'); } catch (e) { try { co
 			await fsp.rm(cacheDir, { recursive: true, force: true });
 			vscode.window.showInformationMessage('Digest cache cleared.');
 		} catch (e) {
-			vscode.window.showErrorMessage('Failed to clear digest cache: ' + (typeof e === 'object' && e && 'message' in e ? (e as any).message : String(e)));
+			vscode.window.showErrorMessage('Failed to clear digest cache: ' + stringifyErr(e));
 		}
 	}
 	context.subscriptions.push(vscode.commands.registerCommand('codebaseDigest.invalidateCache', clearCacheImpl));
@@ -259,14 +330,17 @@ try { console.log('[codebase-digest] activate() called'); } catch (e) { try { co
 	// Dashboard webview wiring
 	// DEPRECATED: PreviewPanel logic removed.
 
-	context.subscriptions.push(vscode.commands.registerCommand('codebaseDigest.openDashboard', () => {
+	context.subscriptions.push(vscode.commands.registerCommand('codebaseDigest.openDashboard', async () => {
 	// Prefer focusing the Primary Sidebar view; fall back to opening the panel if necessary
-	vscode.commands.executeCommand('codebaseDigest.focusView').then(() => {
-		// focusing succeeded or was attempted; nothing else to do
-	}, () => {
-		// fallback: open as panel
-		vscode.commands.executeCommand('codebaseDigest.openDashboardPanel');
-	});
+	try {
+		const result = await safeExecuteCommand('codebaseDigest.focusView');
+		if (!result) {
+			// best-effort fallback
+			safeExecuteCommand('codebaseDigest.openDashboardPanel').then(() => {/*noop*/});
+		}
+	} catch (e) {
+		safeExecuteCommand('codebaseDigest.openDashboardPanel').then(() => {/*noop*/});
+	}
 	}));
 
 	// Output format quick toggles
@@ -299,7 +373,7 @@ try { console.log('[codebase-digest] activate() called'); } catch (e) { try { co
 		if (workspaceFolders && workspaceFolders.length > 0) {
 			for (const folder of workspaceFolders) {
 				try {
-					const cfg = vscode.workspace.getConfiguration('codebaseDigest', folder.uri) as any;
+					const cfg = vscode.workspace.getConfiguration('codebaseDigest', folder.uri);
 					try {
 						// Build a plain runtime snapshot from workspace configuration keys.
 						// This avoids mutating the WorkspaceConfiguration object directly. If
@@ -387,7 +461,7 @@ try { console.log('[codebase-digest] activate() called'); } catch (e) { try { co
 	context.subscriptions.push(vscode.commands.registerCommand('codebaseDigest.focusView', async (folderPath?: string) => {
 		// Focus the custom view container first
 		try {
-			await vscode.commands.executeCommand('workbench.view.extension.codebase-digest');
+			await safeExecuteCommand('workbench.view.extension.codebase-digest');
 		} catch (e) {
 			// ignore
 		}
@@ -411,19 +485,21 @@ try { console.log('[codebase-digest] activate() called'); } catch (e) { try { co
 
 	// Settings command
 	context.subscriptions.push(vscode.commands.registerCommand('codebaseDigest.openSettings', () => {
-		vscode.commands.executeCommand('workbench.action.openSettings', 'codebaseDigest');
+		safeExecuteCommand('workbench.action.openSettings', 'codebaseDigest').then(() => {/*noop*/});
 	}));
 
 	// One-shot command: disable redaction for the next Generate run
 	context.subscriptions.push(vscode.commands.registerCommand('codebaseDigest.disableRedactionForNextRun', (folderPath?: string) => {
 		const resolved = getFolderPath(folderPath);
-		setTransientOverride(resolved, { showRedacted: true });
+		// transient overrides accept arbitrary records; keep a local narrow for clarity
+		const to = { showRedacted: true } as Record<string, unknown>;
+		setTransientOverride(resolved, to);
 		vscode.window.showInformationMessage('Redaction disabled for the next Generate run.');
 	}));
 
 	// Toolbar buttons for view
 	context.subscriptions.push(vscode.commands.registerCommand('codebaseDigest.toolbar.generateDigest', (folderPath?: string) => {
-		vscode.commands.executeCommand('codebaseDigest.generateDigest', folderPath);
+		safeExecuteCommand('codebaseDigest.generateDigest', folderPath).then(() => {/*noop*/});
 	}));
 	context.subscriptions.push(vscode.commands.registerCommand('codebaseDigest.toolbar.selectAll', (folderPath?: string) => {
 		const resolvedPath = getFolderPath(folderPath);
@@ -438,7 +514,7 @@ try { console.log('[codebase-digest] activate() called'); } catch (e) { try { co
 		if (resolvedPath) { const tp = treeProviders.get(resolvedPath); if (tp) { tp.refresh(); } }
 	}));
 	context.subscriptions.push(vscode.commands.registerCommand('codebaseDigest.toolbar.settings', () => {
-		vscode.commands.executeCommand('codebaseDigest.openSettings');
+		safeExecuteCommand('codebaseDigest.openSettings').then(() => {/*noop*/});
 	}));
 
 	// Context menu actions for Preview node
@@ -547,12 +623,21 @@ try { console.log('[codebase-digest] activate() called'); } catch (e) { try { co
 		}, 2000);
 	}
 	for (const [folderPath, treeProvider] of treeProviders.entries()) {
-	(treeProvider as any).viewTitleSetter = () => updateCounts(folderPath);
-	// Ensure provider has access to the shared status bar item for UI updates
-	try { (treeProvider as any).statusBarItem = statusBar; } catch (e) { /* ignore */ }
-	treeProvider.setPreviewUpdater(() => updateCounts(folderPath));
-	treeProvider.updateViewTitle();
-	updateCounts(folderPath);
+		// Narrow to a small runtime-friendly shape instead of casting to Record<string, unknown>
+		const tpRec = treeProvider as unknown as TreeLike;
+		try {
+			// Ensure a viewTitleSetter is present and set it defensively
+			if (typeof tpRec.viewTitleSetter === 'undefined') {
+				try { tpRec.viewTitleSetter = () => updateCounts(folderPath); } catch {}
+			} else {
+				try { tpRec.viewTitleSetter = () => updateCounts(folderPath); } catch {}
+			}
+		} catch {}
+		// Ensure provider has access to the shared status bar item for UI updates
+		try { if (tpRec) { try { tpRec.statusBarItem = statusBar; } catch (e) { /* ignore */ } } } catch (e) { /* ignore */ }
+		treeProvider.setPreviewUpdater(() => updateCounts(folderPath));
+		try { treeProvider.updateViewTitle(); } catch {}
+		try { updateCounts(folderPath); } catch {}
 	}
 
 	// Listen for workspace folder changes and keep WorkspaceManager, treeProviders and registrations in sync
@@ -569,7 +654,7 @@ try { console.log('[codebase-digest] activate() called'); } catch (e) { try { co
 					const treeProvider = new CodebaseDigestTreeProvider(folder, services);
 					treeProviders.set(folder.uri.fsPath, treeProvider);
 					// Ensure the provider's disposable (watcher/timers) is disposed on extension deactivation
-					try { context.subscriptions.push({ dispose: () => { try { if (typeof (treeProvider as any).dispose === 'function') { (treeProvider as any).dispose(); } } catch (e) {} } }); } catch (e) {}
+					try { context.subscriptions.push({ dispose: () => { try { const tpRec = treeProvider as unknown as Record<string, unknown>; if (tpRec && typeof tpRec['dispose'] === 'function') { try { (tpRec['dispose'] as () => void)(); } catch (e) {} } } catch (e) {} } }); } catch (e) {}
 					// Initial scan
 					treeProvider.refresh();
 					// Register sidebar view for this provider
@@ -596,8 +681,11 @@ try { console.log('[codebase-digest] activate() called'); } catch (e) { try { co
 					const key = folder.uri.fsPath;
 					// Dispose and remove tree provider
 					const tp = treeProviders.get(key);
-					if (tp && typeof (tp as any).dispose === 'function') {
-						try { (tp as any).dispose(); } catch (dErr) { /* ignore */ }
+					if (tp) {
+						const tpRec = tp as unknown as Record<string, unknown>;
+						if (tpRec && typeof tpRec['dispose'] === 'function') {
+							try { (tpRec['dispose'] as () => void)(); } catch (dErr) { /* ignore */ }
+						}
 					}
 					treeProviders.delete(key);
 					// Remove bundle from workspace manager
@@ -621,5 +709,11 @@ try { console.log('[codebase-digest] activate() called'); } catch (e) { try { co
 export function deactivate() {
 	try { clearListeners(); } catch (e) { /* ignore */ }
 	// Dispose shared resources from services (avoid leaking OutputChannels)
-	try { if (typeof (DigestGenerator as any).disposeErrorChannel === 'function') { (DigestGenerator as any).disposeErrorChannel(); } } catch (e) { /* ignore */ }
+	try {
+		// Dispose any error channel/resources exposed by the DigestGenerator if available at runtime.
+		const dgRec = DigestGenerator as unknown as Record<string, unknown> | undefined;
+		if (dgRec && typeof dgRec['disposeErrorChannel'] === 'function') {
+			try { (dgRec['disposeErrorChannel'] as () => void)(); } catch (e) { /* ignore */ }
+		}
+	} catch (e) { /* ignore */ }
 }

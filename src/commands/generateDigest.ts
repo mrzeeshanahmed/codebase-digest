@@ -1,19 +1,23 @@
 import * as vscode from 'vscode';
 import { generateDigest } from '../providers/digestProvider';
 import { internalErrors, interactiveMessages } from '../utils';
+import { safeExecuteCommand } from '../utils/safeExecuteCommand';
 import { takeTransientOverride } from '../utils/transientOverrides';
 
 export function registerCommands(context: vscode.ExtensionContext, treeProvider: any, services?: any) {
     context.subscriptions.push(
-    vscode.commands.registerCommand('codebaseDigest.generateDigest', async (folderPathArg?: string | vscode.Uri | vscode.WorkspaceFolder, overrides?: Record<string, any>) => {
+    vscode.commands.registerCommand('codebaseDigest.generateDigest', async (folderPathArg?: string | vscode.Uri | vscode.WorkspaceFolder, overrides?: Record<string, unknown>) => {
             try {
                 // Adapter: resolve workspaceFolder from various caller arg shapes (string path, Uri, or WorkspaceFolder).
                 const workspaceFolders = vscode.workspace.workspaceFolders;
                 let workspaceFolder: vscode.WorkspaceFolder | undefined;
                 try {
-                    if (folderPathArg && (folderPathArg as any).uri && (folderPathArg as any).uri.fsPath) {
-                        // If a WorkspaceFolder object was passed
-                        workspaceFolder = folderPathArg as vscode.WorkspaceFolder;
+                    // Guard: check common WorkspaceFolder shape { uri: { fsPath } }
+                    if (folderPathArg && typeof folderPathArg === 'object' && 'uri' in (folderPathArg as unknown as Record<string, unknown>)) {
+                        const maybeUri = (folderPathArg as unknown as Record<string, unknown>)['uri'];
+                        if (maybeUri && typeof maybeUri === 'object' && 'fsPath' in (maybeUri as unknown as Record<string, unknown>)) {
+                            workspaceFolder = folderPathArg as vscode.WorkspaceFolder;
+                        }
                     } else if (folderPathArg instanceof vscode.Uri) {
                         workspaceFolder = vscode.workspace.getWorkspaceFolder(folderPathArg as vscode.Uri) || undefined;
                     } else if (typeof folderPathArg === 'string' && folderPathArg) {
@@ -44,7 +48,7 @@ export function registerCommands(context: vscode.ExtensionContext, treeProvider:
                 // Assume WorkspaceManager is available on services
                 const workspaceManager = services?.workspaceManager;
                 // If no explicit overrides provided by the caller, check for a transient one-shot override
-                let finalOverrides = overrides;
+                let finalOverrides = overrides as Record<string, unknown> | undefined;
                 if (!finalOverrides) {
                     const folderPath = workspaceFolder.uri.fsPath;
                     const transient = takeTransientOverride(folderPath);
@@ -65,7 +69,7 @@ export function registerCommands(context: vscode.ExtensionContext, treeProvider:
                     return;
                 }
                 vscode.window.showInformationMessage('Digest generated successfully.');
-                try { vscode.commands.executeCommand('codebaseDigest.flashDigestReady'); } catch (e) { }
+                try { safeExecuteCommand('codebaseDigest.flashDigestReady').then(() => {/*noop*/}); } catch (e) { }
                 // Broadcast generation result to any open dashboard panels/views so UI can show redaction toast
                 try {
                     // @ts-ignore - dynamic import for optional module (code-splitting)

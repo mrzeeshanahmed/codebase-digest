@@ -1,18 +1,18 @@
-const overrides = new Map<string, Record<string, any>>();
+const overrides = new Map<string, Record<string, unknown>>();
 
-export function setTransientOverride(folderPath: string | undefined, data: Record<string, any>) {
+export function setTransientOverride(folderPath: string | undefined, data: Record<string, unknown>) {
     const key = folderPath || '__global__';
     overrides.set(key, data);
 }
 
-export function takeTransientOverride(folderPath: string | undefined): Record<string, any> | undefined {
+export function takeTransientOverride(folderPath: string | undefined): Record<string, unknown> | undefined {
     const key = folderPath || '__global__';
     const v = overrides.get(key);
     if (v) { overrides.delete(key); }
     return v;
 }
 
-export function peekTransientOverride(folderPath: string | undefined): Record<string, any> | undefined {
+export function peekTransientOverride(folderPath: string | undefined): Record<string, unknown> | undefined {
     const key = folderPath || '__global__';
     return overrides.get(key);
 }

@@ -31,7 +31,7 @@ export function validateConfig(cfg: DigestConfig, diagnostics: Diagnostics): voi
     // Normalize certain legacy aliases first (e.g., 'include' => 'includePlaceholder')
     if (typeof cfg.binaryFilePolicy === 'string' && String(cfg.binaryFilePolicy).trim().toLowerCase() === 'include') {
         diagnostics.warn(`binaryFilePolicy 'include' is deprecated; treating as 'includePlaceholder'.`);
-        cfg.binaryFilePolicy = 'includePlaceholder' as any;
+        cfg.binaryFilePolicy = 'includePlaceholder';
     }
 
     // Enums: coerce and warn
@@ -84,10 +84,10 @@ export function validateConfig(cfg: DigestConfig, diagnostics: Diagnostics): voi
     if (cfg.redactionPatterns !== undefined) {
         if (Array.isArray(cfg.redactionPatterns)) {
             // ensure all entries are strings
-            cfg.redactionPatterns = (cfg.redactionPatterns as any[]).map(p => typeof p === 'string' ? p : String(p)).filter(Boolean);
+            cfg.redactionPatterns = (cfg.redactionPatterns as Array<unknown>).map(p => typeof p === 'string' ? p : String(p)).filter(Boolean);
         } else if (typeof cfg.redactionPatterns === 'string') {
             // convert comma/newline-separated string to array
-            const raw = cfg.redactionPatterns as string;
+            const raw = String(cfg.redactionPatterns);
             cfg.redactionPatterns = raw.split(/\r?\n|,/).map((s: string) => s.trim()).filter(Boolean);
         } else {
             diagnostics.warn('redactionPatterns must be an array or string. Coercing to empty array.');

@@ -38,9 +38,13 @@ export class TokenAnalyzer {
 
         // Support comment weighting via a special override key 'commentWeight'
         // If provided, attempt to heuristically split comments from code and weight comment length accordingly.
-        const commentWeight = typeof (divisorOverrides && (divisorOverrides as any).commentWeight) === 'number'
-            ? (divisorOverrides as any).commentWeight
-            : 1;
+        // Read commentWeight defensively from divisorOverrides without `as any`
+        let commentWeight = 1;
+        try {
+            if (divisorOverrides && typeof divisorOverrides === 'object' && typeof (divisorOverrides as Record<string, unknown>)['commentWeight'] === 'number') {
+                commentWeight = (divisorOverrides as Record<string, number>)['commentWeight'];
+            }
+        } catch (e) { /* swallow */ }
 
         let effectiveLength = content.length;
         if (commentWeight !== 1) {

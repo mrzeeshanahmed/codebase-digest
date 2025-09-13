@@ -87,18 +87,18 @@ export function redactSecrets(
     }
 
     // Merge user-provided patterns (if any) before the default rules so user intent is prioritized.
-    // Normalize legacy alias: allow 'redactionPlaceholder' or 'redactionPlaceholder' only.
-    const placeholder = (typeof config?.redactionPlaceholder === 'string' && config!.redactionPlaceholder) ? config!.redactionPlaceholder : '[REDACTED]';
+    const placeholder = (config && typeof config.redactionPlaceholder === 'string') ? config.redactionPlaceholder : '[REDACTED]';
 
-    const userPatterns = Array.isArray(config?.redactionPatterns) ? config!.redactionPatterns : [] as any[];
+    const userPatterns = Array.isArray(config?.redactionPatterns) ? (config!.redactionPatterns as Array<unknown>) : [] as Array<unknown>;
 
     // Helper to escape literal strings for RegExp
     const escapeForRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
     const compiledUserRules: RedactionRule[] = [];
     for (const raw of userPatterns) {
-        if (!raw || typeof raw !== 'string') { continue; }
-        const trimmed = raw.trim();
+        if (raw === undefined || raw === null) { continue; }
+        if (typeof raw !== 'string') { continue; }
+        const trimmed = (raw as string).trim();
         if (!trimmed) { continue; }
         try {
             let re: RegExp | null = null;
@@ -120,7 +120,7 @@ export function redactSecrets(
                     re = new RegExp(escapeForRegExp(trimmed), 'g');
                 }
             }
-            if (re) {
+                if (re) {
                 // Ensure global flag so replace semantics work predictably
                 const flags = re.flags && re.flags.includes('g') ? re.flags : (re.flags + 'g').replace(/[^gimsyu]/g, '');
                 const safeRe = new RegExp(re.source, flags);

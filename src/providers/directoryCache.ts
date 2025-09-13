@@ -1,11 +1,11 @@
-import { FileNode } from '../types/interfaces';
+import { FileNode, DigestConfig } from '../types/interfaces';
 import { ContentProcessor } from '../services/contentProcessor';
 
 export class DirectoryCache {
     private cache: Map<string, FileNode[]> = new Map();
-    private fileScanner: any;
+    private fileScanner: unknown;
 
-    constructor(fileScanner: any) {
+    constructor(fileScanner: unknown) {
         this.fileScanner = fileScanner;
     }
 
@@ -13,17 +13,21 @@ export class DirectoryCache {
     get(path: string): FileNode[] | undefined { return this.cache.get(path); }
     set(path: string, children: FileNode[]) { this.cache.set(path, children); }
 
-    async hydrateDirectory(dirPath: string, config: any): Promise<FileNode[]> {
+    async hydrateDirectory(dirPath: string, config: DigestConfig): Promise<FileNode[]> {
         // Use ContentProcessor.scanDirectory to perform directory traversal for caching.
-        const children = await ContentProcessor.scanDirectory(dirPath, config as any, 0, dirPath);
+        // Pass the typed DigestConfig through; ContentProcessor.scanDirectory expects DigestConfig.
+        const children = await ContentProcessor.scanDirectory(dirPath, config, 0, dirPath);
         // Ensure cached nodes do not carry selection state. Selection should be
         // managed by the SelectionManager / tree provider, not by a passive cache
         // hydration. Clear isSelected recursively to avoid polluting UI selection.
         const clearSelection = (nodes?: FileNode[]) => {
             if (!Array.isArray(nodes)) { return; }
             for (const n of nodes) {
-                try { (n as any).isSelected = false; } catch (e) {}
-                if (Array.isArray((n as any).children)) { clearSelection((n as any).children); }
+                try {
+                    const rec = n as unknown as Record<string, unknown>;
+                    if (typeof rec.isSelected !== 'undefined') { rec.isSelected = false; }
+                    if (Array.isArray(rec.children)) { clearSelection(rec.children as unknown as FileNode[]); }
+                } catch (e) {}
             }
         };
         try { clearSelection(children); } catch (e) {}
