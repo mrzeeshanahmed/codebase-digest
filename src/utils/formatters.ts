@@ -134,18 +134,16 @@ export class Formatters {
      * Builds a file header string for output using config template and token substitution.
      */
     buildFileHeader(node: FileNode, config: DigestConfig): string {
-        // Load FSUtils if available; prefer a safe runtime check instead of `as any`.
+        // Load FSUtils once if available; reuse for formatMtime and humanFileSize.
         let formatMtimeFn: (d: Date) => string = Formatters.formatMtime;
+        const fsu = ((): Record<string, unknown> | undefined => {
+            try { const m = require('./fsUtils'); return (m && typeof m === 'object') ? (m as Record<string, unknown>) : undefined; } catch { return undefined; }
+        })();
         try {
-            const maybe = require('./fsUtils');
-            if (maybe && typeof maybe === 'object') {
-                const rec = maybe as Record<string, unknown>;
-                const FSUtilsCtor = rec['FSUtils'];
-                if (FSUtilsCtor && typeof (FSUtilsCtor as Record<string, unknown>)['formatMtime'] === 'function') {
-                    // use the FSUtils.formatMtime implementation if it exists
-                    const boundFn = (FSUtilsCtor as Record<string, unknown>)['formatMtime'] as (d: Date) => string;
-                    formatMtimeFn = boundFn.bind(FSUtilsCtor as unknown);
-                }
+            const FSUtilsCtor = fsu?.['FSUtils'];
+            if (FSUtilsCtor && typeof (FSUtilsCtor as Record<string, unknown>)['formatMtime'] === 'function') {
+                const boundFn = (FSUtilsCtor as Record<string, unknown>)['formatMtime'] as (d: Date) => string;
+                formatMtimeFn = boundFn.bind(FSUtilsCtor as unknown);
             }
         } catch {}
 
@@ -154,12 +152,9 @@ export class Formatters {
             .replace(/<relPath>/g, node.relPath)
             .replace(/<size>/g, node.size ? ((): string => {
                 try {
-                    const fsu = require('./fsUtils');
-                    if (fsu && (typeof fsu.FSUtils === 'object' || typeof fsu.FSUtils === 'function') && fsu.FSUtils) {
-                        const fsUtilsRec = fsu.FSUtils as Record<string, unknown>;
-                        if (typeof fsUtilsRec.humanFileSize === 'function') {
-                            return (fsUtilsRec.humanFileSize as (n: number) => string)(node.size);
-                        }
+                    const fsUtilsRec = fsu?.FSUtils as Record<string, unknown> | undefined;
+                    if (fsUtilsRec && typeof fsUtilsRec.humanFileSize === 'function') {
+                        return (fsUtilsRec.humanFileSize as (n: number) => string)(node.size);
                     }
                 } catch (e) {}
                 return '';

@@ -171,18 +171,14 @@ export class FileScanner {
                     if (fsUtilsMod && typeof fsUtilsMod === 'object') {
                         const rec = fsUtilsMod as Record<string, unknown>;
                         const maybeFSUtils = rec['FSUtils'];
+                        // Prefer FSUtils.isReadable when present, otherwise look for top-level isReadable
                         if (maybeFSUtils && typeof (maybeFSUtils as Record<string, unknown>)['isReadable'] === 'function') {
-                            // Wrap the FSUtils isReadable implementation with a properly-typed wrapper
                             const fn = (maybeFSUtils as Record<string, unknown>)['isReadable'];
-                            if (typeof fn === 'function') {
-                                isReadableFn = (p: string) => (fn as (p: string) => Promise<boolean>)(p);
-                            }
-                } else if (typeof rec['isReadable'] === 'function') {
-                    const fn = rec['isReadable'];
-                    // Wrap runtime value defensively and coerce parameter safely to string when calling
-                    if (typeof fn === 'function') {
-                    isReadableFn = (p: string) => Promise.resolve((fn as Function)(String(p))).then(res => Boolean(res));
-                    }
+                            // Normalize runtime return types (boolean | Promise<boolean>) into Promise<boolean>
+                            isReadableFn = (p: string) => Promise.resolve((fn as unknown as ((p: string) => boolean | Promise<boolean>))(String(p))).then(Boolean);
+                        } else if (typeof rec['isReadable'] === 'function') {
+                            const fn = rec['isReadable'];
+                            isReadableFn = (p: string) => Promise.resolve((fn as unknown as ((p: string) => boolean | Promise<boolean>))(String(p))).then(Boolean);
                         }
                     }
                     if (isReadableFn) {

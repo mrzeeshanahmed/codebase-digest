@@ -108,7 +108,6 @@ export function scrubHeaders(init?: unknown): string {
                 }
             } catch (_) { /* ignore iteration errors */ }
         } else if (Array.isArray(hdrs)) {
-        } else if (Array.isArray(hdrs)) {
             for (const item of hdrs as Array<unknown>) {
                 if (Array.isArray(item) && item.length >= 2) {
                     try { parts.push(`${String(item[0])}: ${scrubTokens(String(item[1]))}`); } catch (_) { /* ignore */ }

@@ -110,9 +110,16 @@ describe('Micro-benchmarks: file scanning and content reading', () => {
         // If baseline is zero, skip check
         if (baseVal > 0) {
           const ratio = curVal / baseVal;
-            // allow a more forgiving 1000x multiplier to avoid flaky CI
-            // failures across very slow machines or constrained CI runners
-            expect(ratio <= 1000).toBe(true);
+          // Allow configuring the acceptable multiplier via PERF_RATIO_MULTIPLIER env var.
+          // This is parsed as an integer and must be a finite positive number. Defaults to 100
+          // (use a larger value in CI by setting PERF_RATIO_MULTIPLIER to a higher integer).
+          const raw = process.env.PERF_RATIO_MULTIPLIER;
+          let multiplier = 100;
+          if (raw !== undefined) {
+            const parsed = parseInt(String(raw), 10);
+            if (Number.isFinite(parsed) && parsed > 0) { multiplier = parsed; }
+          }
+          expect(ratio <= multiplier).toBe(true);
         }
     }
 

@@ -159,10 +159,21 @@ export class ContentProcessor {
         for (const entry of entries) {
             // Resolve candidate absolute path and ensure it stays within the initial root
             const candidate = path.resolve(rootDir, entry.name);
-            const resolvedRoot = path.resolve(root);
+            // Resolve real paths when possible to avoid symlink escape; fall back to resolved paths
+            const resolvedRootPath = (async () => {
+                try { return await fsp.realpath(root); } catch { return path.resolve(root); }
+            })();
+            const resolvedCandidatePath = (async () => {
+                try { return await fsp.realpath(candidate); } catch { return path.resolve(candidate); }
+            })();
+            const rr = await resolvedRootPath;
+            const rc = await resolvedCandidatePath;
             // If the candidate resolves outside the scanned root, skip it to
-            // avoid path traversal attacks or symlink escape.
-            if (!candidate.startsWith(resolvedRoot + path.sep) && candidate !== resolvedRoot) {
+            // avoid path traversal attacks or symlink escape. Use path.relative for a
+            // cross-platform containment test rather than string startsWith.
+            const rel = path.relative(rr, rc);
+            const isInside = rel === '' || (rel !== '..' && !rel.startsWith('..' + path.sep));
+            if (!isInside) {
                 // best-effort debug; do not throw for traversal to avoid breaking scans
                 console.debug(`[ContentProcessor.scanDirectory] Skipping path outside root: ${candidate}`);
                 continue;
