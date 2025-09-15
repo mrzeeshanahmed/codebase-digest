@@ -1,0 +1,17 @@
+{
+  "ignoreDirs": [
+    "test",
+    "src/test",
+    ".github",
+    "scripts",
+    "resources"
+  ],
+  "ignores": [
+    "vscode",
+    "@jest/globals",
+    "optional-tiktoken-adapter",
+    "webpack-cli",
+    "simple-git",
+    "depcheck"
+  ]
+}

@@ -8,7 +8,7 @@ export type SpawnOptions = NodeSpawnOptions;
  * Spawn git with args and return a promise that resolves with stdout on success,
  * or rejects with a scrubbed error on failure. This centralizes sanitization.
  */
-export function spawnGitPromise(args: string[], opts?: SpawnOptions): Promise<{ stdout: string; stderr: string }>{
+export function spawnGitPromise(args: string[], opts?: SpawnOptions, onChunk?: (chunk: { stream: 'stdout' | 'stderr'; data: string }) => void): Promise<{ stdout: string; stderr: string }>{
     return new Promise((resolve, reject) => {
         // Basic validation: ensure args is an array of simple tokens (no control characters or shell metacharacters)
         if (!Array.isArray(args)) { return reject(new Error('Invalid git args')); }
@@ -34,10 +34,18 @@ export function spawnGitPromise(args: string[], opts?: SpawnOptions): Promise<{ 
         let out = '';
         let err = '';
         if (proc.stdout) {
-            proc.stdout.on('data', (d: Buffer) => { out += d.toString(); });
+            proc.stdout.on('data', (d: Buffer) => {
+                const s = d.toString();
+                out += s;
+                try { if (typeof onChunk === 'function') { onChunk({ stream: 'stdout', data: s }); } } catch (_) { /* swallow listener errors */ }
+            });
         }
         if (proc.stderr) {
-            proc.stderr.on('data', (d: Buffer) => { err += d.toString(); });
+            proc.stderr.on('data', (d: Buffer) => {
+                const s = d.toString();
+                err += s;
+                try { if (typeof onChunk === 'function') { onChunk({ stream: 'stderr', data: s }); } } catch (_) { /* swallow listener errors */ }
+            });
         }
         proc.on('error', (e: unknown) => {
             let msg = '';

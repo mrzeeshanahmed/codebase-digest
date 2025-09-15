@@ -1,0 +1,45 @@
+{
+  // Directories to ignore when scanning for used/unused dependencies. These
+  // folders contain test fixtures, build outputs, or resources that are
+  // intentionally excluded from depcheck analysis.
+  "ignoreDirs": [
+    "test",
+    "src/test",
+    ".github",
+    "scripts",
+    "resources"
+  ],
+
+  // Packages listed here are intentionally ignored by depcheck because they
+  // are referenced in non-standard ways (e.g. provided by VS Code at runtime),
+  // used only in tests, used by tooling, or are the depcheck tool itself.
+  "ignores": [
+    // 'vscode' is the runtime API provided by the VS Code host and isn't
+    // imported as a normal dependency at runtime; ignore it so depcheck
+    // doesn't report it as unused.
+    "vscode",
+
+    // Jest provides test globals via '@jest/globals' in test files. We keep
+    // it out of depcheck results because test harness imports can be
+    // non-obvious to static analysis.
+    "@jest/globals",
+
+    // optional-tiktoken-adapter is an optional runtime adapter used only
+    // when the consumer installs the optional package. It's intentionally
+    // listed as optional in the code and should not be removed automatically.
+    "optional-tiktoken-adapter",
+
+    // 'webpack-cli' is a tooling dependency used by local builds (webpack)
+    // and is referenced by scripts rather than by static imports. Ignore it
+    // to avoid false positives.
+    "webpack-cli",
+
+    // 'simple-git' is used in some scripts or tools via dynamic requires
+    // or at runtime in CI; static analysis can miss those usages.
+    "simple-git",
+
+    // 'depcheck' itself is frequently included as a dev-time dependency
+    // and can appear unused to depcheck; exclude it from its own analysis.
+    "depcheck"
+  ]
+}

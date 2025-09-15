@@ -3,6 +3,7 @@ import * as path from 'path';
 import { CodebaseDigestTreeProvider } from './treeDataProvider';
 import { onProgress } from './eventBus';
 import { setWebviewHtml, wireWebviewMessages } from './webviewHelpers';
+import { ConfigurationService } from '../services/configurationService';
 import { Diagnostics } from '../utils/diagnostics';
 const diagnostics = new Diagnostics('debug', 'Code Ingest');
 
@@ -150,43 +151,32 @@ export class CodebaseDigestPanel {
 
         private async postConfig() {
             if (!this.panel) { return; }
-            const cfg = vscode.workspace.getConfiguration('codebaseDigest', vscode.Uri.file(this.folderPath));
-                    const thresholdsDefault = { maxFiles: 25000, maxTotalSizeBytes: 536870912, tokenLimit: 32000 };
-                    // Prefer explicitly flattened settings when present. Fall back to nested
-                    // `thresholds` object, then finally to hard defaults. This avoids a stale
-                    // thresholds object incorrectly overriding a direct setting.
-            const thresholds = cfg.get<Record<string, unknown> | undefined>('thresholds') || {};
-            const rawMaxFiles = cfg.get<number | undefined>('maxFiles');
-            const rawMaxTotalSizeBytes = cfg.get<number | undefined>('maxTotalSizeBytes');
-            const rawTokenLimit = cfg.get<number | undefined>('tokenLimit');
-                    const maxFiles = (typeof rawMaxFiles === 'number') ? rawMaxFiles : (typeof thresholds.maxFiles === 'number' ? thresholds.maxFiles : thresholdsDefault.maxFiles);
-                    const maxTotalSizeBytes = (typeof rawMaxTotalSizeBytes === 'number') ? rawMaxTotalSizeBytes : (typeof thresholds.maxTotalSizeBytes === 'number' ? thresholds.maxTotalSizeBytes : thresholdsDefault.maxTotalSizeBytes);
-                    const tokenLimit = (typeof rawTokenLimit === 'number') ? rawTokenLimit : (typeof thresholds.tokenLimit === 'number' ? thresholds.tokenLimit : thresholdsDefault.tokenLimit);
-
+            // Use ConfigurationService to get validated snapshot for reads
+            try {
+                const cfgSnapshot = ConfigurationService.getWorkspaceConfig(vscode.Uri.file(this.folderPath), diagnostics);
+                const thresholdsDefault = { maxFiles: 25000, maxTotalSizeBytes: 536870912, tokenLimit: 32000 };
+                const thresholds = (cfgSnapshot as any).thresholds || {};
                 const payload = {
                     type: 'config',
                     folderPath: this.folderPath,
                     settings: {
-                        respectGitignore: cfg.get('respectGitignore', cfg.get('gitignore', true)),
-                        presets: cfg.get('presets', []),
-                        // Keep backwards-compatibility: expose filterPresets alongside presets
-                        filterPresets: cfg.get('filterPresets', cfg.get('presets', [])),
-                        outputFormat: cfg.get('outputFormat', 'text'),
-                        tokenModel: cfg.get('tokenModel', 'chars-approx'),
-                        binaryFilePolicy: cfg.get('binaryFilePolicy', cfg.get('binaryPolicy', 'skip')),
-                        // flattened thresholds
-                        maxFiles,
-                        maxTotalSizeBytes,
-                        tokenLimit,
+                        respectGitignore: cfgSnapshot.respectGitignore,
+                        presets: Array.isArray((cfgSnapshot as any).presets) ? (cfgSnapshot as any).presets : [],
+                        filterPresets: Array.isArray((cfgSnapshot as any).filterPresets) ? (cfgSnapshot as any).filterPresets : [],
+                        outputFormat: cfgSnapshot.outputFormat,
+                        tokenModel: cfgSnapshot.tokenModel,
+                        binaryFilePolicy: cfgSnapshot.binaryFilePolicy,
+                        maxFiles: cfgSnapshot.maxFiles,
+                        maxTotalSizeBytes: cfgSnapshot.maxTotalSizeBytes,
+                        tokenLimit: cfgSnapshot.tokenLimit,
                         thresholds: Object.assign({}, thresholdsDefault, thresholds),
-                        // redaction settings
-                        showRedacted: cfg.get('showRedacted', false),
-                        redactionPatterns: cfg.get('redactionPatterns', []),
-                        redactionPlaceholder: cfg.get('redactionPlaceholder', '[REDACTED]')
+                        showRedacted: cfgSnapshot.showRedacted,
+                        redactionPatterns: cfgSnapshot.redactionPatterns,
+                        redactionPlaceholder: cfgSnapshot.redactionPlaceholder
                     }
                 };
-
-            this.panel.webview.postMessage(payload);
+                this.panel.webview.postMessage(payload);
+            } catch (e) { try { diagnostics.warn('postConfig failed (snapshot)', e); } catch {} }
         }
 
         private async applyConfigChanges(changes: Record<string, any>) {
@@ -285,32 +275,26 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
             const tpRec = treeProvider as unknown as { workspaceRoot?: unknown };
             try {
                 const folder = typeof tpRec.workspaceRoot === 'string' ? String(tpRec.workspaceRoot) : '';
-                const cfg = vscode.workspace.getConfiguration('codebaseDigest', vscode.Uri.file(folder));
+                const snapshot = ConfigurationService.getWorkspaceConfig(vscode.Uri.file(folder));
                 const thresholdsDefault = { maxFiles: 25000, maxTotalSizeBytes: 536870912, tokenLimit: 32000 };
-                const thresholds = cfg.get<Record<string, unknown> | undefined>('thresholds') || {};
-                const rawMaxFiles = cfg.get<number | undefined>('maxFiles');
-                const rawMaxTotalSizeBytes = cfg.get<number | undefined>('maxTotalSizeBytes');
-                const rawTokenLimit = cfg.get<number | undefined>('tokenLimit');
-                const maxFiles = (typeof rawMaxFiles === 'number') ? rawMaxFiles : (typeof thresholds.maxFiles === 'number' ? (thresholds.maxFiles as number) : thresholdsDefault.maxFiles);
-                const maxTotalSizeBytes = (typeof rawMaxTotalSizeBytes === 'number') ? rawMaxTotalSizeBytes : (typeof thresholds.maxTotalSizeBytes === 'number' ? (thresholds.maxTotalSizeBytes as number) : thresholdsDefault.maxTotalSizeBytes);
-                const tokenLimit = (typeof rawTokenLimit === 'number') ? rawTokenLimit : (typeof thresholds.tokenLimit === 'number' ? (thresholds.tokenLimit as number) : thresholdsDefault.tokenLimit);
+                const thresholds = (snapshot as any).thresholds || {};
                 const payload = {
                     type: 'config',
                     folderPath: folder,
                     settings: {
-                        respectGitignore: cfg.get('respectGitignore', cfg.get('gitignore', true)),
-                        presets: cfg.get('presets', []),
-                        filterPresets: cfg.get('filterPresets', cfg.get('presets', [])),
-                        outputFormat: cfg.get('outputFormat', 'text'),
-                        tokenModel: cfg.get('tokenModel', 'chars-approx'),
-                        binaryFilePolicy: cfg.get('binaryFilePolicy', cfg.get('binaryPolicy', 'skip')),
-                        maxFiles,
-                        maxTotalSizeBytes,
-                        tokenLimit,
+                        respectGitignore: snapshot.respectGitignore,
+                        presets: (snapshot as any).presets || [],
+                        filterPresets: (snapshot as any).filterPresets || [],
+                        outputFormat: snapshot.outputFormat,
+                        tokenModel: snapshot.tokenModel,
+                        binaryFilePolicy: snapshot.binaryFilePolicy,
+                        maxFiles: snapshot.maxFiles,
+                        maxTotalSizeBytes: snapshot.maxTotalSizeBytes,
+                        tokenLimit: snapshot.tokenLimit,
                         thresholds: Object.assign({}, thresholdsDefault, thresholds),
-                        showRedacted: cfg.get('showRedacted', false),
-                        redactionPatterns: cfg.get('redactionPatterns', []),
-                        redactionPlaceholder: cfg.get('redactionPlaceholder', '[REDACTED]')
+                        showRedacted: snapshot.showRedacted,
+                        redactionPatterns: snapshot.redactionPatterns || [],
+                        redactionPlaceholder: snapshot.redactionPlaceholder || '[REDACTED]'
                     }
                 };
                 webviewView.webview.postMessage(payload);
@@ -320,7 +304,7 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                 try { activeViews.set(webviewView, typeof tpRec.workspaceRoot === 'string' ? String(tpRec.workspaceRoot) : ''); } catch (e) {}
 
             // Use shared wiring helper for sidebar messages as well
-            wireWebviewMessages(webviewView.webview, treeProvider, typeof tpRec.workspaceRoot === 'string' ? String(tpRec.workspaceRoot) : '', async (changes: Record<string, any>) => {
+                wireWebviewMessages(webviewView.webview, treeProvider, typeof tpRec.workspaceRoot === 'string' ? String(tpRec.workspaceRoot) : '', async (changes: Record<string, any>) => {
                 // mirror panel behavior: persist config changes then push updated config
                 const folder = typeof tpRec.workspaceRoot === 'string' ? String(tpRec.workspaceRoot) : '';
                 const cfg = vscode.workspace.getConfiguration('codebaseDigest', vscode.Uri.file(folder));
@@ -337,30 +321,25 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                         try { await cfg.update(key, value, vscode.ConfigurationTarget.Workspace); } catch (err) { /* ignore */ }
                     }
                 }
-                const thresholdsDefault = { maxFiles: 25000, maxTotalSizeBytes: 536870912, tokenLimit: 32000 };
-                const thresholds = cfg.get<Record<string, unknown> | undefined>('thresholds') || {};
-                const rawMaxFiles = cfg.get<number | undefined>('maxFiles');
-                const rawMaxTotalSizeBytes = cfg.get<number | undefined>('maxTotalSizeBytes');
-                const rawTokenLimit = cfg.get<number | undefined>('tokenLimit');
-                const maxFiles = (typeof rawMaxFiles === 'number') ? rawMaxFiles : (typeof thresholds.maxFiles === 'number' ? (thresholds.maxFiles as number) : thresholdsDefault.maxFiles);
-                const maxTotalSizeBytes = (typeof rawMaxTotalSizeBytes === 'number') ? rawMaxTotalSizeBytes : (typeof thresholds.maxTotalSizeBytes === 'number' ? (thresholds.maxTotalSizeBytes as number) : thresholdsDefault.maxTotalSizeBytes);
-                const tokenLimit = (typeof rawTokenLimit === 'number') ? rawTokenLimit : (typeof thresholds.tokenLimit === 'number' ? (thresholds.tokenLimit as number) : thresholdsDefault.tokenLimit);
-                const updated = {
-                    respectGitignore: cfg.get('respectGitignore', cfg.get('gitignore', true)),
-                    presets: cfg.get('presets', []),
-                    filterPresets: cfg.get('filterPresets', cfg.get('presets', [])),
-                    outputFormat: cfg.get('outputFormat', 'text'),
-                    tokenModel: cfg.get('tokenModel', 'chars-approx'),
-                    binaryFilePolicy: cfg.get('binaryFilePolicy', cfg.get('binaryPolicy', 'skip')),
-                    maxFiles,
-                    maxTotalSizeBytes,
-                    tokenLimit,
-                    thresholds: Object.assign({}, thresholdsDefault, thresholds),
-                    showRedacted: cfg.get('showRedacted', false),
-                    redactionPatterns: cfg.get('redactionPatterns', []),
-                    redactionPlaceholder: cfg.get('redactionPlaceholder', '[REDACTED]')
-                };
-                webviewView.webview.postMessage({ type: 'config', folderPath: folder, settings: updated });
+                // After applying changes, read back a validated snapshot and post that to the webview
+                try {
+                    const snapshot = ConfigurationService.getWorkspaceConfig(vscode.Uri.file(folder));
+                    webviewView.webview.postMessage({ type: 'config', folderPath: folder, settings: {
+                        respectGitignore: snapshot.respectGitignore,
+                        presets: (snapshot as any).presets || [],
+                        filterPresets: (snapshot as any).filterPresets || [],
+                        outputFormat: snapshot.outputFormat,
+                        tokenModel: snapshot.tokenModel,
+                        binaryFilePolicy: snapshot.binaryFilePolicy,
+                        maxFiles: snapshot.maxFiles,
+                        maxTotalSizeBytes: snapshot.maxTotalSizeBytes,
+                        tokenLimit: snapshot.tokenLimit,
+                        thresholds: Object.assign({}, { maxFiles: 25000, maxTotalSizeBytes: 536870912, tokenLimit: 32000 }, (snapshot as any).thresholds || {}),
+                        showRedacted: snapshot.showRedacted,
+                        redactionPatterns: snapshot.redactionPatterns || [],
+                        redactionPlaceholder: snapshot.redactionPlaceholder || '[REDACTED]'
+                    } });
+                } catch (e) { /* ignore */ }
             }, () => {
                 // on getState, send current preview
                 try {

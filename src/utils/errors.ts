@@ -49,6 +49,13 @@ export class DepthLimitExceeded extends Error {
     }
 }
 
+export class PathTraversalError extends Error {
+    constructor(public problematicPath: string, message?: string) {
+        super(message || `Path resolves outside allowed root: ${problematicPath}`);
+        this.name = 'PathTraversalError';
+    }
+}
+
 export default {};
 import * as vscode from 'vscode';
 import { Diagnostics } from './diagnostics';

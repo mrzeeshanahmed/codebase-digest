@@ -1,3 +1,18 @@
+// Minimal vanilla store helper compatible with a tiny subset of zustand's API
+function create(fn) {
+    let state = {};
+    const listeners = new Set();
+    const set = (updater) => {
+        const next = typeof updater === 'function' ? updater(state) : Object.assign({}, state, updater);
+        state = next;
+        listeners.forEach(l => { try { l(state); } catch (e) {} });
+    };
+    const getState = () => state;
+    const subscribe = (l) => { listeners.add(l); return () => listeners.delete(l); };
+    const api = fn((patch) => set((s) => Object.assign({}, s, patch)), getState, { set, subscribe });
+    return Object.assign(api || {}, { setState: (patch) => set(patch), getState, subscribe });
+}
+
 const vscode = acquireVsCodeApi();
 // track the current folder path (populated from incoming state/config)
 let currentFolderPath = null;
@@ -13,10 +28,48 @@ let pendingPersistedSelection = null;
 let pendingPersistedFocusIndex = undefined;
 // Temporary holder for a repo path returned by the host after loading
 let loadedRepoTmpPath = null;
-// Pause state (moved up so message handlers can reference it safely)
+// Pause state: canonical value is stored in `store`; keep a local mirror for performance
 let paused = false;
-// Track expanded folder paths so we can restore UI state after re-renders
-const expandedPaths = new Set();
+// Track expanded folder paths: canonical array lives in `store`; keep a Set locally and sync
+let expandedPaths = new Set();
+
+// Zustand (vanilla) store for centralizing file tree + selection state in the webview.
+// We only manage fileTree and selectedPaths here to keep the change minimal and
+// avoid touching other existing transient variables used elsewhere in the file.
+const store = create((set) => ({
+    fileTree: {},
+    selectedPaths: [],
+    expandedPaths: [],
+    paused: false,
+    pendingPersistedSelection: null,
+    pendingPersistedFocusIndex: undefined,
+    // small helper to patch state from incoming host messages
+    setState: (patch) => set((s) => Object.assign({}, s, patch))
+}));
+
+// Initialize local mirrors from store
+try {
+    const s = store.getState();
+    paused = !!s.paused;
+    expandedPaths = new Set(Array.isArray(s.expandedPaths) ? s.expandedPaths : []);
+    pendingPersistedSelection = s.pendingPersistedSelection || null;
+    pendingPersistedFocusIndex = typeof s.pendingPersistedFocusIndex !== 'undefined' ? s.pendingPersistedFocusIndex : undefined;
+} catch (e) { /* best-effort */ }
+
+// Subscribe store updates to keep local mirrors and UI in sync
+store.subscribe((st) => {
+    try {
+        if (typeof st.paused !== 'undefined' && paused !== !!st.paused) { paused = !!st.paused; updatePauseButton(); }
+    } catch (e) {}
+    try {
+        const newExpanded = Array.isArray(st.expandedPaths) ? st.expandedPaths : [];
+        expandedPaths = new Set(newExpanded);
+    } catch (e) {}
+    try {
+        pendingPersistedSelection = st.pendingPersistedSelection || null;
+        pendingPersistedFocusIndex = typeof st.pendingPersistedFocusIndex !== 'undefined' ? st.pendingPersistedFocusIndex : undefined;
+    } catch (e) {}
+});
 
 // Lightweight DOM cache for frequently accessed nodes to avoid repeated queries
 const nodes = {
@@ -260,6 +313,10 @@ function findLiByDataPath(root, path) {
 }
 
 function renderFileList(state) {
+    // If caller doesn't pass a state, read from the centralized store
+    if (!state) {
+        try { state = store.getState(); } catch (e) { state = { fileTree: {}, selectedPaths: [] }; }
+    }
     const fileListRoot = document.getElementById('file-list');
     if (!fileListRoot) { return; }
 
@@ -390,6 +447,8 @@ function renderFileList(state) {
                     try {
                         if (isExpanded) { expandedPaths.add(fullPath); }
                         else { expandedPaths.delete(fullPath); }
+                        // persist array form into store
+                        try { store.setState({ expandedPaths: Array.from(expandedPaths) }); } catch (e) {}
                     } catch (e) {}
                 };
                 name.addEventListener('click', toggleExpand);
@@ -412,16 +471,16 @@ function renderFileList(state) {
     fileListRoot.appendChild(createTreeHtml(fileTree));
     // After rendering, reapply previously stored expanded state so folders the user opened
     // remain expanded across debounced re-renders.
-    try {
-        if (expandedPaths.size > 0) {
-            expandedPaths.forEach(p => {
                 try {
-                    const li = findLiByDataPath(fileListRoot, p);
-                    if (li) { li.classList.add('expanded'); }
-                } catch (e) { logWarn('createTreeHtml per-node handler failed', e); }
-            });
-        }
-    } catch (e) { logWarn('renderFileList restore expandedPaths failed', e); }
+                    if (expandedPaths.size > 0) {
+                        expandedPaths.forEach(p => {
+                            try {
+                                const li = findLiByDataPath(fileListRoot, p);
+                                if (li) { li.classList.add('expanded'); }
+                            } catch (e) { logWarn('createTreeHtml per-node handler failed', e); }
+                        });
+                    }
+                } catch (e) { logWarn('renderFileList restore expandedPaths failed', e); }
     // After initial render, ensure folder checkboxes reflect tri-state based on current selections
     try {
         const folderItems = fileListRoot.querySelectorAll('li.folder-item');
@@ -453,14 +512,17 @@ window.addEventListener('message', event => {
             const s = msg.state || {};
             if (Array.isArray(s.selectedFiles) && s.selectedFiles.length > 0) {
                 pendingPersistedSelection = s.selectedFiles.slice();
+                try { store.setState({ pendingPersistedSelection: pendingPersistedSelection }); } catch (e) {}
             }
             if (s.focusIndex !== undefined && typeof s.focusIndex === 'number') {
                 pendingPersistedFocusIndex = s.focusIndex;
+                try { store.setState({ pendingPersistedFocusIndex: pendingPersistedFocusIndex }); } catch (e) {}
             }
         } catch (e) { /* swallow */ }
     }
     if (msg.type === 'state') {
-        debouncedRenderFileList(msg.state);
+        try { store.getState().setState ? store.getState().setState(msg.state || {}) : store.setState(msg.state || {}); } catch (e) { try { store.setState && store.setState(msg.state || {}); } catch (ex) {} }
+        debouncedRenderFileList();
         try {
             const s = msg.state || {};
             if (typeof s.paused !== 'undefined') {
@@ -497,6 +559,7 @@ window.addEventListener('message', event => {
                 } catch (e) {}
                 pendingPersistedSelection = null;
                 pendingPersistedFocusIndex = undefined;
+                try { store.setState({ pendingPersistedSelection: null, pendingPersistedFocusIndex: undefined }); } catch (e) {}
             }
         } catch (e) { /* swallow */ }
         try {
@@ -528,7 +591,8 @@ window.addEventListener('message', event => {
                 selectedPaths: Array.isArray(msg.delta.selectedPaths) ? msg.delta.selectedPaths : [],
                 minimalSelectedTreeLines: msg.delta.minimalSelectedTreeLines
             };
-            debouncedRenderFileList(syntheticState); // Re-render the file list (debounced)
+            try { store.getState().setState ? store.getState().setState(syntheticState) : store.setState(syntheticState); } catch (e) { try { store.setState && store.setState(syntheticState); } catch (ex) {} }
+            debouncedRenderFileList(); // Re-render the file list (debounced)
         }
     } else if (msg.type === 'ingestPreview') {
         const previewRoot = nodes.ingestPreviewRoot || document.getElementById('ingest-preview');
@@ -938,14 +1002,16 @@ window.onload = function() {
                             const pathAttr = fi.getAttribute && fi.getAttribute('data-path');
                             const decodedPath = pathAttr ? decodeFromDataAttribute(pathAttr) : null;
                             if (shouldExpand) {
-                                fi.classList.add('expanded');
-                                if (decodedPath) { try { expandedPaths.add(decodedPath); } catch (e) {} }
-                            } else {
-                                fi.classList.remove('expanded');
-                                if (decodedPath) { try { expandedPaths.delete(decodedPath); } catch (e) {} }
-                            }
+                                        fi.classList.add('expanded');
+                                        if (decodedPath) { try { expandedPaths.add(decodedPath); } catch (e) {} }
+                                    } else {
+                                        fi.classList.remove('expanded');
+                                        if (decodedPath) { try { expandedPaths.delete(decodedPath); } catch (e) {} }
+                                    }
                         } catch (e) { /* ignore per-node errors */ }
                     });
+                    // persist expandedPaths to store after batch update
+                    try { store.setState({ expandedPaths: Array.from(expandedPaths) }); } catch (e) {}
                 } catch (e) { /* swallow DOM errors */ }
                 // Also notify the host so provider/tree state stays in sync
                 postAction(action);
@@ -954,6 +1020,7 @@ window.onload = function() {
             if (action === 'togglePause') {
                 paused = !paused;
                 try { window.localStorage.setItem('cbd_paused', paused ? '1' : '0'); } catch (e) {}
+                try { store.setState({ paused: paused }); } catch (e) {}
                 updatePauseButton();
                 postAction(paused ? 'pauseScan' : 'resumeScan');
                 return;
@@ -1061,6 +1128,7 @@ window.onload = function() {
                 ev.preventDefault(); ev.stopPropagation();
                 paused = !paused;
                 try { window.localStorage.setItem('cbd_paused', paused ? '1' : '0'); } catch (e) {}
+                try { store.setState({ paused: paused }); } catch (e) {}
                 updatePauseButton();
                 postAction(paused ? 'pauseScan' : 'resumeScan');
             });

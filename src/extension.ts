@@ -28,10 +28,11 @@ import { Diagnostics } from './utils/diagnostics';
 import { GitignoreService } from './services/gitignoreService';
 import { FileScanner } from './services/fileScanner';
 import { registerIngestRemoteRepo } from './commands/ingestRemoteRepo';
-import { validateConfig } from './utils/validateConfig';
+import { validateConfig, isDigestConfig } from './utils/validateConfig';
 import { showUserError } from './utils/errors';
 import { setTransientOverride } from './utils/transientOverrides';
 import { WorkspaceManager } from './services/workspaceManager';
+import { ConfigurationService } from './services/configurationService';
 import { clearListeners } from './providers/eventBus';
 import { DigestGenerator } from './services/digestGenerator';
 // DEPRECATED: PreviewPanel import removed.
@@ -243,8 +244,8 @@ try { console.log('[codebase-digest] activate() called'); } catch (e) { try { co
 
 			// On activation, optionally focus the contributed Primary Sidebar view (config validation runs later once Diagnostics is available)
 			try {
-				const cfg = vscode.workspace.getConfiguration('codebaseDigest', folder.uri);
-				const openSidebar = typeof cfg.get === 'function' ? cfg.get('openSidebarOnActivate', true) : true;
+			const cfgSnapshot = ConfigurationService.getWorkspaceConfig(folder, undefined as any);
+			const openSidebar = typeof (cfgSnapshot as any).openSidebarOnActivate === 'boolean' ? (cfgSnapshot as any).openSidebarOnActivate : true;
 				if (openSidebar) {
 					try {
 						// best-effort: avoid unhandled rejections
@@ -302,8 +303,9 @@ try { console.log('[codebase-digest] activate() called'); } catch (e) { try { co
 	}));
 	// Invalidate Digest Cache command
 	async function clearCacheImpl() {
-		const cfg = vscode.workspace.getConfiguration('codebaseDigest');
-		let cacheDir = cfg.get('cacheDir', '');
+		// Read validated snapshot for safe defaults
+		const cfgSnapshot = ConfigurationService.getWorkspaceConfig(undefined as any);
+		let cacheDir = typeof cfgSnapshot.cacheDir === 'string' ? cfgSnapshot.cacheDir : '';
 		if (!cacheDir || typeof cacheDir !== 'string') {
 			cacheDir = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ? require('path').join(vscode.workspace.workspaceFolders[0].uri.fsPath, '.codebase-digest-cache') : '';
 		}
@@ -367,77 +369,26 @@ try { console.log('[codebase-digest] activate() called'); } catch (e) { try { co
 	const gitignoreService = new GitignoreService();
 	const fileScanner = new FileScanner(gitignoreService, diagnostics);
 
-	// Validate and coerce workspace-specific configuration now that diagnostics is available.
-	// This ensures invalid settings are corrected and non-blocking warnings are emitted during activation.
-	try {
-		if (workspaceFolders && workspaceFolders.length > 0) {
-			for (const folder of workspaceFolders) {
-				try {
-					const cfg = vscode.workspace.getConfiguration('codebaseDigest', folder.uri);
+		// Validate and coerce workspace-specific configuration now that diagnostics is available.
+		// This ensures invalid settings are corrected and non-blocking warnings are emitted during activation.
+		try {
+			if (workspaceFolders && workspaceFolders.length > 0) {
+				for (const folder of workspaceFolders) {
 					try {
-						// Build a plain runtime snapshot from workspace configuration keys.
-						// This avoids mutating the WorkspaceConfiguration object directly. If
-						// callers want to persist intentional corrections, call `cfg.update(...)`
-						// selectively — do not mutate `cfg` fields in-place.
-						const runtimeCfg: any = {
-							// numeric limits and common fields with sensible defaults
-							maxFileSize: cfg.get('maxFileSize', 10485760),
-							maxFiles: cfg.get('maxFiles', 25000),
-							maxTotalSizeBytes: cfg.get('maxTotalSizeBytes', 536870912),
-							maxDirectoryDepth: cfg.get('maxDirectoryDepth', 20),
-							tokenLimit: cfg.get('tokenLimit', 32000),
-							// enums / policies
-							outputFormat: cfg.get('outputFormat', 'markdown'),
-							binaryFilePolicy: cfg.get('binaryFilePolicy', 'skip'),
-							// caching / limits
-							contextLimit: cfg.get('contextLimit', 0),
-							cacheEnabled: cfg.get('cacheEnabled', false),
-							cacheDir: cfg.get('cacheDir', ''),
-							// notebook handling
-							notebookIncludeNonTextOutputs: cfg.get('notebookIncludeNonTextOutputs', false),
-							notebookNonTextOutputMaxBytes: cfg.get('notebookNonTextOutputMaxBytes', 200000),
-							// redaction
-							showRedacted: cfg.get('showRedacted', false),
-							redactionPatterns: cfg.get('redactionPatterns', []),
-							redactionPlaceholder: cfg.get('redactionPlaceholder', '[REDACTED]'),
-							// pattern lists and ignore behavior
-							// Provide safe defaults so large folders are excluded unless the user overrides them.
-							excludePatterns: cfg.get('excludePatterns', ['node_modules/**', '.git/**', '*.log', '*.tmp', '.DS_Store', 'Thumbs.db']),
-							includePatterns: cfg.get('includePatterns', []),
-							respectGitignore: cfg.get('respectGitignore', true),
-							gitignoreFiles: cfg.get('gitignoreFiles', ['.gitignore']),
-							// feature flags / outputs
-							includeMetadata: cfg.get('includeMetadata', true),
-							includeTree: cfg.get('includeTree', true),
-							includeSummary: cfg.get('includeSummary', true),
-							includeFileContents: cfg.get('includeFileContents', true),
-							useStreamingRead: cfg.get('useStreamingRead', true),
-							notebookProcess: cfg.get('notebookProcess', true),
-							tokenEstimate: cfg.get('tokenEstimate', true),
-							tokenModel: cfg.get('tokenModel', 'chars-approx'),
-							tokenDivisorOverrides: cfg.get('tokenDivisorOverrides', {}),
-							performanceLogLevel: cfg.get('performanceLogLevel', 'info'),
-							performanceCollectMetrics: cfg.get('performanceCollectMetrics', false),
-							outputSeparatorsHeader: cfg.get('outputSeparatorsHeader', ''),
-							outputWriteLocation: cfg.get('outputWriteLocation', 'editor'),
-							filterPresets: cfg.get('filterPresets', []),
-						};
+						// Use centralized ConfigurationService to load and validate per-folder settings
 						try {
-							validateConfig(runtimeCfg, diagnostics);
+							ConfigurationService.getWorkspaceConfig(folder, diagnostics);
 						} catch (vcErr) {
-							try { diagnostics.warn('Failed to validate config for ' + folder.uri.fsPath + ': ' + String(vcErr)); } catch (dErr) { /* swallow */ }
+							try { diagnostics.warn('Failed to validate config for ' + folder.uri.fsPath + ': ' + String(vcErr)); } catch {}
 						}
 					} catch (e) {
 						// Silently ignore per-folder config validation errors; do not block activation
 					}
-				} catch (e) {
-					// Silently ignore per-folder config validation errors; do not block activation
 				}
 			}
+		} catch (e) {
+			// Defensive: do not allow validation errors to block activation
 		}
-	} catch (e) {
-		// Defensive: do not allow validation errors to block activation
-	}
 
 	// Register toggles for each treeProvider
 	for (const [folderPath, treeProvider] of treeProviders.entries()) {
@@ -541,9 +492,11 @@ try { console.log('[codebase-digest] activate() called'); } catch (e) { try { co
 	context.subscriptions.push(vscode.commands.registerCommand('codebaseDigest.editPatterns', async (folderPath?: string) => {
 		const resolvedPath = getFolderPath(folderPath);
 		if (!resolvedPath) { return; }
-		const cfg = vscode.workspace.getConfiguration('codebaseDigest', vscode.Uri.file(resolvedPath));
-		const include = await vscode.window.showInputBox({ prompt: 'Include patterns (comma-separated)', value: (cfg.get('includePatterns') as string[]).join(',') });
-		const exclude = await vscode.window.showInputBox({ prompt: 'Exclude patterns (comma-separated)', value: (cfg.get('excludePatterns') as string[]).join(',') });
+		// Read validated snapshot for defaults, preserve cfg for updates
+		const cfgSnapshot = ConfigurationService.getWorkspaceConfig(vscode.Uri.file(resolvedPath));
+	const cfg = vscode.workspace.getConfiguration('codebaseDigest', vscode.Uri.file(resolvedPath));
+	const include = await vscode.window.showInputBox({ prompt: 'Include patterns (comma-separated)', value: Array.isArray(cfgSnapshot.includePatterns) ? (cfgSnapshot.includePatterns as string[]).join(',') : '' });
+	const exclude = await vscode.window.showInputBox({ prompt: 'Exclude patterns (comma-separated)', value: Array.isArray(cfgSnapshot.excludePatterns) ? (cfgSnapshot.excludePatterns as string[]).join(',') : '' });
 		if (include !== undefined) { await cfg.update('includePatterns', include.split(',').map(s => s.trim()).filter(Boolean), vscode.ConfigurationTarget.Workspace); }
 		if (exclude !== undefined) { await cfg.update('excludePatterns', exclude.split(',').map(s => s.trim()).filter(Boolean), vscode.ConfigurationTarget.Workspace); }
 		const tp = treeProviders.get(resolvedPath); if (tp) { tp.refresh(); }
@@ -553,8 +506,10 @@ try { console.log('[codebase-digest] activate() called'); } catch (e) { try { co
 	context.subscriptions.push(vscode.commands.registerCommand('codebaseDigest.editVirtualFolders', async (folderPath?: string) => {
 		const resolvedPath = getFolderPath(folderPath);
 		if (!resolvedPath) { return; }
-		const cfg = vscode.workspace.getConfiguration('codebaseDigest', vscode.Uri.file(resolvedPath));
-		const current = cfg.get('virtualFolders', {});
+		// Use snapshot for reads, preserve WorkspaceConfiguration for updates
+	const cfgSnapshot = ConfigurationService.getWorkspaceConfig(vscode.Uri.file(resolvedPath));
+	const cfg = vscode.workspace.getConfiguration('codebaseDigest', vscode.Uri.file(resolvedPath));
+	const current = (cfgSnapshot as any).virtualFolders || cfg.get('virtualFolders', {});
 		// Show quick pick to choose an action
 		const action = await vscode.window.showQuickPick(['View/Edit JSON', 'Add Group', 'Remove Group'], { placeHolder: 'Choose virtual folders action' });
 		if (!action) { return; }
@@ -601,7 +556,8 @@ try { console.log('[codebase-digest] activate() called'); } catch (e) { try { co
 		const preview = treeProvider.getPreviewData();
 	let title = `Code Ingest (${preview.selectedCount} selected, ${preview.totalFiles} total, ${preview.selectedSize})`;
 		let statusText = title;
-		const contextLimit = vscode.workspace.getConfiguration('codebaseDigest', vscode.Uri.file(resolvedPath)).get('contextLimit', 0);
+		const cfgSnapshot2 = ConfigurationService.getWorkspaceConfig(vscode.Uri.file(resolvedPath));
+		const contextLimit = typeof (cfgSnapshot2 as any).contextLimit === 'number' ? (cfgSnapshot2 as any).contextLimit : 0;
 		if (contextLimit > 0 && preview.tokenEstimate && preview.tokenEstimate > contextLimit) {
 			statusText = `$(warning) ${title} (over limit)`;
 		}

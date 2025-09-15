@@ -13,6 +13,7 @@ import { emitProgress } from './eventBus';
 import { debounce } from '../utils/debounce';
 import { getMutex } from '../utils/asyncLock';
 import { minimatch } from 'minimatch';
+import { ConfigurationService } from '../services/configurationService';
 
 export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileNode>, vscode.Disposable {
     private expandState: ExpandState;
@@ -177,17 +178,16 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
         };
         // Create a small debounced refresh so rapid watcher storms don't trigger
         // many immediate full workspace scans. Use a short delay to remain
-        // responsive but avoid thrashing the worker.
-        // Read configurable debounce delay (ms) with a safe fallback
-        let debounceMs = 300;
+        // responsive but avoid thrashing the worker. Read delay from centralized service.
         try {
-            const cfg = vscode.workspace.getConfiguration('codebaseDigest', this.workspaceFolder.uri);
-            const v = cfg.get('watcherDebounceMs', debounceMs) as number;
-            if (typeof v === 'number' && !Number.isNaN(v) && v >= 0) { debounceMs = v; }
-        } catch (e) { /* swallow config read errors */ }
-        this.debouncedRefresh = debounce(() => {
-            try { this.refresh(); } catch (e) { /* swallow */ }
-        }, debounceMs);
+            const cfg = ConfigurationService.getWorkspaceConfig(this.workspaceFolder, this.diagnostics);
+            const debounceMs = typeof (cfg as any).watcherDebounceMs === 'number' && (cfg as any).watcherDebounceMs >= 0 ? (cfg as any).watcherDebounceMs : 300;
+            this.debouncedRefresh = debounce(() => {
+                try { this.refresh(); } catch (e) { /* swallow */ }
+            }, debounceMs);
+        } catch (e) {
+            this.debouncedRefresh = debounce(() => { try { this.refresh(); } catch (e) { /* swallow */ } }, 300);
+        }
 
         if (watcher) {
             watcher.onDidCreate(handleChange);
@@ -209,11 +209,18 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
     public dispose(): void {
         // Comprehensive cleanup to avoid leaks when provider is disposed
         try {
-            // clear debounce timers
-            for (const t of this.debounceTimers.values()) {
-                try { if (t) { clearTimeout(t); } } catch (e) { /* ignore individual timer errors */ }
-            }
-            this.debounceTimers.clear();
+            // Iterate and clear any scheduled debounce timers
+            try {
+                for (const [key, timer] of this.debounceTimers.entries()) {
+                    try {
+                        if (timer) {
+                            // clearTimeout accepts the timer id returned by setTimeout
+                            try { clearTimeout(timer as unknown as ReturnType<typeof setTimeout>); } catch (_) { /* ignore timer clear errors */ }
+                        }
+                    } catch (_) { /* ignore per-timer errors */ }
+                }
+            } catch (_) { /* ignore iteration errors */ }
+            try { this.debounceTimers.clear(); } catch (_) { /* ignore */ }
         } catch (e) { /* ignore */ }
 
         try { this.pendingHydrations.clear(); } catch (e) { /* ignore */ }
@@ -227,11 +234,14 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
         } catch (e) { /* ignore */ }
 
         // Dispose the TreeData change emitter
-        try { if (this._onDidChangeTreeData) { this._onDidChangeTreeData.dispose(); } } catch (e) { /* ignore */ }
+        try {
+            if (this._onDidChangeTreeData && typeof (this._onDidChangeTreeData.dispose) === 'function') {
+                try { this._onDidChangeTreeData.dispose(); } catch (e) { /* ignore */ }
+            }
+        } catch (e) { /* ignore */ }
 
-        // Dispose other disposables if present
+        // Dispose other disposables if present (status bar, expand/selection/directory/dx)
         try { if (this.statusBarItem && typeof (this.statusBarItem.dispose) === 'function') { this.statusBarItem.dispose(); } } catch (e) { /* ignore */ }
-        // Centralized safe disposer to avoid repetitive casting
         const tryDispose = (o: unknown) => {
             try {
                 if (o && typeof o === 'object') {
@@ -252,6 +262,7 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
         // Clear preview updater reference and any scan token to avoid holding closures
         try { this.previewUpdater = undefined; } catch (e) { /* ignore */ }
         try { this.scanToken = null; } catch (e) { /* ignore */ }
+        try { this.debouncedRefresh = undefined; } catch (e) { /* ignore */ }
 
         try { emitProgress({ op: 'scan', mode: 'end', determinate: false, message: 'provider disposed' }); } catch (e) { /* ignore */ }
     }
@@ -428,10 +439,10 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
 
                 // Allow tuning via workspace settings. If settings are not present,
                 // fall back to reasonable defaults defined above.
-                const cfg = vscode.workspace.getConfiguration('codebaseDigest', this.workspaceFolder.uri);
-                const maxPending = cfg.get('maxPendingHydrations', CodebaseDigestTreeProvider.DEFAULT_MAX_PENDING_HYDRATIONS) as number;
-                const batchSize = cfg.get('pendingHydrationBatchSize', CodebaseDigestTreeProvider.DEFAULT_PENDING_BATCH_SIZE) as number;
-                const batchDelay = cfg.get('pendingHydrationBatchDelayMs', CodebaseDigestTreeProvider.DEFAULT_PENDING_BATCH_DELAY_MS) as number;
+                const wsCfg = ConfigurationService.getWorkspaceConfig(this.workspaceFolder, this.diagnostics);
+                const maxPending = typeof (wsCfg as any).maxPendingHydrations === 'number' ? (wsCfg as any).maxPendingHydrations : CodebaseDigestTreeProvider.DEFAULT_MAX_PENDING_HYDRATIONS;
+                const batchSize = typeof (wsCfg as any).pendingHydrationBatchSize === 'number' ? (wsCfg as any).pendingHydrationBatchSize : CodebaseDigestTreeProvider.DEFAULT_PENDING_BATCH_SIZE;
+                const batchDelay = typeof (wsCfg as any).pendingHydrationBatchDelayMs === 'number' ? (wsCfg as any).pendingHydrationBatchDelayMs : CodebaseDigestTreeProvider.DEFAULT_PENDING_BATCH_DELAY_MS;
 
                 // Lightweight telemetry hook: prefer an explicitly injected metrics service, otherwise fall back to Diagnostics logging.
                 let metricsSvc: unknown = this.metrics;
@@ -736,39 +747,38 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
     }
 
     public loadConfig(): any {
-        // Defensive config loading from workspace settings
-        const cfg = vscode.workspace.getConfiguration('codebaseDigest', this.workspaceFolder.uri);
-        return {
-            maxFileSize: cfg.get('maxFileSize', 1024 * 1024),
-            maxFiles: cfg.get('maxFiles', 1000),
-            maxTotalSizeBytes: cfg.get('maxTotalSizeBytes', 100 * 1024 * 1024),
-            maxDirectoryDepth: cfg.get('maxDirectoryDepth', 20),
-            excludePatterns: cfg.get('excludePatterns', []),
-            includePatterns: cfg.get('includePatterns', []),
-            respectGitignore: cfg.get('respectGitignore', true),
-            gitignoreFiles: cfg.get('gitignoreFiles', []),
-            // Historically defaulted to 'markdown'; use 'text' as a safer default
-            // so callers that expect plain text outputs don't get double-formatted.
-            outputFormat: cfg.get('outputFormat', 'text'),
-            includeMetadata: cfg.get('includeMetadata', true),
-            includeTree: cfg.get('includeTree', true),
-            includeSummary: cfg.get('includeSummary', true),
-            includeFileContents: cfg.get('includeFileContents', false),
-            useStreamingRead: cfg.get('useStreamingRead', false),
-            binaryFilePolicy: cfg.get('binaryFilePolicy', 'skip'),
-            notebookProcess: cfg.get('notebookProcess', false),
-            notebookIncludeNonTextOutputs: cfg.get('notebookIncludeNonTextOutputs', false),
-            tokenEstimate: cfg.get('tokenEstimate', false),
-            tokenModel: cfg.get('tokenModel', 'chars-approx'),
-            performanceLogLevel: cfg.get('performanceLogLevel', 'info'),
-            performanceCollectMetrics: cfg.get('performanceCollectMetrics', false),
-            outputSeparatorsHeader: cfg.get('outputSeparatorsHeader', ''),
-            outputWriteLocation: cfg.get('outputWriteLocation', 'editor'),
-            // Defensive default for new keys
-            // Minimal tree flag: true/false/'minimal'
-            includeTreeMode: cfg.get('includeTreeMode', 'full'),
-            // Add more keys here as needed, always with a default
-        };
+        try {
+            const cfg = ConfigurationService.getWorkspaceConfig(this.workspaceFolder, this.diagnostics);
+            return cfg;
+        } catch (e) {
+            // Fall back to a small defensive default object to avoid throwing during scans
+            return {
+                maxFileSize: 1024 * 1024,
+                maxFiles: 1000,
+                maxTotalSizeBytes: 100 * 1024 * 1024,
+                maxDirectoryDepth: 20,
+                excludePatterns: [],
+                includePatterns: [],
+                respectGitignore: true,
+                gitignoreFiles: [],
+                outputFormat: 'text',
+                includeMetadata: true,
+                includeTree: true,
+                includeSummary: true,
+                includeFileContents: false,
+                useStreamingRead: false,
+                binaryFilePolicy: 'skip',
+                notebookProcess: false,
+                notebookIncludeNonTextOutputs: false,
+                tokenEstimate: false,
+                tokenModel: 'chars-approx',
+                performanceLogLevel: 'info',
+                performanceCollectMetrics: false,
+                outputSeparatorsHeader: '',
+                outputWriteLocation: 'editor',
+                includeTreeMode: 'full'
+            };
+        }
     }
 
     async getChildren(element?: FileNode): Promise<FileNode[]> {
@@ -861,6 +871,59 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
             return this.rootNodes;
         }
         if (element.type === 'directory') {
+            // If caller requested children for a special 'Load more...' virtual node,
+            // perform the next-page fetch and return an empty list (the parent will be refreshed).
+            if (CodebaseDigestTreeProvider.isVirtualFileNode(element) && element.virtualType === 'loadMore') {
+                // element carries metadata: parentPath, nextIndex, pageSize
+                const meta = element as unknown as { parentPath?: unknown; nextIndex?: unknown; pageSize?: unknown };
+                const parentPath = typeof meta.parentPath === 'string' ? String(meta.parentPath) : undefined;
+                const nextIndex = typeof meta.nextIndex === 'number' ? meta.nextIndex as number : 0;
+                const pageSize = typeof meta.pageSize === 'number' ? meta.pageSize as number : 200;
+                if (parentPath) {
+                    (async () => {
+                        const m = getMutex(this.workspaceRoot || this.workspaceFolder.uri.fsPath);
+                        const rel = await m.lock();
+                        try {
+                            const cfg = this.loadConfig();
+                            const res = await this.fileScanner.scanDirectoryShallow(parentPath, cfg, undefined, nextIndex, pageSize);
+                            // Find parent node and insert items before the loadMore node
+                            const findNode = (nodes: FileNode[]): FileNode | undefined => {
+                                for (const node of nodes) {
+                                    if (node.path === parentPath && node.type === 'directory') { return node; }
+                                    if (node.children) { const f = findNode(node.children); if (f) { return f; } }
+                                }
+                                return undefined;
+                            };
+                            const parentNode = findNode(this.rootNodes);
+                            if (parentNode && parentNode.children) {
+                                // locate the loadMore index
+                                const lmIndex = parentNode.children.findIndex(c => CodebaseDigestTreeProvider.isVirtualFileNode(c) && (c as any).virtualType === 'loadMore');
+                                const insertAt = lmIndex >= 0 ? lmIndex : parentNode.children.length;
+                                const newChildren = res.items;
+                                // normalize depth based on parent
+                                for (const nc of newChildren) { nc.depth = parentNode.depth + 1; }
+                                parentNode.children.splice(insertAt, 0, ...newChildren);
+                                // update or remove loadMore node
+                                const remaining = res.total - (nextIndex + newChildren.length);
+                                if (remaining > 0) {
+                                    const newNext = nextIndex + newChildren.length;
+                                    const lm = parentNode.children.find(c => CodebaseDigestTreeProvider.isVirtualFileNode(c) && (c as any).virtualType === 'loadMore');
+                                    if (lm) { (lm as any).nextIndex = newNext; (lm as any).pageSize = pageSize; }
+                                } else {
+                                    const lmPos = parentNode.children.findIndex(c => CodebaseDigestTreeProvider.isVirtualFileNode(c) && (c as any).virtualType === 'loadMore');
+                                    if (lmPos >= 0) { parentNode.children.splice(lmPos, 1); }
+                                }
+                                this.directoryCache.set(parentNode.path, parentNode.children);
+                                this._onDidChangeTreeData.fire(parentNode);
+                            }
+                        } catch (e) {
+                            try { this.diagnostics && this.diagnostics.warn ? this.diagnostics.warn('load more failed', e) : console.warn('load more failed', e); } catch {}
+                        } finally { try { rel(); } catch {} }
+                    })();
+                }
+                return [];
+            }
+
             // Hydrate directory if children are missing or placeholder
             if (!element.children || element.children.length === 0 || (element.children.length === 1 && element.children[0].name === 'Loading...')) {
                 // Show loading node immediately
@@ -882,7 +945,28 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
                     const m = getMutex(this.workspaceRoot || this.workspaceFolder.uri.fsPath);
                     const relRelease = await m.lock();
                     try {
-                        const children = await this.fileScanner.scanDirectory(element.path, config, this.scanToken || undefined);
+                        // Use shallow one-level scan with pagination for responsiveness
+                        const pageSize = Math.max(1, (config && typeof (config as any).directoryPageSize === 'number') ? (config as any).directoryPageSize : 200);
+                        const res = await this.fileScanner.scanDirectoryShallow(element.path, config, this.scanToken || undefined, 0, pageSize);
+                        const children = res.items;
+                        // if there are more items than pageSize, append a virtual Load more node
+                        if (res.total > children.length) {
+                            const loadMore: FileNode & { virtualType: 'loadMore'; parentPath?: string; nextIndex?: number; pageSize?: number } = {
+                                type: 'file',
+                                name: 'Load more...',
+                                relPath: element.relPath + '/__loadmore__',
+                                path: '',
+                                isSelected: false,
+                                depth: element.depth + 1,
+                                virtualType: 'loadMore',
+                                parentPath: element.path,
+                                nextIndex: children.length,
+                                pageSize
+                            } as any;
+                            children.push(loadMore as FileNode);
+                        }
+                        // set depths
+                        for (const c of children) { c.depth = element.depth + 1; }
                         element.children = children;
                         this.directoryCache.set(element.path, children);
                         this._onDidChangeTreeData.fire(element);

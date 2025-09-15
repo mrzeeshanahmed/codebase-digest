@@ -8,6 +8,7 @@ import { Formatters } from '../utils/formatters';
 import { TokenAnalyzer } from '../services/tokenAnalyzer';
 import { DigestConfig, TraversalStats } from '../types/interfaces';
 import { ingestRemoteRepo, cleanup as cleanupRemoteTmp, buildRemoteSummary } from '../services/githubService';
+import { ConfigurationService } from '../services/configurationService';
 import { emitProgress } from '../providers/eventBus';
 
 export function registerIngestRemoteRepo(context: vscode.ExtensionContext) {
@@ -69,7 +70,8 @@ export async function loadRemoteRepo(params: { repo: string, ref?: any, subpath?
 export async function ingestLoadedRepo(tmpPath: string): Promise<{ output?: string, preview?: any } | void> {
     const tmpDir = tmpPath;
     const formatters = new Formatters();
-    const config: DigestConfig = vscode.workspace.getConfiguration('codebaseDigest') as any;
+    // Use validated snapshot for scan-time decisions (do not persist using this object)
+    const config: DigestConfig = ConfigurationService.getWorkspaceConfig(undefined as any) as any;
     try {
     emitProgress({ op: 'ingest', mode: 'start', determinate: false, message: 'Ingesting loaded repo...' });
         // Use ContentProcessor.scanDirectory to get files
@@ -149,7 +151,8 @@ async function interactiveIngestFlow() {
     let ref: any = {};
     if (refType && refType.value !== 'none') { const refValue = await vscode.window.showInputBox({ prompt: `Enter ${refType.label} name`, ignoreFocusOut: true }); if (refValue) { ref[refType.value] = refValue; } }
     const subpath = await vscode.window.showInputBox({ prompt: 'Enter subpath to ingest (optional)', ignoreFocusOut: true });
-    const config: DigestConfig = vscode.workspace.getConfiguration('codebaseDigest') as any;
+    // Use validated snapshot for interactive defaults; preserve cfg.update below for persistence
+    const config: DigestConfig = ConfigurationService.getWorkspaceConfig(undefined as any) as any;
     let includeSubmodules = config.includeSubmodules;
     const submodulePick = await vscode.window.showQuickPick([{ label: 'Yes', value: true },{ label: 'No', value: false }], { placeHolder: 'Include submodules?', ignoreFocusOut: true });
     if (submodulePick) { includeSubmodules = submodulePick.value; await vscode.workspace.getConfiguration('codebaseDigest').update('includeSubmodules', includeSubmodules, vscode.ConfigurationTarget.Workspace); }
@@ -176,7 +179,8 @@ export async function ingestRemoteRepoProgrammatic(params: { repo: string, ref?:
     // This function performs the ingest and returns a preview string that can be shown in the dashboard webview.
     const { repo, ref, subpath, includeSubmodules, keepTmpDir } = params as any;
     const formatters = new Formatters();
-    const config: DigestConfig = vscode.workspace.getConfiguration('codebaseDigest') as any;
+    // Use validated snapshot for scan-time decisions
+    const config: DigestConfig = ConfigurationService.getWorkspaceConfig(undefined as any) as any;
     // Normalize repo input before deriving a tmp dir name. Accept owner/repo or
     // a full GitHub URL; strip a trailing .git if present so the mkdtemp prefix
     // doesn't include ".git" which can cause confusing temp dir names.

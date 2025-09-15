@@ -174,9 +174,11 @@ export class ContentProcessor {
             const rel = path.relative(rr, rc);
             const isInside = rel === '' || (rel !== '..' && !rel.startsWith('..' + path.sep));
             if (!isInside) {
-                // best-effort debug; do not throw for traversal to avoid breaking scans
-                console.debug(`[ContentProcessor.scanDirectory] Skipping path outside root: ${candidate}`);
-                continue;
+                // Candidate resolves outside the scanned root — treat as a security
+                // policy violation and throw so callers can surface/log appropriately.
+                // This prevents silent traversal via symlinks or malicious filesystem
+                // entries from being included in a digest.
+                throw new internalErrors.PathTraversalError(candidate, `Path resolves outside of root: ${candidate}`);
             }
             const absPath = candidate;
             if (entry.isDirectory()) {

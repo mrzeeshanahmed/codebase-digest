@@ -512,10 +512,12 @@
     "watch-tests": "tsc -p . -w --outDir out",
     "pretest": "npm run compile-tests && npm run compile && npm run lint",
     "lint": "eslint src",
-    "test": "jest"
+    "test": "jest",
+    "depcheck": "npx depcheck --config ./.depcheckrc.json --json"
   },
   "dependencies": {
-    "minimatch": "^9.0.3"
+    "minimatch": "^9.0.3",
+    "zustand": "^4.4.1"
   },
   "devDependencies": {
   "simple-git": "^3.28.0",

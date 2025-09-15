@@ -242,6 +242,34 @@ export class FileScanner {
         } catch (ex) { try { this.diagnostics && this.diagnostics.warn && this.diagnostics.warn('emitProgressThrottled failed', ex); } catch {} }
     }
 
+    // Debounced progress emitter: coalesces frequent progress events and emits
+    // the latest event at most once per interval (progressMinIntervalMs). This is
+    // useful when loops or many file events call emit frequently; it reduces UI
+    // churn by consolidating bursty updates.
+    private _pendingProgressEvent: ProgressEvent | null = null;
+    private _progressTimer: ReturnType<typeof setTimeout> | null = null;
+    private emitProgressDebounced(e: ProgressEvent) {
+        try {
+            // Overwrite pending with the latest event so we emit the most recent state
+            this._pendingProgressEvent = e;
+            // If a timer is already scheduled, do nothing else; the timer will emit the latest
+            if (this._progressTimer) { return; }
+            this._progressTimer = setTimeout(() => {
+                try {
+                    if (this._pendingProgressEvent) {
+                        try { emitProgress(this._pendingProgressEvent); } catch (err) {
+                            try { this.diagnostics && this.diagnostics.warn ? this.diagnostics.warn('emitProgress failed', err) : console.warn('emitProgress failed', err); } catch {};
+                        }
+                    }
+                } finally {
+                    this._pendingProgressEvent = null;
+                    if (this._progressTimer) { try { clearTimeout(this._progressTimer); } catch {} }
+                    this._progressTimer = null;
+                }
+            }, this.progressMinIntervalMs);
+        } catch (ex) { try { this.diagnostics && this.diagnostics.warn && this.diagnostics.warn('emitProgressDebounced failed', ex); } catch {} }
+    }
+
     // Check size and file-count thresholds and warn/override as original logic; returns control flags
     private async checkAndWarnLimits(stat: fs.Stats, relPath: string, cfg: DigestConfig, stats: TraversalStats): Promise<{ continueScan: boolean, breakAll?: boolean }> {
         // maxFileSize
@@ -259,7 +287,7 @@ export class FileScanner {
         const projectedTotal = stats.totalSize + stat.size;
         const sizeLimit = cfg.maxTotalSizeBytes || Number.MAX_SAFE_INTEGER;
         const sizePercent = sizeLimit > 0 ? projectedTotal / sizeLimit : 0;
-    try { if (stats.totalFiles % 50 === 0) { this.emitProgressThrottled({ op: 'scan', mode: 'progress', determinate: true, percent: Math.min(100, Math.floor(sizePercent * 100)), message: 'Scanning (size)', totalFiles: stats.totalFiles, totalSize: stats.totalSize }); } } catch (e) {}
+    try { if (stats.totalFiles % 50 === 0) { this.emitProgressDebounced({ op: 'scan', mode: 'progress', determinate: true, percent: Math.min(100, Math.floor(sizePercent * 100)), message: 'Scanning (size)', totalFiles: stats.totalFiles, totalSize: stats.totalSize }); } } catch (e) {}
 
         if (sizePercent >= 1) {
             const state = this.runtimeState.get(cfg) || {};
@@ -314,7 +342,7 @@ export class FileScanner {
 
         // File count checks and throttled file progress
         const filePercent = cfg.maxFiles > 0 ? stats.totalFiles / cfg.maxFiles : 0;
-    try { if (stats.totalFiles % 50 === 0) { this.emitProgressThrottled({ op: 'scan', mode: 'progress', determinate: true, percent: Math.min(100, Math.floor(filePercent * 100)), message: 'Scanning (files)', totalFiles: stats.totalFiles, totalSize: stats.totalSize }); } } catch (e) {}
+    try { if (stats.totalFiles % 50 === 0) { this.emitProgressDebounced({ op: 'scan', mode: 'progress', determinate: true, percent: Math.min(100, Math.floor(filePercent * 100)), message: 'Scanning (files)', totalFiles: stats.totalFiles, totalSize: stats.totalSize }); } } catch (e) {}
 
         if (stats.totalFiles >= cfg.maxFiles) {
             const state = this.runtimeState.get(cfg) || {};
@@ -425,7 +453,7 @@ export class FileScanner {
         // Emit progress every 100 files (throttled)
         if (stats.totalFiles % 100 === 0) {
             try {
-                this.emitProgressThrottled({ op: 'scan', mode: 'progress', determinate: true, percent: 0, message: 'Scanning...', totalFiles: stats.totalFiles, totalSize: stats.totalSize });
+                this.emitProgressDebounced({ op: 'scan', mode: 'progress', determinate: true, percent: 0, message: 'Scanning...', totalFiles: stats.totalFiles, totalSize: stats.totalSize });
             } catch (e) { try { this.diagnostics && this.diagnostics.warn ? this.diagnostics.warn('readDir failed', e) : console.warn('readDir failed', e); } catch {} }
         }
     }
@@ -570,6 +598,53 @@ export class FileScanner {
         };
         await this.gitignoreService.loadForDir(dirAbs);
         return await this.scanDir(dirAbs, dirAbs, 0, cfg, stats, token);
+    }
+
+    /**
+     * Shallow (one-level) scan of a directory with optional pagination. Returns items and total count
+     * after applying include/exclude/gitignore and other per-entry filters. This is optimized for
+     * tree lazy-loading where scanning nested children is expensive.
+     */
+    async scanDirectoryShallow(dirAbs: string, cfg: DigestConfig, token?: { isCancellationRequested?: boolean }, start: number = 0, pageSize: number = 200): Promise<{ items: FileNode[]; total: number }> {
+        const items: FileNode[] = [];
+        let total = 0;
+        try {
+            if (token && token.isCancellationRequested) { return { items, total }; }
+            await this.gitignoreService.loadForDir(dirAbs);
+            const dirHandle = await fsPromises.opendir(dirAbs);
+            try {
+                const allEntries: fs.Dirent[] = [];
+                for await (const e of dirHandle) { allEntries.push(e); }
+                // Evaluate each entry with filtering to compute total and collect page
+                for (let i = 0; i < allEntries.length; i++) {
+                    const entry = allEntries[i];
+                    const absPath = path.join(dirAbs, entry.name);
+                    const relPath = path.relative(dirAbs, absPath).replace(/\\/g, '/');
+                    const relPosix = relPath.replace(/\\/g, '/');
+                    const isDir = entry.isDirectory();
+                    // Apply skip logic
+                    if (this.shouldSkipEntry(relPath, relPosix, isDir, cfg, { totalFiles: 0, totalSize: 0, skippedBySize: 0, skippedByTotalLimit: 0, skippedByMaxFiles: 0, skippedByDepth: 0, skippedByIgnore: 0, directories: 0, symlinks: 0, warnings: [], durationMs: 0 })) { continue; }
+                    // stat readability
+                    const stat = await this.safeStatReadable(absPath, relPath, { totalFiles: 0, totalSize: 0, skippedBySize: 0, skippedByTotalLimit: 0, skippedByMaxFiles: 0, skippedByDepth: 0, skippedByIgnore: 0, directories: 0, symlinks: 0, warnings: [], durationMs: 0 });
+                    if (!stat) { continue; }
+                    total++;
+                    if (total - 1 < start) { continue; }
+                    if (items.length >= pageSize) { continue; }
+                    if (entry.isSymbolicLink()) {
+                        items.push({ path: absPath, relPath, name: entry.name, type: 'symlink', size: stat.size, mtime: stat.mtime, depth: 0, isSelected: false, isBinary: false });
+                        continue;
+                    }
+                    if (entry.isDirectory()) {
+                        items.push({ path: absPath, relPath, name: entry.name, type: 'directory', size: stat.size, mtime: stat.mtime, depth: 0, isSelected: false, isBinary: false, children: [] });
+                    } else {
+                        items.push({ path: absPath, relPath, name: entry.name, type: 'file', size: stat.size, mtime: stat.mtime, depth: 0, isSelected: false, isBinary: false });
+                    }
+                }
+            } finally { try { await dirHandle.close(); } catch (_) {} }
+        } catch (e) {
+            // On any error, return what we have; caller may surface warnings
+        }
+        return { items, total };
     }
 
     private async scanDir(dirAbs: string, rootPath: string, depth: number, cfg: DigestConfig, stats: TraversalStats, token?: { isCancellationRequested?: boolean }): Promise<FileNode[]> {

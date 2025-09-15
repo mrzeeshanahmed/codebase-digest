@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import { ConfigurationService } from '../services/configurationService';
 
 // Minimal HTML-escaping helper to avoid injecting unescaped paths into webview HTML.
 // Escapes: & < > " '
@@ -366,36 +367,31 @@ export async function processWebviewMessage(msg: WebviewMessage, webview: vscode
     }
     if (msg.type === 'configRequest') {
         const folder = folderPath || '';
-        const cfg = vscode.workspace.getConfiguration('codebaseDigest', vscode.Uri.file(folder));
-        const thresholdsDefault = { maxFiles: 25000, maxTotalSizeBytes: 536870912, tokenLimit: 32000 };
-        // Provide both legacy and normalized keys to the webview for backwards compatibility.
-    const thresholds = cfg.get<Record<string, unknown>>('thresholds', thresholdsDefault) || {};
-        const maxFiles = cfg.get('maxFiles', thresholds.maxFiles || thresholdsDefault.maxFiles) as number;
-        const maxTotalSizeBytes = cfg.get('maxTotalSizeBytes', thresholds.maxTotalSizeBytes || thresholdsDefault.maxTotalSizeBytes) as number;
-        const tokenLimit = cfg.get('tokenLimit', thresholds.tokenLimit || thresholdsDefault.tokenLimit) as number;
-
+        // Use ConfigurationService to get a validated, typed snapshot for reads
         try {
+            const cfgSnapshot = ConfigurationService.getWorkspaceConfig(vscode.Uri.file(folder));
+            const thresholdsDefault = { maxFiles: 25000, maxTotalSizeBytes: 536870912, tokenLimit: 32000 };
+            const thresholds = (cfgSnapshot as any).thresholds || {};
+            const maxFiles = typeof cfgSnapshot.maxFiles === 'number' ? cfgSnapshot.maxFiles : thresholds.maxFiles || thresholdsDefault.maxFiles;
+            const maxTotalSizeBytes = typeof cfgSnapshot.maxTotalSizeBytes === 'number' ? cfgSnapshot.maxTotalSizeBytes : thresholds.maxTotalSizeBytes || thresholdsDefault.maxTotalSizeBytes;
+            const tokenLimit = typeof cfgSnapshot.tokenLimit === 'number' ? cfgSnapshot.tokenLimit : thresholds.tokenLimit || thresholdsDefault.tokenLimit;
             webview.postMessage({ type: 'config', folderPath: folder, settings: {
-            // normalized key names (preferred)
-            respectGitignore: cfg.get('respectGitignore', cfg.get('gitignore', true)),
-            presets: cfg.get('presets', []),
-            // include filterPresets for UI compatibility; fall back to presets if absent
-            filterPresets: cfg.get('filterPresets', cfg.get('presets', [])),
-            outputFormat: cfg.get('outputFormat', 'text'),
-            tokenModel: cfg.get('tokenModel', 'chars-approx'),
-            binaryFilePolicy: cfg.get('binaryFilePolicy', cfg.get('binaryPolicy', 'skip')),
-            // flattened thresholds for easier UI binding
-            maxFiles,
-            maxTotalSizeBytes,
-            tokenLimit,
-            // legacy shape for older webview consumers
-            thresholds: Object.assign({}, thresholdsDefault, thresholds),
-            // redaction settings
-            showRedacted: cfg.get('showRedacted', false),
-            redactionPatterns: cfg.get('redactionPatterns', []),
-            redactionPlaceholder: cfg.get('redactionPlaceholder', '[REDACTED]')
+                respectGitignore: cfgSnapshot.respectGitignore,
+                presets: Array.isArray((cfgSnapshot as any).presets) ? (cfgSnapshot as any).presets : [],
+                // include filterPresets for UI compatibility; fall back to presets if absent
+                filterPresets: Array.isArray((cfgSnapshot as any).filterPresets) ? (cfgSnapshot as any).filterPresets : (Array.isArray((cfgSnapshot as any).presets) ? (cfgSnapshot as any).presets : []),
+                outputFormat: cfgSnapshot.outputFormat,
+                tokenModel: cfgSnapshot.tokenModel,
+                binaryFilePolicy: cfgSnapshot.binaryFilePolicy,
+                maxFiles,
+                maxTotalSizeBytes,
+                tokenLimit,
+                thresholds: Object.assign({}, thresholdsDefault, thresholds),
+                showRedacted: cfgSnapshot.showRedacted,
+                redactionPatterns: Array.isArray(cfgSnapshot.redactionPatterns) ? cfgSnapshot.redactionPatterns : [],
+                redactionPlaceholder: cfgSnapshot.redactionPlaceholder || '[REDACTED]'
             }});
-    } catch (e) { try { console.warn('webviewHelpers: post config failed', stringifyError(e)); } catch {} }
+        } catch (e) { try { console.warn('webviewHelpers: post config failed', stringifyError(e)); } catch {} }
         return;
     }
     if (msg.type === 'config' && msg.action === 'set' && msg.changes) {
@@ -439,13 +435,18 @@ export async function processWebviewMessage(msg: WebviewMessage, webview: vscode
 
     const actionType = typeof msg.actionType === 'string' ? msg.actionType : undefined;
     if (actionType === 'pauseScan') {
-            try {
-                const { safeExecuteCommand } = require('../utils/safeExecuteCommand');
-                await safeExecuteCommand('codebaseDigest.pauseScan', targetFolder);
-            } catch (err) {
-                try { webview.postMessage({ type: 'diagnostic', level: 'error', message: `pauseScan failed: ${stringifyError(err)}` }); } catch (e) { try { console.warn('webviewHelpers: post diagnostic failed', stringifyError(e)); } catch {} }
-                try { vscode.window.showErrorMessage(`pauseScan failed: ${stringifyError(err)}`); } catch (e) { /* swallow */ }
-            }
+                try {
+                    const { safeExecuteCommand } = require('../utils/safeExecuteCommand');
+                    try {
+                        await safeExecuteCommand('codebaseDigest.pauseScan', targetFolder);
+                    } catch (err) {
+                        try { webview.postMessage({ type: 'diagnostic', level: 'error', message: `pauseScan failed: ${stringifyError(err)}` }); } catch (e) { try { console.warn('webviewHelpers: post diagnostic failed', stringifyError(e)); } catch {} }
+                        try { vscode.window.showErrorMessage(`pauseScan failed: ${stringifyError(err)}`); } catch (e) { /* swallow */ }
+                        try { console.warn('webviewHelpers: pauseScan failed', stringifyError(err)); } catch (e) { /* swallow */ }
+                    }
+                } catch (err) {
+                    try { console.warn('webviewHelpers: pauseScan require failed', stringifyError(err)); } catch {}
+                }
             return;
         }
         // Apply a named preset (e.g., Code/Docs/Tests) persisted per-workspace
@@ -453,31 +454,45 @@ export async function processWebviewMessage(msg: WebviewMessage, webview: vscode
             const allowed = ['default', 'codeOnly', 'docsOnly', 'testsOnly'];
             const preset = msg.preset;
             if (!allowed.includes(preset)) { return; }
-            try {
-                const cfg = vscode.workspace.getConfiguration('codebaseDigest', vscode.Uri.file(targetFolder || ''));
-                await cfg.update('filterPresets', [preset], vscode.ConfigurationTarget.Workspace);
-                try { if (tp && typeof tp.refresh === 'function') { tp.refresh(); } } catch (e) { try { console.warn('webviewHelpers: treeProvider.refresh failed', stringifyError(e)); } catch {} }
-                try { webview.postMessage({ type: 'config', folderPath: targetFolder, settings: { filterPresets: cfg.get('filterPresets', []) } }); } catch (e) { try { console.warn('webviewHelpers: post config failed', stringifyError(e)); } catch {} }
-                return;
-            } catch (err) {
-                // fallback to command if direct persistence fails
                 try {
-                    const { safeExecuteCommand } = require('../utils/safeExecuteCommand');
-                    await safeExecuteCommand('codebaseDigest.applyPreset', targetFolder, preset);
-                } catch (e) {
-                    try { webview.postMessage({ type: 'diagnostic', level: 'error', message: `applyPreset failed: ${stringifyError(e)}` }); } catch (ee) { try { console.warn('webviewHelpers: post diagnostic failed', stringifyError(ee)); } catch {} }
-                    try { console.warn('webviewHelpers: applyPreset executeCommand failed', stringifyError(e)); } catch {}
+                    // Keep updates using WorkspaceConfiguration.update to preserve persistence semantics
+                    const cfg = vscode.workspace.getConfiguration('codebaseDigest', vscode.Uri.file(targetFolder || ''));
+                    await cfg.update('filterPresets', [preset], vscode.ConfigurationTarget.Workspace);
+                    try { if (tp && typeof tp.refresh === 'function') { tp.refresh(); } } catch (e) { try { console.warn('webviewHelpers: treeProvider.refresh failed', stringifyError(e)); } catch {} }
+                    try {
+                        // Read back using ConfigurationService snapshot for consistent shape when posting
+                        const snapshot = ConfigurationService.getWorkspaceConfig(vscode.Uri.file(targetFolder || ''));
+                        try { webview.postMessage({ type: 'config', folderPath: targetFolder, settings: { filterPresets: (snapshot as any).filterPresets || [] } }); } catch (e) { try { console.warn('webviewHelpers: post config failed', stringifyError(e)); } catch {} }
+                    } catch (e) { try { console.warn('webviewHelpers: post config failed', stringifyError(e)); } catch {} }
+                    return;
+                } catch (err) {
+                    // fallback to command if direct persistence fails
+                    try {
+                        const { safeExecuteCommand } = require('../utils/safeExecuteCommand');
+                        try {
+                            await safeExecuteCommand('codebaseDigest.applyPreset', targetFolder, preset);
+                        } catch (e) {
+                            try { webview.postMessage({ type: 'diagnostic', level: 'error', message: `applyPreset failed: ${stringifyError(e)}` }); } catch (ee) { try { console.warn('webviewHelpers: post diagnostic failed', stringifyError(ee)); } catch {} }
+                            try { console.warn('webviewHelpers: applyPreset executeCommand failed', stringifyError(e)); } catch {}
+                        }
+                    } catch (err2) {
+                        try { console.warn('webviewHelpers: applyPreset require failed', stringifyError(err2)); } catch {}
+                    }
+                    return;
                 }
-                return;
-            }
         }
     if (actionType === 'resumeScan') {
             try {
                 const { safeExecuteCommand } = require('../utils/safeExecuteCommand');
-                await safeExecuteCommand('codebaseDigest.resumeScan', targetFolder);
+                try {
+                    await safeExecuteCommand('codebaseDigest.resumeScan', targetFolder);
+                } catch (err) {
+                    try { webview.postMessage({ type: 'diagnostic', level: 'error', message: `resumeScan failed: ${stringifyError(err)}` }); } catch (e) { try { console.warn('webviewHelpers: post diagnostic failed', stringifyError(e)); } catch {} }
+                    try { vscode.window.showErrorMessage(`resumeScan failed: ${stringifyError(err)}`); } catch (e) { /* swallow */ }
+                    try { console.warn('webviewHelpers: resumeScan failed', stringifyError(err)); } catch (e) { /* swallow */ }
+                }
             } catch (err) {
-                try { webview.postMessage({ type: 'diagnostic', level: 'error', message: `resumeScan failed: ${stringifyError(err)}` }); } catch (e) { try { console.warn('webviewHelpers: post diagnostic failed', stringifyError(e)); } catch {} }
-                try { vscode.window.showErrorMessage(`resumeScan failed: ${stringifyError(err)}`); } catch (e) { /* swallow */ }
+                try { console.warn('webviewHelpers: resumeScan require failed', stringifyError(err)); } catch {}
             }
             return;
         }
@@ -497,10 +512,14 @@ export async function processWebviewMessage(msg: WebviewMessage, webview: vscode
                 (async () => {
                     try {
                         const { safeExecuteCommand } = require('../utils/safeExecuteCommand');
-                        const result: any = await safeExecuteCommand('codebaseDigest.ingestRemoteRepoProgrammatic', params);
-                        try { webview.postMessage({ type: 'ingestPreview', payload: result }); } catch (e) { try { console.warn('webviewHelpers: post ingestPreview failed', stringifyError(e)); } catch {} }
+                        try {
+                            const result: any = await safeExecuteCommand('codebaseDigest.ingestRemoteRepoProgrammatic', params);
+                            try { webview.postMessage({ type: 'ingestPreview', payload: result }); } catch (e) { try { console.warn('webviewHelpers: post ingestPreview failed', stringifyError(e)); } catch {} }
+                        } catch (err) {
+                            try { webview.postMessage({ type: 'ingestError', error: String(err) }); } catch (e) { try { console.warn('webviewHelpers: post ingestError failed', stringifyError(e)); } catch {} }
+                        }
                     } catch (err) {
-                        try { webview.postMessage({ type: 'ingestError', error: String(err) }); } catch (e) { try { console.warn('webviewHelpers: post ingestError failed', stringifyError(e)); } catch {} }
+                        try { console.warn('webviewHelpers: ingestRemote require failed', stringifyError(err)); } catch {}
                     }
                 })();
             return;
@@ -546,13 +565,18 @@ export async function processWebviewMessage(msg: WebviewMessage, webview: vscode
             return;
         }
     if (actionType === 'toggleExpand' && typeof msg.relPath === 'string') {
-            try {
-                const { safeExecuteCommand } = require('../utils/safeExecuteCommand');
-                await safeExecuteCommand('codebaseDigest.toggleExpand', targetFolder, msg.relPath);
-            } catch (err) {
-                try { webview.postMessage({ type: 'diagnostic', level: 'error', message: `toggleExpand failed: ${stringifyError(err)}` }); } catch (e) { try { console.warn('webviewHelpers: post diagnostic failed', stringifyError(e)); } catch {} }
-                try { vscode.window.showErrorMessage(`toggleExpand failed: ${stringifyError(err)}`); } catch (e) { /* swallow */ }
-            }
+                try {
+                    const { safeExecuteCommand } = require('../utils/safeExecuteCommand');
+                    try {
+                        await safeExecuteCommand('codebaseDigest.toggleExpand', targetFolder, msg.relPath);
+                    } catch (err) {
+                        try { webview.postMessage({ type: 'diagnostic', level: 'error', message: `toggleExpand failed: ${stringifyError(err)}` }); } catch (e) { try { console.warn('webviewHelpers: post diagnostic failed', stringifyError(e)); } catch {} }
+                        try { vscode.window.showErrorMessage(`toggleExpand failed: ${stringifyError(err)}`); } catch (e) { /* swallow */ }
+                        try { console.warn('webviewHelpers: toggleExpand failed', stringifyError(err)); } catch (e) { /* swallow */ }
+                    }
+                } catch (err) {
+                    try { console.warn('webviewHelpers: toggleExpand require failed', stringifyError(err)); } catch {}
+                }
             return;
         }
     if (actionType && commandMap[actionType]) {
@@ -586,9 +610,21 @@ export async function processWebviewMessage(msg: WebviewMessage, webview: vscode
                                     // otherwise ignore complex values
                                 }
                             }
-                            await safeExecuteCommand(cmdId, targetFolder, overrides);
+                            try {
+                                await safeExecuteCommand(cmdId, targetFolder, overrides);
+                            } catch (err) {
+                                try { webview.postMessage({ type: 'diagnostic', level: 'error', message: `${cmdId} failed: ${stringifyError(err)}` }); } catch (e) { try { console.warn('webviewHelpers: post diagnostic failed', stringifyError(e)); } catch {} }
+                                try { vscode.window.showErrorMessage(`${cmdId} failed: ${stringifyError(err)}`); } catch (e) { /* swallow */ }
+                                try { console.warn('webviewHelpers: command failed', cmdId, stringifyError(err)); } catch {}
+                            }
                         } else {
-                            await safeExecuteCommand(cmdId, targetFolder);
+                            try {
+                                await safeExecuteCommand(cmdId, targetFolder);
+                            } catch (err) {
+                                try { webview.postMessage({ type: 'diagnostic', level: 'error', message: `${cmdId} failed: ${stringifyError(err)}` }); } catch (e) { try { console.warn('webviewHelpers: post diagnostic failed', stringifyError(e)); } catch {} }
+                                try { vscode.window.showErrorMessage(`${cmdId} failed: ${stringifyError(err)}`); } catch (e) { /* swallow */ }
+                                try { console.warn('webviewHelpers: command failed', cmdId, stringifyError(err)); } catch {}
+                            }
                         }
                 } catch (err) {
                     try { webview.postMessage({ type: 'diagnostic', level: 'error', message: `${cmdId} failed: ${stringifyError(err)}` }); } catch (e) { try { console.warn('webviewHelpers: post diagnostic failed', stringifyError(e)); } catch {} }

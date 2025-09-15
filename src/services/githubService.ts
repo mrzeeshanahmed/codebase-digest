@@ -5,8 +5,10 @@ import * as os from 'os';
 // Track created temp dirs for session-scoped cleanup
 const _createdTmpDirs: string[] = [];
 import { internalErrors, interactiveMessages } from '../utils';
+import { logErrorToChannel } from '../utils/errorHandler';
 import { spawnGitPromise, safeFetch } from '../utils/procRedact';
 import { scrubTokens } from '../utils/redaction';
+// (no-op) additional logging helper imported where needed
 
 // Helpers
 function stringifyErr(e: unknown): string {
@@ -38,6 +40,19 @@ function isSafeRefName(ref: string): boolean {
     return /^[A-Za-z0-9_\-\.\/]+$/.test(ref);
 }
 
+function isSafeSubpath(p: string): boolean {
+    // Subpath for sparse-checkout should not attempt traversal and should be a relative path
+    if (!p || typeof p !== 'string') { return false; }
+    // Normalize separators to POSIX style for validation
+    const norm = p.replace(/\\/g, '/');
+    // Allow absolute paths by stripping leading slashes for validation
+    const trimmed = norm.replace(/^\/+/, '');
+    // Disallow parent traversal segments
+    if (trimmed.split('/').some(seg => seg === '..' || seg.includes('..'))) { return false; }
+    // Allow typical path chars, letters, numbers, - _ . / and no shell metacharacters
+    return /^[A-Za-z0-9_\-\.\/]+$/.test(trimmed);
+}
+
 export interface RemoteRepoMeta {
     ownerRepo: string;
     resolved: {
@@ -51,7 +66,11 @@ export interface RemoteRepoMeta {
 
 // Build remote summary block for display
 export function buildRemoteSummary(meta: RemoteRepoMeta): string {
-    return `# Remote Source\nRepository: ${meta.ownerRepo}\nRef: ${meta.resolved.branch || meta.resolved.tag || meta.resolved.commit || '(default)'} => ${meta.resolved.sha}\nSubpath: ${meta.subpath || '-'}\n`;
+    // Guard defensively in case tests or callers provide a meta without a resolved block.
+    const resolved = meta && (meta as any).resolved ? (meta as any).resolved as { sha?: string; branch?: string; tag?: string; commit?: string } : { sha: '(unknown)' };
+    const refLabel = (resolved && (resolved.branch || resolved.tag || resolved.commit)) ? (resolved.branch || resolved.tag || resolved.commit) : '(default)';
+    const sha = resolved && resolved.sha ? resolved.sha : '(unknown)';
+    return `# Remote Source\nRepository: ${meta.ownerRepo}\nRef: ${refLabel} => ${sha}\nSubpath: ${meta.subpath || '-'}\n`;
 }
 
 export async function runSubmoduleUpdate(repoPath: string): Promise<void> {
@@ -239,6 +258,66 @@ export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?
         } catch (e) { /* best-effort, ignore */ }
     }
     let env: any = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+    // Optional output channel and buffered chunk writer for streaming git output
+    let outChannel: vscode.OutputChannel | undefined;
+    // Buffer and timer for coalescing small writes
+    let writeBuffer = '';
+    let flushTimer: NodeJS.Timeout | undefined;
+    const FLUSH_MS_DEFAULT = 150;
+    let flushMs = FLUSH_MS_DEFAULT;
+    // Configurable UX: show channel when starting, and close on complete
+    let showOnStart = true;
+    let closeOnComplete = false;
+    try {
+        outChannel = vscode.window.createOutputChannel('Code Ingest');
+        try {
+            const cfg = vscode.workspace && typeof vscode.workspace.getConfiguration === 'function' ? vscode.workspace.getConfiguration('codebaseDigest') : null;
+            if (cfg && typeof cfg.get === 'function') {
+                const s = cfg.get('showIngestOutputChannel', true);
+                const c = cfg.get('closeIngestOutputOnComplete', false);
+                const fm = cfg.get('ingestOutputFlushMs', FLUSH_MS_DEFAULT);
+                showOnStart = typeof s === 'boolean' ? s : true;
+                closeOnComplete = typeof c === 'boolean' ? c : false;
+                flushMs = typeof fm === 'number' && fm >= 20 ? fm : FLUSH_MS_DEFAULT;
+            }
+        } catch (_) { /* ignore config read errors */ }
+    } catch (_) { outChannel = undefined; }
+
+    const scheduleFlush = () => {
+        try {
+            if (flushTimer) { return; }
+            flushTimer = setTimeout(() => {
+                try {
+                    if (outChannel && writeBuffer.length > 0) {
+                        outChannel.append(writeBuffer);
+                    }
+                } catch (_) { /* ignore */ }
+                writeBuffer = '';
+                if (flushTimer) { clearTimeout(flushTimer); flushTimer = undefined; }
+            }, flushMs) as unknown as NodeJS.Timeout;
+        } catch (_) { /* ignore */ }
+    };
+
+    const chunkWriter = (chunk: { stream: 'stdout' | 'stderr'; data: string }) => {
+        try {
+            const text = scrubTokens(chunk.data || '');
+            // Coalesce into buffer and schedule a flush
+            writeBuffer += text;
+            scheduleFlush();
+        } catch (_) { /* ignore logging errors */ }
+    };
+
+    // Optionally show the channel at start and write a start line
+    const startTime = Date.now();
+    const writeStartLine = () => {
+        try {
+            if (outChannel && showOnStart) {
+                outChannel.appendLine(`=== Ingest started: ${new Date(startTime).toISOString()} - ${owner}/${repo} ===`);
+            }
+        } catch (_) { /* ignore */ }
+    };
+    try { if (outChannel && showOnStart) { outChannel.show(true); } } catch (_) { /* ignore */ }
+    writeStartLine();
     // Helper to write askpass script into `dir` and set env vars accordingly
     // Write askpass helper into a separate temp dir (not the clone target) so the
     // clone target stays empty. Only create the helper when we have a token.
@@ -271,10 +350,12 @@ export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?
         // (destination already exists and is not empty), allocate a fresh mkdtemp and retry.
         const maxCloneAttempts = 3;
         let cloneAttempt = 0;
+        // (chunkWriter is declared at function scope)
+
         while (true) {
             const baseCloneArgs = [...baseCloneArgsTemplate, dir];
             try {
-                await spawnGitPromise(baseCloneArgs, { env }).then(() => {});
+                await spawnGitPromise(baseCloneArgs, { env }, chunkWriter).then(() => {});
                 break; // success
             } catch (cloneErr: any) {
                     const details = scrubTokens(String(cloneErr && typeof cloneErr === 'object' ? String((cloneErr as Record<string, unknown>)['details'] || (cloneErr as Record<string, unknown>)['message'] || String(cloneErr)) : String(cloneErr || '')));
@@ -325,9 +406,15 @@ export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?
         }
         // Step 2: sparse-checkout if subpath and not explicitly skipped
         if (subpath && !(opts && opts.skipSparse)) {
+            // Validate subpath provided by caller to avoid passing malicious
+            // values into git sparse-checkout commands which could be abused
+            // to cause unexpected behavior or reveal filesystem structure.
+            if (!isSafeSubpath(subpath)) {
+                throw new Error(scrubTokens(`Invalid subpath for sparse-checkout: ${subpath}`));
+            }
             try {
-                await spawnGitPromise(['sparse-checkout','init','--cone'], { cwd: dir, env }).then(() => {});
-                await spawnGitPromise(['sparse-checkout','set', subpath], { cwd: dir, env }).then(() => {});
+                await spawnGitPromise(['sparse-checkout','init','--cone'], { cwd: dir, env }, chunkWriter).then(() => {});
+                await spawnGitPromise(['sparse-checkout','set', subpath], { cwd: dir, env }, chunkWriter).then(() => {});
             } catch (sparseErr: any) {
                 // Scrub error and present retry choices to the user to try less strict clone options.
                 const safeMsg = scrubTokens(String(sparseErr && sparseErr.message ? sparseErr.message : sparseErr));
@@ -348,13 +435,13 @@ export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?
                     try { writeAskpass(); } catch (e) { /* ignore */ }
                     if (choice.id === 'nofilter') {
                         // Retry clone without blob filter and attempt sparse again
-                        await spawnGitPromise(['clone','--no-checkout','--depth','1','--single-branch',url,dir], { env });
+                        await spawnGitPromise(['clone','--no-checkout','--depth','1','--single-branch',url,dir], { env }, chunkWriter);
                         // attempt sparse again
-                        await spawnGitPromise(['sparse-checkout','init','--cone'], { cwd: dir, env }).then(() => {});
-                        await spawnGitPromise(['sparse-checkout','set', subpath], { cwd: dir, env }).then(() => {});
+                        await spawnGitPromise(['sparse-checkout','init','--cone'], { cwd: dir, env }, chunkWriter).then(() => {});
+                        await spawnGitPromise(['sparse-checkout','set', subpath], { cwd: dir, env }, chunkWriter).then(() => {});
                     } else if (choice.id === 'full') {
                         // Full shallow clone (no --no-checkout necessary)
-                        await spawnGitPromise(['clone','--depth','1','--single-branch',url,dir], { env });
+                        await spawnGitPromise(['clone','--depth','1','--single-branch',url,dir], { env }, chunkWriter);
                         // No sparse needed; subpath will be present in working tree after checkout
                     }
                 } catch (retryErr: any) {
@@ -368,6 +455,14 @@ export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?
         }
     } catch (err) {
         // On any failure, if we created the dir here, attempt best-effort cleanup before propagating
+        // Write a failure line with duration
+        try {
+            const dur = Date.now() - startTime;
+            if (outChannel) {
+                outChannel.appendLine(`=== Ingest FAILED after ${dur} ms ===`);
+                try { if (err && String(err)) { outChannel.appendLine(scrubTokens(String(err))); } } catch (_) { /* ignore */ }
+            }
+        } catch (_) { /* ignore */ }
         try {
             if (createdHere && fs.existsSync(dir)) { await cleanup(dir); }
         } catch (ce) {
@@ -381,11 +476,19 @@ export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?
         try {
             cleanupSessionTmpDirs();
         } catch (_) { /* ignore */ }
-        throw err;
+        // Rethrow after cleanup
+        try { throw err; } catch (e) { throw e; }
     }
     // Step 3: git checkout
     try {
-        await spawnGitPromise(['checkout', shaOrRef], { cwd: dir, env }).then(() => {});
+        // Validate shaOrRef prior to handing to git. Allow full 40-char hex shas,
+        // short shas (7+ hex), or safe ref names validated by isSafeRefName.
+        const isFullSha = /^[a-f0-9]{40}$/.test(shaOrRef);
+        const isShortSha = /^[a-f0-9]{7,40}$/.test(shaOrRef);
+        if (!(isFullSha || isShortSha || isSafeRefName(shaOrRef))) {
+            throw new Error(scrubTokens(`Invalid git ref or sha: ${shaOrRef}`));
+        }
+    await spawnGitPromise(['checkout', shaOrRef], { cwd: dir, env }, chunkWriter).then(() => {});
     } catch (checkoutErr: any) {
         const details = scrubTokens(String(checkoutErr && typeof checkoutErr === 'object' ? String((checkoutErr as Record<string, unknown>)['details'] || (checkoutErr as Record<string, unknown>)['message'] || String(checkoutErr)) : String(checkoutErr || '')));
         const lower = (details || '').toLowerCase();
@@ -402,6 +505,22 @@ export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?
     try {
         if (askpassDir && fs.existsSync(askpassDir)) { fs.rmSync(askpassDir, { recursive: true, force: true }); }
     } catch (_) { /* ignore */ }
+    // Write completion line and flush buffer
+    try {
+        const dur = Date.now() - startTime;
+        if (outChannel) {
+            outChannel.appendLine(`=== Ingest completed: ${new Date().toISOString()} (duration ${dur} ms) ===`);
+        }
+    } catch (_) { /* ignore */ }
+    // Flush any remaining buffered output and optionally close the channel
+    try {
+        if (flushTimer) { clearTimeout(flushTimer); flushTimer = undefined; }
+        if (outChannel && writeBuffer.length > 0) { outChannel.append(writeBuffer); writeBuffer = ''; }
+        if (outChannel && closeOnComplete) {
+            try { outChannel.hide(); } catch (_) { /* ignore */ }
+        }
+    } catch (_) { /* ignore */ }
+
     return dir;
 }
 
@@ -481,9 +600,7 @@ export async function ingestRemoteRepo(urlOrSlug: string, options?: { ref?: { ta
                 await cleanup(tmpDir);
             }
         } catch (cleanupErr) {
-            const ch = vscode.window.createOutputChannel('Code Ingest Errors');
-            ch.appendLine(`Failed to cleanup temporary dir ${tmpDir}: ${String(cleanupErr)}`);
-            ch.show(true);
+            try { logErrorToChannel(cleanupErr, `Failed to cleanup temporary dir ${tmpDir}`); } catch (e) { try { console.error('cleanup reporting failed', e); } catch {} }
         }
     }
 }

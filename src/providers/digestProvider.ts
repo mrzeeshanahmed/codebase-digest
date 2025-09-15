@@ -22,9 +22,11 @@ import { OutputWriter } from '../services/outputWriter';
 import { redactSecrets } from '../utils/redactSecrets';
 import { showUserError } from '../utils/userMessages';
 import * as errorsUtil from '../utils/errors';
+import { handleError, logErrorToChannel } from '../utils/errorHandler';
 import { emitProgress } from './eventBus';
 import { broadcastGenerationResult } from './codebasePanel';
 import { getMutex } from '../utils/asyncLock';
+import { ConfigurationService } from '../services/configurationService';
 import * as fs from 'fs';
 import * as fsp from 'fs/promises';
 import * as path from 'path';
@@ -48,18 +50,18 @@ export async function generateDigest(
     // concurrently (user may click generate repeatedly or webview may trigger twice).
     const workspacePath = workspaceFolder.uri.fsPath;
     const _mutex = getMutex(workspacePath);
-    const _release = await _mutex.lock();
+    let _release: (() => void) | undefined;
     try {
-    const services = workspaceManager.getBundleForFolder(workspaceFolder);
-    if (!services) {
-        // Log and show error consistently, then broadcast to any webviews
-        errorsUtil.showUserError('No services found for workspace folder.', workspaceFolder.uri.fsPath);
-        try { broadcastGenerationResult({ error: 'No services found for workspace folder.' }, workspacePath); } catch (e) { try { console.warn('digestProvider: broadcastGenerationResult failed', e); } catch {} }
-        return;
-    }
-    // Read workspace configuration and defensively narrow to DigestConfig at runtime
-    const rawCfg = vscode.workspace.getConfiguration('codebaseDigest', workspaceFolder.uri);
-    const config: DigestConfig = (rawCfg && typeof rawCfg === 'object') ? (rawCfg as unknown as DigestConfig) : ({} as DigestConfig);
+        _release = await _mutex.lock();
+        const services = workspaceManager.getBundleForFolder(workspaceFolder);
+        if (!services) {
+            // Log and show error consistently, then broadcast to any webviews
+            errorsUtil.showUserError('No services found for workspace folder.', workspaceFolder.uri.fsPath);
+            try { broadcastGenerationResult({ error: 'No services found for workspace folder.' }, workspacePath); } catch (e) { try { console.warn('digestProvider: broadcastGenerationResult failed', e); } catch {} }
+            return;
+        }
+    // Read workspace configuration via centralized ConfigurationService (validated/coerced)
+    const config: DigestConfig = ConfigurationService.getWorkspaceConfig(workspaceFolder, services.diagnostics);
     // runtimeConfig merges saved workspace settings with transient overrides for this run only
     // Note: overrides is intentionally transient (one-shot) and should not be persisted back
     // to the user's WorkspaceConfiguration. This ensures the "Disable redaction for this run"
@@ -90,9 +92,9 @@ export async function generateDigest(
             }
             const details = String(err);
             diagnostics?.error && diagnostics.error('Remote repo ingest failed: ' + details);
-            // Log to output channel and show an error; broadcast to webview
-            errorsUtil.showUserError('Remote repo ingest failed.', details, diagnostics);
-                try { broadcastGenerationResult({ error: 'Remote repo ingest failed.' }, workspacePath); } catch (e) { try { console.warn('digestProvider: broadcastGenerationResult failed', e); } catch {} }
+            // Centralized error handling: log, diagnostics, and show user message
+            try { await handleError(err, 'Remote repo ingest failed.', { diagnostics, showUser: true, userMessage: 'Remote repo ingest failed.' }); } catch (_) { /* ignore */ }
+            try { broadcastGenerationResult({ error: 'Remote repo ingest failed.' }, workspacePath); } catch (e) { try { console.warn('digestProvider: broadcastGenerationResult failed', e); } catch {} }
             return;
         }
     } else {
@@ -195,7 +197,7 @@ export async function generateDigest(
         // If generation was canceled via the event bus, ensure partial artifacts are removed and inform the user
         const details = String(err || 'Generation failed');
     try { diagnostics && diagnostics.error && diagnostics.error('Generation failed or canceled: ' + details); } catch (e) {}
-    try { errorsUtil.showUserError('Digest generation failed or canceled.', details, diagnostics); } catch (e) {}
+    try { await handleError(err, 'Digest generation failed or canceled.', { diagnostics, showUser: true, userMessage: 'Digest generation failed or canceled.' }); } catch (e) {}
         // If cache files were partially written, attempt to remove them to avoid leaving stale artifacts
         try {
             if (fs.existsSync(cacheOutPath)) { await fsp.unlink(cacheOutPath).catch(() => {}); }
@@ -384,7 +386,7 @@ export async function generateDigest(
 
     return finalResult;
     } finally {
-        try { _release(); } catch (e) { }
+        try { if (typeof _release === 'function') { _release(); } } catch (e) { }
     }
 }
 
