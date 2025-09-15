@@ -11,8 +11,14 @@ export class TokenAnalyzer {
     'gpt-4o': 4,
     'gpt-3.5': 4,
         'gpt-4o-mini': 4,
+        'gpt-4o-mini-8k': 4,
+        'gpt-4o-mini-16k': 4,
         'claude-3.5': 4,
-        'o200k': 4
+        'claude-2.1': 4,
+        'claude-2': 4,
+        'o200k': 4,
+        'o1': 4,
+        'o2': 4
     };
 
     /**
