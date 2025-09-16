@@ -301,7 +301,11 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
             } catch (e) { /* ignore */ }
 
             // track active view so we can broadcast messages to it later (store advertised folderPath)
-                try { activeViews.set(webviewView, typeof tpRec.workspaceRoot === 'string' ? String(tpRec.workspaceRoot) : ''); } catch (e) {}
+                try {
+                    const advertised = typeof tpRec.workspaceRoot === 'string' ? String(tpRec.workspaceRoot) : '';
+                    activeViews.set(webviewView, advertised);
+                    try { console.debug('[codebase-digest] resolveWebviewView active view tracked for', advertised); } catch (e) {}
+                } catch (e) {}
 
             // Use shared wiring helper for sidebar messages as well
                 wireWebviewMessages(webviewView.webview, treeProvider, typeof tpRec.workspaceRoot === 'string' ? String(tpRec.workspaceRoot) : '', async (changes: Record<string, any>) => {
@@ -344,6 +348,7 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                 // on getState, send current preview
                 try {
                     const preview = treeProvider.getPreviewData();
+                    try { console.debug('[codebase-digest] resolveWebviewView posting state (onGetState):', preview && typeof preview.totalFiles === 'number' ? { totalFiles: preview.totalFiles, selectedCount: preview.selectedCount } : preview); } catch (e) {}
                     const statePayload: StatePayload = { type: 'state', state: preview };
                     webviewView.webview.postMessage(statePayload);
                 } catch (e) { /* ignore */ }
@@ -391,6 +396,7 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
             // send an immediate preview delta so chips populate quickly on reveal
                 try {
                     const preview = treeProvider.getPreviewData();
+                    try { console.debug('[codebase-digest] resolveWebviewView posting immediate previewDelta:', preview && typeof preview.totalFiles === 'number' ? { totalFiles: preview.totalFiles, selectedCount: preview.selectedCount } : preview); } catch (e) {}
                     const delta: PreviewDeltaPayload['delta'] = {
                         selectedCount: typeof preview.selectedCount === 'number' ? preview.selectedCount : undefined,
                         totalFiles: typeof preview.totalFiles === 'number' ? preview.totalFiles : undefined,

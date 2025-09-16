@@ -997,7 +997,20 @@ function showToast(msg, kind='info', ttl=4000) {
 
 // Request initial state
 window.onload = function() {
+    try { console.debug && console.debug('[codebase-digest][webview] window.onload: requesting state'); } catch (e) {}
     vscode.postMessage({ type: 'getState' });
+    // If no state arrives quickly (race with host), retry a couple of times to ensure provider responds
+    let retries = 0;
+    const retryGetState = () => {
+        try {
+            retries += 1;
+            if (retries > 5) { return; }
+            try { console.debug && console.debug('[codebase-digest][webview] retrying getState attempt', retries); } catch (e) {}
+            vscode.postMessage({ type: 'getState' });
+            setTimeout(retryGetState, 400 * retries);
+        } catch (e) { /* swallow */ }
+    };
+    setTimeout(() => { retryGetState(); }, 300);
     // Populate node cache for frequently used elements
     try {
         nodes.toolbar = document.getElementById('toolbar');
