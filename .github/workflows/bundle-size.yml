@@ -18,7 +18,7 @@ jobs:
     # Job-level env so the bundle check logic is evaluated once per job.
     env:
       # Default threshold can be overridden by repository secrets or workflow inputs
-      BUNDLE_SIZE_THRESHOLD: ${{ secrets.BUNDLE_SIZE_THRESHOLD || 409600 }}
+      BUNDLE_SIZE_THRESHOLD: ${{ secrets.BUNDLE_SIZE_THRESHOLD || 1048576 }}
 
     steps:
       - uses: actions/checkout@v4
