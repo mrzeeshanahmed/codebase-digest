@@ -71,7 +71,7 @@ export async function generateDigest(
         services = workspaceManager.getBundleForFolder(workspaceFolder);
         if (!services) {
             // Log and show error consistently, then broadcast to any webviews
-            errorsUtil.showUserError('No services found for workspace folder.', workspaceFolder.uri.fsPath);
+            errorsUtil.logUserError('No services found for workspace folder.', workspaceFolder.uri.fsPath);
             try { broadcastGenerationResult({ error: 'No services found for workspace folder.' }, workspacePath); } catch (e) { try { console.warn('digestProvider: broadcastGenerationResult failed', e); } catch {} }
             return;
         }
@@ -113,7 +113,7 @@ export async function generateDigest(
                     { label: 'Cancel', value: 'cancel' }
                 ], { placeHolder: 'No files selected. What would you like to do?' });
                 if (!pick || pick.value === 'cancel') {
-                    errorsUtil.showUserWarning('Digest generation cancelled: no files selected.');
+                    errorsUtil.logUserWarning('Digest generation cancelled: no files selected.');
                     try { broadcastGenerationResult({ error: 'Digest generation cancelled: no files selected.' }, workspacePath); } catch (e) { /* swallow */ }
                     return;
                 }
@@ -124,7 +124,7 @@ export async function generateDigest(
             }
             files = treeProvider ? treeProvider.getSelectedFiles() : [];
             if (!files || files.length === 0) {
-                errorsUtil.showUserWarning('Digest generation cancelled: no files selected.');
+                errorsUtil.logUserWarning('Digest generation cancelled: no files selected.');
                 try { broadcastGenerationResult({ error: 'Digest generation cancelled: no files selected.' }, workspacePath); } catch (e) { /* swallow */ }
                 return;
             }
@@ -179,7 +179,7 @@ export async function generateDigest(
                     { label: 'Cancel', value: 'cancel' }
                 ], { placeHolder: 'Cached digest found. What would you like to do?' });
                 if (!pick || pick.value === 'cancel') {
-                    errorsUtil.showUserWarning('Digest generation cancelled.');
+                    errorsUtil.logUserWarning('Digest generation cancelled.');
                     try { broadcastGenerationResult({ error: 'Digest generation cancelled.' }, workspacePath); } catch (e) { /* swallow */ }
                     return;
                 }

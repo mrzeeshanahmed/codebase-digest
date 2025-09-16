@@ -8,7 +8,31 @@
   },
   "activationEvents": [
     "onStartupFinished",
-    "onView:codebaseDigestDashboard"
+    "onView:codebaseDigestDashboard",
+    "onCommand:codebaseDigest.estimateTokens",
+    "onCommand:codebaseDigest.toggleExpand",
+    "onCommand:codebaseDigest.tokenCount",
+    "onCommand:codebaseDigest.expandAll",
+    "onCommand:codebaseDigest.collapseAll",
+    "onCommand:codebaseDigest.generateDigest",
+    "onCommand:codebaseDigest.selectAll",
+    "onCommand:codebaseDigest.clearSelection",
+    "onCommand:codebaseDigest.refreshTree",
+    "onCommand:codebaseDigest.toggleSelection",
+    "onCommand:codebaseDigest.ingestRemoteRepo",
+    "onCommand:codebaseDigest.choosePreset",
+    "onCommand:codebaseDigest.editPatterns",
+    "onCommand:codebaseDigest.toggleGitignoreRespect",
+    "onCommand:codebaseDigest.invalidateCache",
+    "onCommand:codebaseDigest.clearCache",
+    "onCommand:codebaseDigest.openDashboard",
+    "onCommand:codebaseDigest.openSettings",
+    "onCommand:codebaseDigest.applyPreset",
+    "onCommand:codebaseDigest.pauseScan",
+    "onCommand:codebaseDigest.resumeScan",
+    "onCommand:codebaseDigest.openDashboardPanel",
+    "onCommand:codebaseDigest.focusView",
+    "onCommand:codebaseDigest.disableRedactionForNextRun"
   ],
   "categories": [
     "Other"

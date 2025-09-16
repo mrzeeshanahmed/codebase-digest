@@ -35,11 +35,6 @@ export class FilterService {
                 parsedInclude.push(p);
             }
         }
-        const cfg: any = {
-            includePatterns: parsedInclude,
-            excludePatterns: parsedExclude,
-            respectGitignore: !!gitignore
-        };
     const { include, exclude } = FilterService.processPatterns(parsedInclude, parsedExclude, preset, includedFileTypes, explicitNegations);
         const includeArray = Array.from(include);
         const excludeArray = Array.from(exclude);

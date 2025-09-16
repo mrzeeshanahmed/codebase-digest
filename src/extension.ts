@@ -30,7 +30,7 @@ import { GitignoreService } from './services/gitignoreService';
 import { FileScanner } from './services/fileScanner';
 import { registerIngestRemoteRepo } from './commands/ingestRemoteRepo';
 import { validateConfig, isDigestConfig } from './utils/validateConfig';
-import { showUserError } from './utils/errors';
+import { logUserError } from './utils/errors';
 import { setTransientOverride } from './utils/transientOverrides';
 import { WorkspaceManager } from './services/workspaceManager';
 import { ConfigurationService } from './services/configurationService';
@@ -87,13 +87,13 @@ try { console.log('[codebase-digest] activate() called'); } catch (e) { try { co
 	const onUnhandledRejection = (reason: unknown, _promise: Promise<unknown>) => {
 		try {
 			const msg = stringifyErr(reason);
-			try { showUserError('An internal error occurred', msg); } catch (err) { try { console.error('UnhandledRejection', msg, err); } catch {} }
+			try { logUserError('An internal error occurred', msg); } catch (err) { try { console.error('UnhandledRejection', msg, err); } catch {} }
 		} catch (e) { /* ignore */ }
 	};
 	const onUncaughtException = (err: unknown) => {
 		try {
 			const msg = stringifyErr(err);
-			try { showUserError('An unexpected error occurred', msg); } catch (e) { try { console.error('UncaughtException', msg, e); } catch {} }
+			try { logUserError('An unexpected error occurred', msg); } catch (e) { try { console.error('UncaughtException', msg, e); } catch {} }
 		} catch (e) { /* ignore */ }
 	};
 	try {

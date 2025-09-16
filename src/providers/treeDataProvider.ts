@@ -788,32 +788,48 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
             const cfg = ConfigurationService.getWorkspaceConfig(this.workspaceFolder, this.diagnostics);
             return cfg;
         } catch (e) {
-            // Fall back to a small defensive default object to avoid throwing during scans
+            // Fall back to the same defensive defaults used by ConfigurationService
+            // so runtime scans still behave predictably if config reading fails.
             return {
-                maxFileSize: 1024 * 1024,
-                maxFiles: 1000,
-                maxTotalSizeBytes: 100 * 1024 * 1024,
+                maxFileSize: 10485760, // 10 MB
+                maxFiles: 25000,
+                maxTotalSizeBytes: 536870912, // 512 MB
                 maxDirectoryDepth: 20,
-                excludePatterns: [],
+                tokenLimit: 32000,
+                outputFormat: 'markdown',
+                binaryFilePolicy: 'skip',
+                contextLimit: 0,
+                cacheEnabled: false,
+                cacheDir: '',
+                notebookIncludeNonTextOutputs: false,
+                notebookNonTextOutputMaxBytes: 200000,
+                showRedacted: false,
+                redactionPatterns: [],
+                redactionPlaceholder: '[REDACTED]',
+                excludePatterns: ['node_modules/**', '.git/**', '*.log', '*.tmp', '.DS_Store', 'Thumbs.db'],
                 includePatterns: [],
                 respectGitignore: true,
-                gitignoreFiles: [],
-                outputFormat: 'text',
+                gitignoreFiles: ['.gitignore'],
                 includeMetadata: true,
                 includeTree: true,
                 includeSummary: true,
-                includeFileContents: false,
-                useStreamingRead: false,
-                binaryFilePolicy: 'skip',
-                notebookProcess: false,
-                notebookIncludeNonTextOutputs: false,
-                tokenEstimate: false,
+                includeFileContents: true,
+                useStreamingRead: true,
+                notebookProcess: true,
+                tokenEstimate: true,
                 tokenModel: 'chars-approx',
                 performanceLogLevel: 'info',
                 performanceCollectMetrics: false,
                 outputSeparatorsHeader: '',
                 outputWriteLocation: 'editor',
-                includeTreeMode: 'full'
+                includeTreeMode: 'full',
+                watcherDebounceMs: 300,
+                pendingHydrationBatchSize: 25,
+                pendingHydrationBatchDelayMs: 25,
+                maxPendingHydrations: 200,
+                directoryPageSize: 200,
+                filterPresets: [],
+                presets: []
             };
         }
     }

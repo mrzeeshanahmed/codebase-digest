@@ -90,9 +90,9 @@ export class Metrics {
         const samplePass = Math.random() < 1 / sampleRate;
         const timePass = now - last > minIntervalMs;
 
-        if (internalErrors && typeof internalErrors.showUserWarning === 'function' && (samplePass || timePass)) {
+        if (internalErrors && typeof internalErrors.logUserWarning === 'function' && (samplePass || timePass)) {
             try {
-                internalErrors.showUserWarning('Performance metrics logged.', details);
+                internalErrors.logUserWarning('Performance metrics logged.', details);
                 Metrics._lastWarnTime = now;
             } catch (e) {
                 try { console.debug(details); } catch (_) { /* swallow */ }

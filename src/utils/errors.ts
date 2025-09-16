@@ -70,7 +70,7 @@ function getOutputChannel(): vscode.OutputChannel {
     return outputChannel;
 }
 
-export function showUserError(message: string, details?: string, diagnostics?: Diagnostics) {
+export function logUserError(message: string, details?: string, diagnostics?: Diagnostics) {
     if (diagnostics && details) {
         diagnostics.error(details);
     }
@@ -86,7 +86,7 @@ export function showUserError(message: string, details?: string, diagnostics?: D
     });
 }
 
-export function showUserWarning(message: string, details?: string, diagnostics?: Diagnostics) {
+export function logUserWarning(message: string, details?: string, diagnostics?: Diagnostics) {
     if (diagnostics && details) {
         diagnostics.warn(details);
     }
