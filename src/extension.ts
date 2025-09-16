@@ -242,9 +242,9 @@ try { console.log('[codebase-digest] activate() called'); } catch (e) { try { co
 				// ignore — fallback: panel can still be opened via command/status bar
 			}
 
-			// On activation, optionally focus the contributed Primary Sidebar view (config validation runs later once Diagnostics is available)
-			try {
-			const cfgSnapshot = ConfigurationService.getWorkspaceConfig(folder, undefined as any);
+				// On activation, optionally focus the contributed Primary Sidebar view (config validation runs later once Diagnostics is available)
+				try {
+				const cfgSnapshot = ConfigurationService.getWorkspaceConfig(folder);
 			const openSidebar = typeof (cfgSnapshot as any).openSidebarOnActivate === 'boolean' ? (cfgSnapshot as any).openSidebarOnActivate : true;
 				if (openSidebar) {
 					try {
@@ -303,8 +303,10 @@ try { console.log('[codebase-digest] activate() called'); } catch (e) { try { co
 	}));
 	// Invalidate Digest Cache command
 	async function clearCacheImpl() {
-		// Read validated snapshot for safe defaults
-		const cfgSnapshot = ConfigurationService.getWorkspaceConfig(undefined as any);
+		// Read validated snapshot for safe defaults. Prefer a specific workspace folder when available
+		const cfgSnapshot = (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0)
+			? ConfigurationService.getWorkspaceConfig(vscode.workspace.workspaceFolders[0])
+			: ConfigurationService.getWorkspaceConfig();
 		let cacheDir = typeof cfgSnapshot.cacheDir === 'string' ? cfgSnapshot.cacheDir : '';
 		if (!cacheDir || typeof cacheDir !== 'string') {
 			cacheDir = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ? require('path').join(vscode.workspace.workspaceFolders[0].uri.fsPath, '.codebase-digest-cache') : '';

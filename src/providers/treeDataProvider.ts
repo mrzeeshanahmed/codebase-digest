@@ -55,12 +55,16 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
     private lastScanStats?: import('../types/interfaces').TraversalStats;
     private directoryCache: DirectoryCache;
     private diagnostics: Diagnostics;
-    private _watcher?: vscode.FileSystemWatcher | null;
+    private watcher?: vscode.FileSystemWatcher;
     // Debounced refresh function to coalesce full workspace scans
     private debouncedRefresh?: () => void;
     private scanning: boolean = false;
     // Simple cancellation token for scan operations
     private scanToken: { isCancellationRequested?: boolean } | null = null;
+    // Track the currently-running scan promise so we can serialize and await it
+    // This prevents overlapping scans from clobbering the shared scanToken object
+    // and avoids races where multiple scans overwrite instance state.
+    private currentScanPromise: Promise<void> | null = null;
     // Per-directory debounce timers to coalesce rapid FS events
     private debounceTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
     // While a full workspace scan is in progress, coalesce directory hydration
@@ -86,7 +90,7 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
             ? vscode.workspace.createFileSystemWatcher('**/*')
             : null;
     // Store watcher on instance so it can be disposed later
-    this._watcher = watcher;
+    this.watcher = watcher || undefined;
     const path = require('path');
     this.diagnostics = services && services.diagnostics ? services.diagnostics : new Diagnostics('info');
         const handleChange = (uri: vscode.Uri) => {
@@ -227,10 +231,8 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
 
         // Dispose watcher (will also remove its event listeners)
         try {
-            if (this._watcher && typeof (this._watcher.dispose) === 'function') {
-                try { this._watcher.dispose(); } catch (e) { /* ignore */ }
-            }
-            this._watcher = undefined;
+            try { this.watcher?.dispose(); } catch (e) { /* ignore */ }
+            this.watcher = undefined;
         } catch (e) { /* ignore */ }
 
         // Dispose the TreeData change emitter
@@ -411,20 +413,45 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
     }
 
     refresh(): void {
-        // Set scanning true, wrap scanWorkspace in withProgress
+        // Serialize scans at the provider instance level to avoid races where
+        // multiple overlapping scans overwrite `scanToken` or instance state.
+        // If a scan is in-flight, signal it to cancel and await it before
+        // starting a new one. We also expose the promise on the instance so
+        // other callers can await or observe it when needed.
+        // Mark scanning true and show progress to the user
         this.scanning = true;
-        // Emit indeterminate start
         emitProgress({ op: 'scan', mode: 'start', determinate: false, message: 'Scanning workspace...' });
+
+        // Start the progress-backed scan task. We wrap the body so we can set
+        // currentScanPromise to the exact async work being performed.
         vscode.window.withProgress({ location: vscode.ProgressLocation.Window, title: 'Scanning workspace...' }, async () => {
-            // Create a fresh token for this scan
-            this.scanToken = { isCancellationRequested: false };
+            // If a previous scan is running, try to cancel it and wait for it to finish.
             try {
-                await this.scanWorkspace(this.scanToken);
+                if (this.scanToken) {
+                    this.scanToken.isCancellationRequested = true;
+                }
+                if (this.currentScanPromise) {
+                    try { await this.currentScanPromise; } catch (e) { /* swallow */ }
+                }
+            } catch (e) { /* swallow */ }
+
+            // Create a fresh token for this new scan and store the promise so
+            // concurrent callers will wait for it instead of starting another scan.
+            this.scanToken = { isCancellationRequested: false };
+            this.currentScanPromise = (async () => {
+                try {
+                    await this.scanWorkspace(this.scanToken || undefined);
+                } finally {
+                    // Clear the token so subsequent hydrations don't reuse it
+                    this.scanToken = null;
+                }
+            })();
+
+            try {
+                await this.currentScanPromise;
             } finally {
-                // Clear the token regardless of scan success so subsequent hydrations
-                // do not accidentally reuse a stale token. We'll process any
-                // coalesced hydration requests after the scan below.
-                this.scanToken = null;
+                // Ensure we clear the reference to the completed scan promise
+                this.currentScanPromise = null;
             }
 
             // Process any directory hydration requests that were coalesced while the

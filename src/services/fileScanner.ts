@@ -664,38 +664,65 @@ export class FileScanner {
             }
             const dirHandle = await fsPromises.opendir(dirAbs);
             try { console.debug('[FileScanner.scanDir] opendir=', dirAbs); } catch (e) {}
+            // Process directory entries in bounded-size batches to avoid unbounded memory
+            // usage when directories contain very large numbers of entries. This also
+            // allows emitting progress per batch and checking cancellation between batches.
+            const BATCH_SIZE = 100;
+            const batch: fs.Dirent[] = [];
+
+            const processBatch = async (items: fs.Dirent[]) => {
+                for (const entry of items) {
+                    if (token && token.isCancellationRequested) { throw new Error('Cancelled'); }
+                    const absPath = path.join(dirAbs, entry.name);
+                    const relPath = path.relative(rootPath, absPath).replace(/\\/g, '/');
+                    const isDir = entry.isDirectory();
+                    const relPosix = relPath.replace(/\\/g, '/');
+
+                    // Apply skip logic
+                    if (this.shouldSkipEntry(relPath, relPosix, isDir, cfg, stats)) { continue; }
+                    // stat + readable
+                    const stat = await this.safeStatReadable(absPath, relPath, stats);
+                    if (!stat) { continue; }
+
+                    // symlink handling
+                    if (entry.isSymbolicLink()) {
+                        await this.handleSymlink(entry, absPath, relPath, stat, depth, results, stats);
+                        continue;
+                    }
+
+                    // size / total / files checks
+                    const sizeCheck = await this.checkAndWarnLimits(stat, relPath, cfg, stats);
+                    if (!sizeCheck.continueScan) {
+                        if (sizeCheck.breakAll) { return { breakAll: true }; }
+                        continue;
+                    }
+
+                    if (isDir) {
+                        await this.handleDirectory(entry, absPath, relPath, stat, rootPath, depth, cfg, stats, results, token);
+                    } else {
+                        await this.handleFile(entry, absPath, relPath, stat, depth, results, stats);
+                    }
+                }
+                // Emit a debounced progress update after processing the batch
+                try {
+                    this.emitProgressDebounced({ op: 'scan', mode: 'progress', determinate: false, percent: 0, message: 'Scanning...', totalFiles: stats.totalFiles, totalSize: stats.totalSize });
+                } catch (e) { try { this.diagnostics && this.diagnostics.warn ? this.diagnostics.warn('emitProgress failed', e) : console.warn('emitProgress failed', e); } catch {} }
+                return { breakAll: false };
+            };
+
             for await (const entry of dirHandle) {
                 if (token && token.isCancellationRequested) { await dirHandle.close(); throw new Error('Cancelled'); }
-                const absPath = path.join(dirAbs, entry.name);
-                const relPath = path.relative(rootPath, absPath).replace(/\\/g, '/');
-                const isDir = entry.isDirectory();
-                // Exclude/include logic:
-                // - For files: skip if not included by includePatterns, or excluded by excludePatterns, or ignored by gitignore (when enabled).
-                // - For directories: skip only if excluded by excludePatterns; do NOT skip solely because gitignore marks the directory ignored
-                //   so that negation rules inside the directory can re-include specific files.
-                const relPosix = relPath.replace(/\\/g, '/');
-                if (this.shouldSkipEntry(relPath, relPosix, isDir, cfg, stats)) { continue; }
-                // stat + readable
-                const stat = await this.safeStatReadable(absPath, relPath, stats);
-                if (!stat) { continue; }
-
-                // symlink handling
-                if (entry.isSymbolicLink()) {
-                    await this.handleSymlink(entry, absPath, relPath, stat, depth, results, stats);
-                    continue;
+                batch.push(entry);
+                if (batch.length >= BATCH_SIZE) {
+                    const r = await processBatch(batch.splice(0, batch.length));
+                    if (r && (r as any).breakAll) { break; }
+                    if (token && token.isCancellationRequested) { await dirHandle.close(); throw new Error('Cancelled'); }
                 }
-
-                // size / total / files checks
-                const sizeCheck = await this.checkAndWarnLimits(stat, relPath, cfg, stats);
-                if (!sizeCheck.continueScan) {
-                    if (sizeCheck.breakAll) { break; }
-                    continue;
-                }
-                if (isDir) {
-                    await this.handleDirectory(entry, absPath, relPath, stat, rootPath, depth, cfg, stats, results, token);
-                } else {
-                    await this.handleFile(entry, absPath, relPath, stat, depth, results, stats);
-                }
+            }
+            // process remaining items
+            if (batch.length > 0) {
+                const r = await processBatch(batch.splice(0, batch.length));
+                if (r && (r as any).breakAll) { /* noop - we'll return results below */ }
             }
             try { await dirHandle.close(); } catch (_) {}
         } catch (e) {

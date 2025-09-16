@@ -55,14 +55,16 @@ export async function initOptionalTokenizers(): Promise<void> {
                 // @ts-ignore: optional runtime dependency may not have types or be installed
                 mod = await import('optional-tiktoken-adapter');
             } catch (e) {
-                // Dynamic import may be transformed by some bundlers. Use an
-                // eval-backed require to avoid static analysis including the
-                // optional package in the bundle.
+                // Dynamic import may be transformed by some bundlers. Try a
+                // plain runtime require as a fallback if available. Avoid using
+                // eval() to satisfy CSP and reduce security surface.
                 try {
-                    const req = eval('require');
-                    mod = req('optional-tiktoken-adapter');
+                    const req = require as any;
+                    if (typeof req === 'function') {
+                        mod = req('optional-tiktoken-adapter');
+                    }
                 } catch (e2) {
-                    // ignore
+                    // ignore missing optional dependency
                 }
             }
             if (mod && typeof mod.estimateTokens === 'function') {

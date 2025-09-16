@@ -71,7 +71,12 @@ export async function ingestLoadedRepo(tmpPath: string): Promise<{ output?: stri
     const tmpDir = tmpPath;
     const formatters = new Formatters();
     // Use validated snapshot for scan-time decisions (do not persist using this object)
-    const config: DigestConfig = ConfigurationService.getWorkspaceConfig(undefined as any) as any;
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    const cfgRaw = (workspaceFolders && workspaceFolders.length > 0)
+        ? ConfigurationService.getWorkspaceConfig(workspaceFolders[0])
+        : ConfigurationService.getWorkspaceConfig();
+    if (!cfgRaw) { throw new Error('Failed to load Code Ingest configuration'); }
+    const config: DigestConfig = cfgRaw;
     try {
     emitProgress({ op: 'ingest', mode: 'start', determinate: false, message: 'Ingesting loaded repo...' });
         // Use ContentProcessor.scanDirectory to get files
@@ -152,7 +157,12 @@ async function interactiveIngestFlow() {
     if (refType && refType.value !== 'none') { const refValue = await vscode.window.showInputBox({ prompt: `Enter ${refType.label} name`, ignoreFocusOut: true }); if (refValue) { ref[refType.value] = refValue; } }
     const subpath = await vscode.window.showInputBox({ prompt: 'Enter subpath to ingest (optional)', ignoreFocusOut: true });
     // Use validated snapshot for interactive defaults; preserve cfg.update below for persistence
-    const config: DigestConfig = ConfigurationService.getWorkspaceConfig(undefined as any) as any;
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    const cfgRawInteractive = (workspaceFolders && workspaceFolders.length > 0)
+        ? ConfigurationService.getWorkspaceConfig(workspaceFolders[0])
+        : ConfigurationService.getWorkspaceConfig();
+    if (!cfgRawInteractive) { throw new Error('Failed to load Code Ingest configuration'); }
+    const config: DigestConfig = cfgRawInteractive;
     let includeSubmodules = config.includeSubmodules;
     const submodulePick = await vscode.window.showQuickPick([{ label: 'Yes', value: true },{ label: 'No', value: false }], { placeHolder: 'Include submodules?', ignoreFocusOut: true });
     if (submodulePick) { includeSubmodules = submodulePick.value; await vscode.workspace.getConfiguration('codebaseDigest').update('includeSubmodules', includeSubmodules, vscode.ConfigurationTarget.Workspace); }
@@ -180,7 +190,12 @@ export async function ingestRemoteRepoProgrammatic(params: { repo: string, ref?:
     const { repo, ref, subpath, includeSubmodules, keepTmpDir } = params as any;
     const formatters = new Formatters();
     // Use validated snapshot for scan-time decisions
-    const config: DigestConfig = ConfigurationService.getWorkspaceConfig(undefined as any) as any;
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    const cfgRawProgrammatic = (workspaceFolders && workspaceFolders.length > 0)
+        ? ConfigurationService.getWorkspaceConfig(workspaceFolders[0])
+        : ConfigurationService.getWorkspaceConfig();
+    if (!cfgRawProgrammatic) { throw new Error('Failed to load Code Ingest configuration'); }
+    const config: DigestConfig = cfgRawProgrammatic;
     // Normalize repo input before deriving a tmp dir name. Accept owner/repo or
     // a full GitHub URL; strip a trailing .git if present so the mkdtemp prefix
     // doesn't include ".git" which can cause confusing temp dir names.

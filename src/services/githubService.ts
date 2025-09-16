@@ -242,7 +242,9 @@ export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?
     const url = `https://github.com/${owner}/${repo}.git`;
     // Use a session-unique prefix to reduce collisions and make tmp dir scoping obvious
     const sessionPrefix = `${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2,8)}-`;
-    let dir = tmpDir || fs.mkdtempSync(path.join(os.tmpdir(), `${sessionPrefix}${repo}-`));
+    // Sanitize repo name to avoid path traversal or dangerous characters in tmp path
+    const repoSanitized = String(repo).replace(/[^a-zA-Z0-9-]/g, '-');
+    let dir = tmpDir || fs.mkdtempSync(path.join(os.tmpdir(), `${sessionPrefix}${repoSanitized}-`));
     if (!tmpDir) {
         _createdTmpDirs.push(dir);
         // Write a small metadata file so we can later identify the creator process
@@ -377,7 +379,7 @@ export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?
                     // Allocate a new temp dir and continue; do not attempt to remove an
                     // externally-created directory. Track newly-created dirs for cleanup.
                         try {
-                            const newDir = fs.mkdtempSync(path.join(os.tmpdir(), `${sessionPrefix}${repo}-`));
+                            const newDir = fs.mkdtempSync(path.join(os.tmpdir(), `${sessionPrefix}${repoSanitized}-`));
                             if (!tmpDir) { _createdTmpDirs.push(newDir); }
                             // Best-effort: annotate dir so future investigations can attribute it
                             try {

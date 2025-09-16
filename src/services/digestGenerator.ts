@@ -92,14 +92,15 @@ export class DigestGenerator {
 
         // Build tasks that process each file and return a result slot
     const tasks = sortedFiles.map((file, index) => async () => {
-            const ext = path.extname(file.path); // includes leading dot, e.g. '.ts', '.ipynb'
-            const header = formatter.buildHeader(file, config);
-            let body = '';
             try {
-                // proceed normally
-            } catch (e) {
-                // placeholder to satisfy TS control flow; actual try/catch per-block below
-            }
+                const ext = path.extname(file.path); // includes leading dot, e.g. '.ts', '.ipynb'
+                const header = formatter.buildHeader(file, config);
+                let body = '';
+                try {
+                    // proceed normally
+                } catch (e) {
+                    // placeholder to satisfy TS control flow; actual try/catch per-block below
+                }
             // Use plugin registry predicate lookup to find a matching handler without
             // invoking plugin handlers during discovery. This avoids expensive or
             // side-effectful calls during a simple match check.
@@ -277,7 +278,23 @@ export class DigestGenerator {
                 // If user cancels or other error, propagate to abort generation
                 throw e;
             }
-            return { index, header, body, token: fileTokenEstimate, relPath: file.relPath, imports };
+                return { index, header, body, token: fileTokenEstimate, relPath: file.relPath, imports };
+            } catch (error: unknown) {
+                // Catch any unexpected per-file error and return a harmless error result
+                const extractErrorInfo = (err: unknown): { message: string; stack?: string } => {
+                    if (err && typeof err === 'object') {
+                        const eObj = err as { message?: unknown; stack?: unknown };
+                        const message = typeof eObj.message === 'string' ? eObj.message : String(err);
+                        const stack = typeof eObj.stack === 'string' ? eObj.stack : undefined;
+                        return { message, stack };
+                    }
+                    return { message: String(err || 'Unknown error') };
+                };
+                const info = extractErrorInfo(error);
+                try { perFileErrors.push({ path: file.relPath, message: info.message, stack: info.stack }); } catch (_) { }
+                try { const ch = DigestGenerator.getErrorChannel(); ch && ch.appendLine(`Error processing ${file.relPath}: ${info.message}`); } catch (_) { }
+                return { index, header: '', body: `ERROR: ${info.message}`, token: 0, relPath: file.relPath, imports: [] };
+            }
         });
 
         // Optional cancellation token: observe progress events for a generate.cancel
