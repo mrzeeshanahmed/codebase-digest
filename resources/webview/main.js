@@ -28,10 +28,12 @@ let pendingPersistedSelection = null;
 let pendingPersistedFocusIndex = undefined;
 // Temporary holder for a repo path returned by the host after loading
 let loadedRepoTmpPath = null;
+// Track the last preset we asked the host to apply for the currently-rendered tree
+let lastAppliedPresetForTree = null;
 // Pause state: canonical value is stored in `store`; keep a local mirror for performance
 let paused = false;
 // Track expanded folder paths: canonical array lives in `store`; keep a Set locally and sync
-let expandedPaths = new Set();
+let expandedSet = new Set();
 
 // Zustand-like store for centralizing file tree + selection state in the webview.
 // We expose a small action surface so UI code and message handlers can call
@@ -76,7 +78,7 @@ function collectLeaves(node, prefix = '') {
 try {
     const s = store.getState();
     paused = !!s.paused;
-    expandedPaths = new Set(Array.isArray(s.expandedPaths) ? s.expandedPaths : []);
+    expandedSet = new Set(Array.isArray(s.expandedPaths) ? s.expandedPaths : []);
     pendingPersistedSelection = s.pendingPersistedSelection || null;
     pendingPersistedFocusIndex = typeof s.pendingPersistedFocusIndex !== 'undefined' ? s.pendingPersistedFocusIndex : undefined;
 } catch (e) { /* best-effort */ }
@@ -87,7 +89,7 @@ store.subscribe((st) => {
     } catch (e) {}
     try {
         const newExpanded = Array.isArray(st.expandedPaths) ? st.expandedPaths : [];
-        expandedPaths = new Set(newExpanded);
+        expandedSet = new Set(newExpanded);
     } catch (e) {}
     try {
         pendingPersistedSelection = st.pendingPersistedSelection || null;
@@ -472,11 +474,13 @@ function renderFileList(state) {
         for (const key of entries) {
             const currentNode = node[key];
             const isFile = !!currentNode.__isFile;
-            const fullPath = currentNode.path || `${pathPrefix}${key}`;
+            // Prefer explicit relPath when available (nodes commonly expose relPath),
+            // fall back to path or constructed prefix so existing callers keep working.
+            const relPath = currentNode.relPath || currentNode.path || `${pathPrefix}${key}`;
 
             const li = document.createElement('li');
             li.className = isFile ? 'file-tree-li file-item' : 'file-tree-li folder-item';
-            li.setAttribute('data-path', encodeForDataAttribute(fullPath));
+            li.setAttribute('data-path', encodeForDataAttribute(relPath));
 
             const label = document.createElement('label');
             label.className = 'file-tree-label';
@@ -484,8 +488,8 @@ function renderFileList(state) {
             const checkbox = document.createElement('input');
             checkbox.type = 'checkbox';
             checkbox.className = 'file-checkbox';
-            checkbox.checked = selectedPaths.has(fullPath);
-            checkbox.setAttribute('data-path', encodeForDataAttribute(fullPath));
+            checkbox.checked = selectedPaths.has(relPath);
+            checkbox.setAttribute('data-path', encodeForDataAttribute(relPath));
 
             // *** ADDING CHECKBOX INTERACTIVITY ***
             checkbox.addEventListener('change', () => {
@@ -513,15 +517,21 @@ function renderFileList(state) {
             
             // *** ADDING EXPAND/COLLAPSE INTERACTIVITY ***
             if (!isFile) {
-                // Clicking the name/icon of a folder toggles its expanded state
-                const toggleExpand = () => {
-                    const isExpanded = li.classList.toggle('expanded');
+                // Determine expanded state from expandedSet
+                const expanded = expandedSet.has(relPath);
+                if (expanded) { li.classList.add('expanded'); } else { li.classList.remove('expanded'); }
+
+                // Clicking the name/icon of a folder toggles its expanded state and re-renders
+                const toggleExpand = (e) => {
+                    try { if (e && typeof e.stopPropagation === 'function') { e.stopPropagation(); } } catch (ex) {}
                     try {
-                        if (isExpanded) { expandedPaths.add(fullPath); }
-                        else { expandedPaths.delete(fullPath); }
+                        if (expandedSet.has(relPath)) { expandedSet.delete(relPath); li.classList.remove('expanded'); }
+                        else { expandedSet.add(relPath); li.classList.add('expanded'); }
                         // persist array form into store
-                        try { store.setExpandedPaths && store.setExpandedPaths(Array.from(expandedPaths)); } catch (e) {}
-                    } catch (e) {}
+                        try { store.setExpandedPaths && store.setExpandedPaths(Array.from(expandedSet)); } catch (e) {}
+                        // Re-render using aligned state if available
+                        try { const st = store.getState ? store.getState() : null; renderTree((st && st.aligned) || st, expandedSet); } catch (e) {}
+                    } catch (e) { logWarn('toggleExpand failed', e); }
                 };
                 name.addEventListener('click', toggleExpand);
                 icon.addEventListener('click', toggleExpand);
@@ -533,7 +543,7 @@ function renderFileList(state) {
             li.appendChild(label);
 
             if (!isFile) {
-                li.appendChild(createTreeHtml(currentNode, `${fullPath}/`));
+                li.appendChild(createTreeHtml(currentNode, `${relPath}/`));
             }
             ul.appendChild(li);
         }
@@ -544,15 +554,15 @@ function renderFileList(state) {
     // After rendering, reapply previously stored expanded state so folders the user opened
     // remain expanded across debounced re-renders.
                 try {
-                    if (expandedPaths.size > 0) {
-                        expandedPaths.forEach(p => {
+                    if (expandedSet.size > 0) {
+                        expandedSet.forEach(p => {
                             try {
                                 const li = findLiByDataPath(fileListRoot, p);
                                 if (li) { li.classList.add('expanded'); }
                             } catch (e) { logWarn('createTreeHtml per-node handler failed', e); }
                         });
                     }
-                } catch (e) { logWarn('renderFileList restore expandedPaths failed', e); }
+                } catch (e) { logWarn('renderFileList restore expandedSet failed', e); }
     // After initial render, ensure folder checkboxes reflect tri-state based on current selections
     try {
         const folderItems = fileListRoot.querySelectorAll('li.folder-item');
@@ -574,6 +584,19 @@ function renderFileList(state) {
 }
 
 // Replace direct calls with debounced version in callers
+// Synchronous render entry used when the user toggles a folder so the UI updates immediately.
+function renderTree(state, newExpandedSet) {
+    try {
+        if (newExpandedSet) {
+            if (Array.isArray(newExpandedSet)) { expandedSet = new Set(newExpandedSet); }
+            else if (newExpandedSet instanceof Set) { expandedSet = new Set(Array.from(newExpandedSet)); }
+            else { /* ignore */ }
+        }
+    } catch (e) { logWarn('renderTree update expandedSet failed', e); }
+    // Call render synchronously for immediate feedback
+    try { renderFileList(state); } catch (e) { logWarn('renderTree renderFileList failed', e); }
+}
+
 const debouncedRenderFileList = debounce(renderFileList, 80);
 
 // Lightweight message router: forward a few key message types to the UI functions
@@ -653,12 +676,59 @@ window.addEventListener('message', event => {
                 slugEl.textContent = wf ? String(wf) : '';
             }
         } catch (e) {}
+        // If the incoming state includes a configured preset and we haven't applied it
+        try {
+            const presets = (msg.state && msg.state.filterPresets) || (msg.state && msg.state.presets) || [];
+            const first = Array.isArray(presets) && presets.length > 0 ? String(presets[0]) : null;
+            if (first && lastAppliedPresetForTree !== first) {
+                try { togglePresetSelectionUI(first); } catch (e) {}
+                try { postAction('applyPreset', { preset: first }); } catch (e) {}
+                lastAppliedPresetForTree = first;
+            }
+        } catch (e) {}
     } else if (msg.type === 'previewDelta') {
         // Update the chips
         renderPreviewDelta(msg.delta);
         if (msg.delta && msg.delta.fileTree) {
-            try { store.setFileTree && store.setFileTree(msg.delta.fileTree, Array.isArray(msg.delta.selectedPaths) ? msg.delta.selectedPaths : []); } catch (e) {}
-        }
+                try { store.setFileTree && store.setFileTree(msg.delta.fileTree, Array.isArray(msg.delta.selectedPaths) ? msg.delta.selectedPaths : []); } catch (e) {}
+                // Ensure the tree is rendered immediately after the store is populated so
+                // the UI populates on initial scan completion without requiring user action.
+                try {
+                    const st = store.getState ? store.getState() : null;
+                    try { renderTree((st && st.aligned) || st, expandedSet); } catch (e) {}
+                } catch (e) { /* swallow to avoid breaking message handler */ }
+                // If previewDelta supplies preset metadata, apply once per new tree
+                try {
+                    const presets = (msg.delta && msg.delta.filterPresets) || (msg.delta && msg.delta.presets) || [];
+                    const first = Array.isArray(presets) && presets.length > 0 ? String(presets[0]) : null;
+                    if (first && lastAppliedPresetForTree !== first) {
+                        try { togglePresetSelectionUI(first); } catch (e) {}
+                        try { postAction('applyPreset', { preset: first }); } catch (e) {}
+                        lastAppliedPresetForTree = first;
+                    }
+                } catch (e) { /* swallow */ }
+                // After loading files into the store, compute an aligned view using the
+                // currently-selected preset so the file tree shown to the user reflects
+                // any preset-based categorization immediately. We do this locally for
+                // optimistic UI updates and also to avoid waiting for the host roundtrip.
+                try {
+                    const st = store.getState();
+                    // state.files is a thin alias for the fileTree used by older code paths
+                    const files = st && st.fileTree ? st.fileTree : {};
+                    // determine preset: prefer explicit currentPreset on state, otherwise
+                    // fall back to the lastAppliedPresetForTree (from metadata) or null
+                    const preset = (st && st.currentPreset) ? st.currentPreset : (lastAppliedPresetForTree || null);
+                    if (typeof applyPreset === 'function') {
+                        try {
+                            const aligned = applyPreset(preset, files);
+                            // store aligned result for callers that expect state.aligned
+                            try { store.setState && store.setState({ aligned }); } catch (e) {}
+                            // render using our local expandedSet mirror for immediate feedback
+                            try { renderTree(aligned, expandedSet); } catch (e) {}
+                        } catch (e) { /* swallow applyPreset errors */ }
+                    }
+                } catch (e) { /* swallow */ }
+            }
     } else if (msg.type === 'ingestPreview') {
         const previewRoot = nodes.ingestPreviewRoot || document.getElementById('ingest-preview');
         const textEl = nodes.ingestPreviewText || document.getElementById('ingest-preview-text');
@@ -1051,9 +1121,25 @@ window.onload = function() {
             // handle parameterized actions like applyPreset
             if (action === 'applyPreset') {
                 const preset = btn.getAttribute('data-preset');
-                sendCmd('applyPreset', { preset });
-                // Immediately update UI to reflect user's choice (optimistic)
+                // Optimistically update local UI and aligned state for immediate feedback
                 try { togglePresetSelectionUI(preset); } catch (e) {}
+                try {
+                    // persist the current preset selection into our store so subsequent
+                    // renders and logic can reference it. This mirrors the host-side
+                    // notion of currentPreset but keeps the webview responsive.
+                    try { store.setState && store.setState({ currentPreset: preset }); } catch (e) {}
+                    const st = store.getState ? store.getState() : {};
+                    const files = st && st.fileTree ? st.fileTree : {};
+                    if (typeof applyPreset === 'function') {
+                        try {
+                            const aligned = applyPreset(preset, files);
+                            try { store.setState && store.setState({ aligned }); } catch (e) {}
+                            try { renderTree(aligned, expandedSet); } catch (e) {}
+                        } catch (e) { /* swallow */ }
+                    }
+                } catch (e) { /* swallow */ }
+                // Also notify the host so it can persist/apply the preset globally
+                sendCmd('applyPreset', { preset });
                 return;
             }
 
@@ -1081,15 +1167,15 @@ window.onload = function() {
                             const decodedPath = pathAttr ? decodeFromDataAttribute(pathAttr) : null;
                             if (shouldExpand) {
                                         fi.classList.add('expanded');
-                                        if (decodedPath) { try { expandedPaths.add(decodedPath); } catch (e) {} }
+                                        if (decodedPath) { try { expandedSet.add(decodedPath); } catch (e) {} }
                                     } else {
                                         fi.classList.remove('expanded');
-                                        if (decodedPath) { try { expandedPaths.delete(decodedPath); } catch (e) {} }
+                                        if (decodedPath) { try { expandedSet.delete(decodedPath); } catch (e) {} }
                                     }
                         } catch (e) { /* ignore per-node errors */ }
                     });
                     // persist expandedPaths to store after batch update
-                    try { store.setExpandedPaths && store.setExpandedPaths(Array.from(expandedPaths)); } catch (e) {}
+                    try { store.setExpandedPaths && store.setExpandedPaths(Array.from(expandedSet)); } catch (e) {}
                 } catch (e) { /* swallow DOM errors */ }
                 // Also notify the host so provider/tree state stays in sync
                 postAction(action);
@@ -1276,7 +1362,22 @@ window.onload = function() {
             if (!it) { return; }
             ev.preventDefault(); ev.stopPropagation();
             const preset = it.getAttribute('data-preset');
-            if (preset) { postAction('applyPreset', { preset }); }
+            if (preset) {
+                try { togglePresetSelectionUI(preset); } catch (e) {}
+                try { store.setState && store.setState({ currentPreset: preset }); } catch (e) {}
+                try {
+                    const st = store.getState ? store.getState() : {};
+                    const files = st && st.fileTree ? st.fileTree : {};
+                    if (typeof applyPreset === 'function') {
+                        try {
+                            const aligned = applyPreset(preset, files);
+                            try { store.setState && store.setState({ aligned }); } catch (e) {}
+                            try { renderTree(aligned, expandedSet); } catch (e) {}
+                        } catch (e) {}
+                    }
+                } catch (e) {}
+                postAction('applyPreset', { preset });
+            }
             closePresetMenu();
         });
         // Keyboard navigation: Enter/Space to activate, Arrow keys to move focus
@@ -1410,7 +1511,61 @@ function populateSettings(settings) {
     const respectGitignoreVal = (typeof settings.respectGitignore !== 'undefined') ? settings.respectGitignore : settings.gitignore;
     if (gitignoreEl) { gitignoreEl.checked = !!respectGitignoreVal; }
     const outEl = getEl('outputFormat'); if (outEl) { outEl.value = settings.outputFormat || 'text'; }
-    const modelEl = getEl('tokenModel'); if (modelEl) { modelEl.value = settings.tokenModel || 'chars-approx'; }
+    const modelEl = getEl('tokenModel');
+    if (modelEl) {
+        try {
+            // Read existing options as the authoritative list of model values
+            const existingOptions = Array.from(modelEl.querySelectorAll('option')).map((opt, idx) => ({ value: opt.value, text: (opt.textContent || opt.innerText || opt.value), index: idx }));
+
+            // Parse numeric context from a token model id or label (e.g. '16k', '200k', '16000')
+            function parseContext(s) {
+                if (!s) { return null; }
+                try {
+                    const str = String(s);
+                    // look for a number with optional k/m suffix (e.g. 8k, 16k, 200k, 16000)
+                    const m = str.match(/(\d+)([kKmM])?/);
+                    if (!m) { return null; }
+                    const n = Number(m[1]);
+                    if (Number.isNaN(n)) { return null; }
+                    const unit = m[2] ? m[2].toLowerCase() : '';
+                    const value = unit === 'k' ? n * 1000 : unit === 'm' ? n * 1000000 : n;
+                    const raw = unit ? `${m[1]}${unit}` : `${m[1]}`;
+                    return { raw, value };
+                } catch (e) { return null; }
+            }
+
+            const enriched = existingOptions.map(o => {
+                const byVal = parseContext(o.value);
+                const byText = parseContext(o.text);
+                const ctx = byVal || byText || null;
+                return Object.assign({}, o, { contextRaw: ctx ? ctx.raw : null, contextValue: ctx ? ctx.value : 0 });
+            });
+
+            // Sort by numeric context descending, fallback to original order for ties / unknowns
+            enriched.sort((a, b) => {
+                if (a.contextValue !== b.contextValue) { return b.contextValue - a.contextValue; }
+                return a.index - b.index;
+            });
+
+            // Rebuild the select options preserving canonical values but updating visible labels
+            while (modelEl.firstChild) { modelEl.removeChild(modelEl.firstChild); }
+            enriched.forEach(o => {
+                const opt = document.createElement('option');
+                opt.value = o.value;
+                const modelName = o.text || o.value;
+                opt.textContent = o.contextRaw ? `${o.contextRaw} — ${modelName}` : modelName;
+                modelEl.appendChild(opt);
+            });
+
+            // Restore selected value (fall back sensibly if not present)
+            const desired = settings.tokenModel || 'chars-approx';
+            const found = Array.from(modelEl.options).some(opt => opt.value === desired);
+            modelEl.value = found ? desired : (modelEl.options[0] && modelEl.options[0].value) || desired;
+        } catch (e) {
+            // If anything goes wrong, fall back to the previous behaviour
+            try { modelEl.value = settings.tokenModel || 'chars-approx'; } catch (ex) {}
+        }
+    }
     const binEl = getEl('binaryPolicy'); const binaryFilePolicyVal = (settings.binaryFilePolicy !== undefined) ? settings.binaryFilePolicy : settings.binaryPolicy; if (binEl) { binEl.value = binaryFilePolicyVal || 'skip'; }
     // New slider + number inputs for limits
     const maxFilesNumber = document.getElementById('maxFilesNumber');
@@ -1496,6 +1651,22 @@ function populateSettings(settings) {
         };
     }
     if (cancel) { cancel.onclick = () => { const settingsEl = document.getElementById('settings'); if (settingsEl) { settingsEl.hidden = true; } }; }
+}
+// Toggle visual selection state for preset buttons/menu items in the UI.
+// This is intentionally idempotent and defensive: calling with null clears selection.
+function togglePresetSelectionUI(presetName) {
+    try {
+        // Clear any previously marked items
+        const buttons = document.querySelectorAll('[data-action="applyPreset"], [role="option"][data-preset]');
+        buttons.forEach(b => {
+            try { b.classList.remove('selected'); b.removeAttribute('aria-pressed'); } catch (e) {}
+        });
+        if (!presetName) { return; }
+        // Mark matching controls (both popup options and toolbar buttons)
+        const selector = `[data-action="applyPreset"][data-preset="${presetName}"], [role="option"][data-preset="${presetName}"]`;
+        const matches = document.querySelectorAll(selector);
+        matches.forEach(m => { try { m.classList.add('selected'); m.setAttribute('aria-pressed', 'true'); } catch (e) {} });
+    } catch (e) { /* swallow */ }
 }
 
 function populateRedactionFields(settings) {

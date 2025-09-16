@@ -279,6 +279,48 @@ try { console.log('[codebase-digest] activate() called'); } catch (e) { try { co
 			}
 		} catch (e) { /* ignore */ }
 	}
+
+	// Subscribe to configuration changes so webviews and preview state update
+	try {
+		const cfg = vscode.workspace.getConfiguration('codebaseDigest');
+		const onCfgChanged = (e: vscode.ConfigurationChangeEvent) => {
+			try {
+				// Only react to changes under the codebaseDigest section
+				if (!e.affectsConfiguration('codebaseDigest')) { return; }
+				// Recompute a minimal preview state payload and broadcast to active views
+				// so they can update UI (e.g., token chips, output format and tree options)
+				try {
+					const updated = {
+						outputFormat: cfg.get('outputFormat'),
+						includeTree: cfg.get('includeTree'),
+						outputPresetCompatible: cfg.get('outputPresetCompatible'),
+						filterPresets: cfg.get('filterPresets') || cfg.get('presets') || []
+					};
+					// postPreviewDeltaToActiveViews will forward to all open panels and sidebar views
+					const { postPreviewDeltaToActiveViews } = require('./providers/codebasePanel');
+					try { postPreviewDeltaToActiveViews({ config: updated }); } catch (e) { /* ignore */ }
+				} catch (e) { /* swallow preview update errors */ }
+				// Additionally, refresh any tree providers so their preview computations use new settings
+				try {
+					if (workspaceFolders && workspaceFolders.length > 0) {
+						for (const folder of workspaceFolders) {
+							const tp = (null as any) as any; // resolved at runtime in closure; treeProviders exists above
+							// Use a best-effort require to avoid circular dependency issues
+							try {
+								const mod = require('./providers/codebasePanel');
+								// codebasePanel keeps active view references; ask providers to recompute preview if they expose an API
+								if (typeof mod.refreshActiveViews === 'function') {
+									try { mod.refreshActiveViews(folder.uri.fsPath); } catch (e) {}
+								}
+							} catch (e) { /* ignore per-folder refresh errors */ }
+						}
+					}
+				} catch (e) { /* swallow */ }
+			} catch (e) { /* ignore overall errors */ }
+		};
+		const disposable = vscode.workspace.onDidChangeConfiguration(onCfgChanged);
+		context.subscriptions.push(disposable);
+	} catch (e) { /* swallow configuration wiring errors */ }
 	// Retain panel-focused openDashboard command; proxy dashboard-specific commands are no longer needed
 	// Register a single global command to open the dashboard panel for the first workspace folder (or per-folder via args)
 	context.subscriptions.push(vscode.commands.registerCommand('codebaseDigest.openDashboardPanel', (folderPath?: string) => {

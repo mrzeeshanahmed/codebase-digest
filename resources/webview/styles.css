@@ -399,6 +399,45 @@ details.collapsible-section > summary > h3 { display: inline-block; }
 .folder-item > ul { display: none; }
 .folder-item.expanded > ul { display: block; }
 
+/* Sidebar and tree overflow containment */
+.sidebar {
+	display: flex;
+	flex-direction: column;
+	max-width: 38vw;
+	min-width: 260px;
+	overflow: hidden;
+	border-right: 1px solid var(--vscode-editorGroup-border);
+}
+
+.sidebar.resizable {
+	resize: horizontal;
+	overflow: auto;
+}
+
+.tree-container {
+	flex: 1 1 auto;
+	overflow: auto;
+	max-height: calc(100vh - 140px);
+}
+
+.file-tree {
+	overflow-x: auto;
+	overscroll-behavior: contain;
+}
+
+.node-label {
+	display: inline-block;
+	max-width: 100%;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.controls { flex: 0 0 auto; }
+
+/* Ensure pre blocks within the tree are scrollable and preserve whitespace */
+.tree-container pre { white-space: pre; overflow: auto; }
+
 /* --- Modals & Settings --- */
 .modal-wrapper {
 		position: fixed;
@@ -616,5 +655,24 @@ fieldset {
 		white-space: pre-wrap;
 		word-break: break-all;
 		color: var(--text-muted);
+}
+
+/* --- Selected preset UI --- */
+/* Visible highlight for toolbar/popup preset items and segmented buttons */
+[data-action="applyPreset"].selected,
+[role="option"][data-preset].selected,
+.segmented button.selected {
+	background-color: var(--accent-color);
+	color: var(--vscode-button-foreground, #ffffff);
+	box-shadow: 0 0 0 2px rgba(14,99,156,0.12) inset;
+	border-color: rgba(255,255,255,0.06);
+}
+
+/* Ensure keyboard focus is visible on preset controls */
+[data-action="applyPreset"]:focus,
+[role="option"][data-preset]:focus,
+.segmented button:focus {
+	outline: 2px solid var(--vscode-focusBorder, #007fd4);
+	outline-offset: 2px;
 }
 

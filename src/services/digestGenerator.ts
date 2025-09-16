@@ -510,22 +510,6 @@ export class DigestGenerator {
             content = JSON.stringify(canonical, null, 2);
         } else {
             content = formatter.finalize(outputChunks, config);
-            // Defensive: if a tree was generated but somehow not present in the
-            // finalized content (due to ordering or consumer mutations), ensure
-            // it's included at the top so users see the ASCII tree when
-            // `includeTree` was requested.
-            try {
-                if (tree && tree.length > 0 && typeof content === 'string' && !content.includes(tree)) {
-                    if (outputFormat === 'markdown') {
-                        const fm3 = new Formatters();
-                        content = fm3.fence(tree, '.txt', 'markdown') + '\n' + (content || '');
-                    } else {
-                        content = tree + '\n' + (content || '');
-                    }
-                }
-            } catch (e) {
-                // non-fatal - continue with whatever content we have
-            }
         }
         // Build metadata
         const metadata = {
@@ -866,6 +850,45 @@ export class DigestGenerator {
                 } catch (e) {}
             }
         } catch (e) {}
+
+        // Final guard: Ensure the ASCII tree is present at the very top of
+        // the output for human formats (markdown/text) when the caller
+        // requested includeTree. This runs after any redaction/rebuild steps
+        // so mutations to `result.content` won't remove the tree.
+        try {
+            const requestedTree = (config as any).includeTree === true || (config as any).includeTree === 'minimal';
+            if (tree && tree.length > 0 && outputFormat !== 'json' && requestedTree) {
+                const fmFinal = new Formatters();
+                // Ensure chunks contain the tree as the first chunk
+                try {
+                    const chunksExist = Array.isArray(result.chunks) && result.chunks.length > 0;
+                    const firstChunkHasTree = chunksExist && typeof result.chunks![0] === 'string' && result.chunks![0].includes(tree);
+                    if (!firstChunkHasTree) {
+                        if (!Array.isArray(result.chunks)) { (result as any).chunks = []; }
+                        if (outputFormat === 'markdown') {
+                            (result as any).chunks.unshift(fmFinal.fence(tree, '.txt', 'markdown') + '\n');
+                        } else {
+                            (result as any).chunks.unshift(tree + '\n');
+                        }
+                    }
+                } catch (e) { /* non-fatal - continue to ensure content update below */ }
+
+                // Ensure the final content string also contains the tree at the top
+                try {
+                    const contentStr = String(result.content || '');
+                    if (!contentStr.includes(tree)) {
+                        if (outputFormat === 'markdown') {
+                            const pref = fmFinal.fence(tree, '.txt', 'markdown') + '\n';
+                            result.content = pref + contentStr;
+                        } else {
+                            result.content = tree + '\n' + contentStr;
+                        }
+                        // Keep local `content` in sync if it exists in this scope
+                        try { if (typeof content !== 'undefined') { (content as any) = result.content; } } catch (_) {}
+                    }
+                } catch (e) { /* non-fatal */ }
+            }
+        } catch (e) { /* swallow - do not break generation for guard failures */ }
 
         return result;
     }

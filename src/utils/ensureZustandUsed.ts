@@ -1,6 +1,6 @@
 // Tiny runtime shim to reference 'zustand' so dependency checkers (depcheck) mark
 // it as used. This creates a minimal store at activation and immediately disposes it.
-import create from 'zustand';
+import { create } from 'zustand';
 
 export function ensureZustandReferenced() {
     try {
