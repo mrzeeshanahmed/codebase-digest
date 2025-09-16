@@ -357,6 +357,7 @@ export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?
     // clone target stays empty. Only create the helper when we have a token.
     let askpassDir: string | undefined;
     let askpassPath: string | undefined;
+    let askpassUnavailable = false;
     const writeAskpass = () => {
         if (!providedToken) { return; }
         try {
@@ -367,13 +368,26 @@ export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?
             try { fs.chmodSync(askpassPath, 0o700); } catch (e) { /* ignore */ }
             env = { ...env, GIT_ASKPASS: askpassPath, GIT_ASKPASS_TOKEN: providedToken };
         } catch (e) {
-            // If we cannot write the helper, fall back to token-in-url as last resort.
-            // Swallow here; clone will still attempt and may fail with a sanitized error.
+            // If we cannot write the askpass helper, mark it unavailable so we
+            // fail early rather than silently falling back to a less-secure
+            // token-in-url approach. This ensures tokens are never embedded in
+            // remote URLs.
             try { askpassDir = undefined; askpassPath = undefined; } catch (_) {}
+            askpassUnavailable = true;
         }
     };
     // Create askpass helper before any clone attempt
     writeAskpass();
+    // If the caller provided a token but we were unable to create the
+    // askpass helper, fail early with a clear error rather than attempting
+    // an unauthenticated clone or trying to embed the token in the URL.
+    if (providedToken && askpassUnavailable) {
+        const msg = 'Unable to prepare secure credential helper (GIT_ASKPASS) for authenticated clone; aborting to avoid embedding access token in remote URL.';
+        const err = new internalErrors.GitAuthError('github.com', msg);
+        // Provide a user-visible error and throw
+        try { interactiveMessages.showUserError(err, scrubTokens(msg)); } catch (_) {}
+        throw err;
+    }
     // Wrap clone+sparse logic so we can cleanup the temp dir on failure if we created it
     const createdHere = !tmpDir;
     try {
@@ -587,6 +601,7 @@ export function cleanupSessionTmpDirs(): void {
 
 export async function ingestRemoteRepo(urlOrSlug: string, options?: { ref?: { tag?: string; branch?: string; commit?: string }, subpath?: string, includeSubmodules?: boolean }, tmpDir?: string): Promise<{ localPath: string; meta: RemoteRepoMeta }> {
     let localPath: string | undefined;
+    let _completed = false;
     try {
         let ownerRepo = urlOrSlug;
         if (urlOrSlug.startsWith('https://')) {
@@ -645,7 +660,7 @@ export async function ingestRemoteRepo(urlOrSlug: string, options?: { ref?: { ta
             await runSubmoduleUpdate(localPath!);
         }
 
-        return {
+        const result = {
             localPath: localPath!,
             meta: {
                 ownerRepo,
@@ -653,14 +668,25 @@ export async function ingestRemoteRepo(urlOrSlug: string, options?: { ref?: { ta
                 subpath: options?.subpath
             }
         };
+        _completed = true;
+        return result;
     } finally {
-        // Ensure temporary directory is cleaned up on any failure path if it exists and wasn't returned
+        // Ensure temporary directory is cleaned up on any failure path if the function
+        // did not complete successfully. Use a simple completion flag so we do not
+        // rely on fragile string comparisons of paths (which can fail on Windows
+        // due to separators or case). If the caller provided a tmpDir, we will
+        // remove it only when the operation did not complete successfully. This
+        // makes cleanup independent of authentication path or other error causes.
         try {
-            if (tmpDir && (!localPath || !localPath.startsWith(tmpDir))) {
-                await cleanup(tmpDir);
+            if (tmpDir && !_completed) {
+                try {
+                    await cleanup(tmpDir);
+                } catch (cleanupErr) {
+                    try { logErrorToChannel(cleanupErr, `Failed to cleanup temporary dir ${tmpDir}`); } catch (e) { try { console.error('cleanup reporting failed', e); } catch {} }
+                }
             }
-        } catch (cleanupErr) {
-            try { logErrorToChannel(cleanupErr, `Failed to cleanup temporary dir ${tmpDir}`); } catch (e) { try { console.error('cleanup reporting failed', e); } catch {} }
+        } catch (e) {
+            // swallow outer errors; do not mask original error
         }
     }
 }

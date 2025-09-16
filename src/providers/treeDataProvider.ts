@@ -791,44 +791,99 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
             // Fall back to the same defensive defaults used by ConfigurationService
             // so runtime scans still behave predictably if config reading fails.
             return {
+                // Limits and scanning
                 maxFileSize: 10485760, // 10 MB
-                maxFiles: 25000,
+                maxFiles: 1000, // package.json default
                 maxTotalSizeBytes: 536870912, // 512 MB
                 maxDirectoryDepth: 20,
-                tokenLimit: 32000,
+                directoryPageSize: 200,
+
+                // Token / output
+                tokenLimit: 16000, // package.json default
                 outputFormat: 'markdown',
+                outputSeparatorsHeader: "\n---\n",
+                outputWriteLocation: 'prompt',
                 binaryFilePolicy: 'skip',
+
+                // Context / performance
                 contextLimit: 0,
+                performanceLogLevel: 'info',
+                performanceCollectMetrics: true,
+
+                // Caching
                 cacheEnabled: false,
                 cacheDir: '',
+
+                // Notebook handling
+                notebookProcess: true,
+                notebookIncludeCodeCells: true,
+                notebookIncludeMarkdownCells: true,
                 notebookIncludeNonTextOutputs: false,
                 notebookNonTextOutputMaxBytes: 200000,
+
+                // Redaction
                 showRedacted: false,
                 redactionPatterns: [],
                 redactionPlaceholder: '[REDACTED]',
-                excludePatterns: ['node_modules/**', '.git/**', '*.log', '*.tmp', '.DS_Store', 'Thumbs.db'],
+
+                // Filtering
+                excludePatterns: [
+                    'node_modules/',
+                    '.git/',
+                    '.DS_Store',
+                    'Thumbs.db',
+                    '*.log',
+                    '*.tmp',
+                    'dist/',
+                    'out/',
+                    'build/',
+                    'coverage/',
+                    '.cache/',
+                    'target/',
+                    'bin/',
+                    'obj/',
+                    '.venv/',
+                    'pycache/',
+                    '*.pyc',
+                    '*.pyo',
+                    '*.class',
+                    '*.jar',
+                    '*.war',
+                    '*.zip',
+                    '*.tar',
+                    '*.gz',
+                    '*.png',
+                    '*.jpg',
+                    '*.jpeg',
+                    '*.gif',
+                    '*.svg'
+                ],
                 includePatterns: [],
                 respectGitignore: true,
-                gitignoreFiles: ['.gitignore'],
+                gitignoreFiles: ['.gitignore', '.gitingestignore'],
+                filterPresets: [],
+
+                // Streaming / file reading
                 includeMetadata: true,
                 includeTree: true,
                 includeSummary: true,
-                includeFileContents: true,
+                includeFileContents: false, // package.json default
                 useStreamingRead: true,
-                notebookProcess: true,
+
+                // Token estimation and model
                 tokenEstimate: true,
                 tokenModel: 'chars-approx',
-                performanceLogLevel: 'info',
-                performanceCollectMetrics: false,
-                outputSeparatorsHeader: '',
-                outputWriteLocation: 'editor',
-                includeTreeMode: 'full',
+                tokenDivisorOverrides: {},
+
+                // Watcher / hydration tuning
                 watcherDebounceMs: 300,
                 pendingHydrationBatchSize: 25,
                 pendingHydrationBatchDelayMs: 25,
                 maxPendingHydrations: 200,
-                directoryPageSize: 200,
-                filterPresets: [],
+
+                // Misc
+                includeTreeMode: 'full',
+                openSidebarOnActivate: true,
                 presets: []
             };
         }

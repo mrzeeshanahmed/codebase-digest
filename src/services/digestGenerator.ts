@@ -427,11 +427,19 @@ export class DigestGenerator {
         }
         let tree = '';
         if (files.length > 0) {
-            if (typeof config.includeTree === 'string' && config.includeTree === 'minimal') {
-                const maxLines = config.maxSelectedTreeLines || 100;
-                tree = buildSelectedTreeLines(files, maxLines).join('\n');
-            } else if (config.includeTree === true) {
-                tree = buildTree(files, true);
+            // Determine whether the caller requested a tree. Historically there
+            // were two related config properties: `includeTree` (boolean or
+            // legacy 'minimal' string) and `includeTreeMode` ('full'|'minimal').
+            // Accept both for compatibility.
+            const requestedTree = (config as any).includeTree === true || (config as any).includeTree === 'minimal';
+            const modeIsMinimal = (config as any).includeTree === 'minimal' || (config as any).includeTreeMode === 'minimal';
+            if (requestedTree) {
+                if (modeIsMinimal) {
+                    const maxLines = config.maxSelectedTreeLines || 100;
+                    tree = buildSelectedTreeLines(files, maxLines).join('\n');
+                } else {
+                    tree = buildTree(files, true);
+                }
             }
         }
 
@@ -475,6 +483,24 @@ export class DigestGenerator {
                 // Non-fatal: if building the header block fails, continue without it
             }
         }
+
+        // If the caller explicitly requested the ASCII tree but did NOT opt into
+        // the legacy outputPresetCompatible header behavior, still ensure the
+        // generated tree is included as a top-level chunk so it appears in the
+        // final output. This covers callers that expect includeTree to always
+        // add the tree regardless of outputPresetCompatible.
+        if (tree && tree.length > 0 && outputFormat !== 'json' && !cfg.outputPresetCompatible) {
+            try {
+                const fm2 = new Formatters();
+                if (outputFormat === 'markdown') {
+                    outputChunks.unshift(fm2.fence(tree, '.txt', 'markdown') + '\n');
+                } else {
+                    outputChunks.unshift(tree + '\n');
+                }
+            } catch (e) {
+                // non-fatal
+            }
+        }
         // Assemble content string for DigestResult.
         // For JSON output use the canonical shape the provider expects so cache/editor output and returned content match:
         // { summary, tree, files: outputObjects, warnings }
@@ -484,6 +510,22 @@ export class DigestGenerator {
             content = JSON.stringify(canonical, null, 2);
         } else {
             content = formatter.finalize(outputChunks, config);
+            // Defensive: if a tree was generated but somehow not present in the
+            // finalized content (due to ordering or consumer mutations), ensure
+            // it's included at the top so users see the ASCII tree when
+            // `includeTree` was requested.
+            try {
+                if (tree && tree.length > 0 && typeof content === 'string' && !content.includes(tree)) {
+                    if (outputFormat === 'markdown') {
+                        const fm3 = new Formatters();
+                        content = fm3.fence(tree, '.txt', 'markdown') + '\n' + (content || '');
+                    } else {
+                        content = tree + '\n' + (content || '');
+                    }
+                }
+            } catch (e) {
+                // non-fatal - continue with whatever content we have
+            }
         }
         // Build metadata
         const metadata = {

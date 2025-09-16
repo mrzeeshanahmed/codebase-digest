@@ -1,8 +1,16 @@
 import * as fs from 'fs';
+import * as vscode from 'vscode';
 
 export async function analyzeImports(filePath: string, ext: string, content?: string): Promise<string[]> {
     const norm = (ext || '').toLowerCase();
     if (!['.js', '.ts', '.jsx', '.tsx'].includes(norm)) { return []; }
+    try {
+        const cfg = vscode.workspace && typeof vscode.workspace.getConfiguration === 'function' ? vscode.workspace.getConfiguration('codebaseDigest') : null;
+        if (cfg && typeof cfg.get === 'function') {
+            const enabled = cfg.get('enableDependencyAnalysis', true);
+            if (!enabled) { return []; }
+        }
+    } catch (_) { /* ignore config read errors and proceed */ }
     try {
         if (!content) { content = await fs.promises.readFile(filePath, 'utf8'); }
     } catch (e) {

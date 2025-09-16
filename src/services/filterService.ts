@@ -29,12 +29,6 @@ export class FilterService {
                 parsedInclude.push(p);
             }
         }
-        // Add includedFileTypes to include patterns if present
-        if (includedFileTypes && includedFileTypes.length > 0) {
-            for (const p of includedFileTypes) {
-                parsedInclude.push(p);
-            }
-        }
     const { include, exclude } = FilterService.processPatterns(parsedInclude, parsedExclude, preset, includedFileTypes, explicitNegations);
         const includeArray = Array.from(include);
         const excludeArray = Array.from(exclude);

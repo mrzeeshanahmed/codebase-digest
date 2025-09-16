@@ -4,7 +4,7 @@
  * Intended usage:
  * - Import concrete Error classes (FileReadError, GitAuthError, etc.) for
  *   programmatic error handling and flow control.
- * - Use the helpers in this file (showUserError/showUserWarning) for
+ * - Use the helpers in this file (logUserError/logUserWarning) for
  *   non-interactive reporting via the Output Channel and simple VS Code
  *   notifications. These helpers are designed for logging and one-way
  *   notifications rather than interactive control flows.

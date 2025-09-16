@@ -20,8 +20,9 @@ import { ingestRemoteRepo, cleanup as cleanupRemoteTmp, RemoteRepoMeta } from '.
 import { DigestGenerator } from '../services/digestGenerator';
 import { OutputWriter } from '../services/outputWriter';
 import { redactSecrets } from '../utils/redactSecrets';
-import { showUserError } from '../utils/userMessages';
-import * as errorsUtil from '../utils/errors';
+// Prefer importing interactive helpers via the utils barrel (interactiveMessages)
+// to avoid accidentally using a similarly-named non-interactive helper.
+import { internalErrors } from '../utils';
 import { handleError, logErrorToChannel } from '../utils/errorHandler';
 import { emitProgress } from './eventBus';
 import { broadcastGenerationResult } from './codebasePanel';
@@ -71,7 +72,7 @@ export async function generateDigest(
         services = workspaceManager.getBundleForFolder(workspaceFolder);
         if (!services) {
             // Log and show error consistently, then broadcast to any webviews
-            errorsUtil.logUserError('No services found for workspace folder.', workspaceFolder.uri.fsPath);
+            internalErrors.logUserError('No services found for workspace folder.', workspaceFolder.uri.fsPath);
             try { broadcastGenerationResult({ error: 'No services found for workspace folder.' }, workspacePath); } catch (e) { try { console.warn('digestProvider: broadcastGenerationResult failed', e); } catch {} }
             return;
         }
@@ -113,7 +114,7 @@ export async function generateDigest(
                     { label: 'Cancel', value: 'cancel' }
                 ], { placeHolder: 'No files selected. What would you like to do?' });
                 if (!pick || pick.value === 'cancel') {
-                    errorsUtil.logUserWarning('Digest generation cancelled: no files selected.');
+                    internalErrors.logUserWarning('Digest generation cancelled: no files selected.');
                     try { broadcastGenerationResult({ error: 'Digest generation cancelled: no files selected.' }, workspacePath); } catch (e) { /* swallow */ }
                     return;
                 }
@@ -124,7 +125,7 @@ export async function generateDigest(
             }
             files = treeProvider ? treeProvider.getSelectedFiles() : [];
             if (!files || files.length === 0) {
-                errorsUtil.logUserWarning('Digest generation cancelled: no files selected.');
+                internalErrors.logUserWarning('Digest generation cancelled: no files selected.');
                 try { broadcastGenerationResult({ error: 'Digest generation cancelled: no files selected.' }, workspacePath); } catch (e) { /* swallow */ }
                 return;
             }
@@ -179,7 +180,7 @@ export async function generateDigest(
                     { label: 'Cancel', value: 'cancel' }
                 ], { placeHolder: 'Cached digest found. What would you like to do?' });
                 if (!pick || pick.value === 'cancel') {
-                    errorsUtil.logUserWarning('Digest generation cancelled.');
+                    internalErrors.logUserWarning('Digest generation cancelled.');
                     try { broadcastGenerationResult({ error: 'Digest generation cancelled.' }, workspacePath); } catch (e) { /* swallow */ }
                     return;
                 }
