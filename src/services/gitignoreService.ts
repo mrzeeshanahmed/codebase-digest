@@ -60,12 +60,12 @@ export class GitignoreService {
     }
 
     getEffectiveMatchers(relPath: string): Matcher[] {
-        const all: Array<{ dir: string; matchers: Matcher[] }> = [];
+    const all: Array<{ dir: string; matchers: Matcher[] }> = [];
         const looksAbsolute = !!relPath && (relPath.startsWith('/') || /^[A-Za-z]:\\/.test(relPath));
         if (looksAbsolute) {
             const full = this.normalizeAbs(relPath);
             for (const [dir, matchers] of this.matchersByDir.entries()) {
-                const dirPrefix = dir.endsWith('/') ? dir : dir + '/';
+                const dirPrefix = dir.endsWith('/') ? dir : path.posix.join(dir, '');
                 if (full === dir || full.startsWith(dirPrefix)) { all.push({ dir, matchers }); }
             }
         } else {
@@ -94,20 +94,20 @@ export class GitignoreService {
                     let testPath = inputPath.replace(/\\/g, '/').replace(/^\/+/, '');
                     if (looksAbsolute) {
                         const full = this.normalizeAbs(inputPath);
-                        const dirKeyPrefix = dirKey.endsWith('/') ? dirKey : dirKey + '/';
+                        const dirKeyPrefix = dirKey.endsWith('/') ? dirKey : path.posix.join(dirKey, '');
                         if (!(full === dirKey || full.startsWith(dirKeyPrefix))) { return false; }
                         testPath = full === dirKey ? '' : full.slice(dirKey.length + 1);
                     }
                     if (anchored) {
                         const anchoredPat = cleaned.startsWith('/') ? cleaned.slice(1) : cleaned;
                         if (!anchoredPat) { return false; }
-                        const anchoredPrefix = anchoredPat.endsWith('/') ? anchoredPat : anchoredPat + '/';
+                        const anchoredPrefix = anchoredPat.endsWith('/') ? anchoredPat : path.posix.join(anchoredPat, '');
                         if (dirOnly) { return testPath === anchoredPat || testPath.startsWith(anchoredPrefix); }
                         return testPath === anchoredPat || testPath.startsWith(anchoredPrefix);
                     }
                     if (dirOnly) {
                         if (testPath === cleaned) { return !!isDir; }
-                        const cleanedPrefix = cleaned.endsWith('/') ? cleaned : cleaned + '/';
+                        const cleanedPrefix = cleaned.endsWith('/') ? cleaned : path.posix.join(cleaned, '');
                         if (testPath.startsWith(cleanedPrefix)) { return true; }
                         return false;
                     }

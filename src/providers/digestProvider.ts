@@ -51,77 +51,92 @@ export async function generateDigest(
     const _mutex = getMutex(workspacePath);
     let _release: (() => void) | undefined;
 
-    // Perform initial checks that may throw or prompt the user BEFORE acquiring the mutex.
-    // This prevents the mutex being held across user prompts or early failures which
-    // could otherwise cause deadlocks if an exception occurs before the release.
-    const services = workspaceManager.getBundleForFolder(workspaceFolder);
-    if (!services) {
-        // Log and show error consistently, then broadcast to any webviews
-        errorsUtil.showUserError('No services found for workspace folder.', workspaceFolder.uri.fsPath);
-        try { broadcastGenerationResult({ error: 'No services found for workspace folder.' }, workspacePath); } catch (e) { try { console.warn('digestProvider: broadcastGenerationResult failed', e); } catch {} }
-        return;
-    }
-    // Read workspace configuration via centralized ConfigurationService (validated/coerced)
-    const config: DigestConfig = ConfigurationService.getWorkspaceConfig(workspaceFolder, services.diagnostics);
-    // runtimeConfig merges saved workspace settings with transient overrides for this run only
-    // Note: overrides is intentionally transient (one-shot) and should not be persisted back
-    // to the user's WorkspaceConfiguration. This ensures the "Disable redaction for this run"
-    // toggle from the webview only affects the current generation and is cleared immediately
-    // by the webview after being used.
-    const runtimeConfig = Object.assign({}, config, overrides || {});
-    const diagnostics = services.diagnostics;
-    const cacheService = services.cacheService || new CacheService();
-    const digestGenerator = new DigestGenerator(services.contentProcessor, services.tokenAnalyzer);
-    // Prepare token model and divisor overrides from config
-    const tokenModel = runtimeConfig.tokenModel || config.tokenModel || 'chars-approx';
-    const tokenDivisorOverrides = runtimeConfig.tokenDivisorOverrides || config.tokenDivisorOverrides || {};
+    // Hoist variables so they remain in scope after the pre-lock phase
+    let services: import('../services/workspaceManager').ServicesBundle | undefined;
+    let config: DigestConfig;
+    let runtimeConfig: DigestConfig;
+    let diagnostics: any;
+    let cacheService: CacheService;
+    let digestGenerator: DigestGenerator | undefined;
+    let tokenModel: string | undefined;
+    let tokenDivisorOverrides: Record<string, number> | undefined;
     const outputWriter = new OutputWriter();
     let files: FileNode[] = [];
     let remoteMeta: any = undefined;
     let remoteTmpDir: string | undefined;
-    // Step 1: resolve remote repo if needed
-    if (config.remoteRepo) {
-        try {
-            vscode.window.showInformationMessage(`Ingesting remote repo: ${config.remoteRepo}`);
-            const result = await ingestRemoteRepo(config.remoteRepo, config.remoteRepoOptions || {});
-            remoteTmpDir = result.localPath;
-            remoteMeta = result.meta;
-            files = await require('../services/contentProcessor').ContentProcessor.scanDirectory(remoteTmpDir, config);
-        } catch (err) {
-            if (remoteTmpDir) {
-                await cleanupRemoteTmp(remoteTmpDir);
-            }
-            const details = String(err);
-            diagnostics?.error && diagnostics.error('Remote repo ingest failed: ' + details);
-            // Centralized error handling: log, diagnostics, and show user message
-            try { await handleError(err, 'Remote repo ingest failed.', { diagnostics, showUser: true, userMessage: 'Remote repo ingest failed.' }); } catch (_) { /* ignore */ }
-            try { broadcastGenerationResult({ error: 'Remote repo ingest failed.' }, workspacePath); } catch (e) { try { console.warn('digestProvider: broadcastGenerationResult failed', e); } catch {} }
+
+    // Perform initial checks that may throw or prompt the user BEFORE acquiring the mutex.
+    // Any error here should return early so the mutex is never acquired.
+    try {
+        services = workspaceManager.getBundleForFolder(workspaceFolder);
+        if (!services) {
+            // Log and show error consistently, then broadcast to any webviews
+            errorsUtil.showUserError('No services found for workspace folder.', workspaceFolder.uri.fsPath);
+            try { broadcastGenerationResult({ error: 'No services found for workspace folder.' }, workspacePath); } catch (e) { try { console.warn('digestProvider: broadcastGenerationResult failed', e); } catch {} }
             return;
         }
-    } else {
-    const selectedFiles: FileNode[] = treeProvider ? treeProvider.getSelectedFiles() : [];
-        if (!selectedFiles || selectedFiles.length === 0) {
-            const pick = await vscode.window.showQuickPick([
-                { label: 'Select All Files', value: 'all' },
-                { label: 'Cancel', value: 'cancel' }
-            ], { placeHolder: 'No files selected. What would you like to do?' });
-            if (!pick || pick.value === 'cancel') {
-        errorsUtil.showUserWarning('Digest generation cancelled: no files selected.');
-        try { broadcastGenerationResult({ error: 'Digest generation cancelled: no files selected.' }, workspacePath); } catch (e) { /* swallow */ }
+        // Read workspace configuration via centralized ConfigurationService (validated/coerced)
+        config = ConfigurationService.getWorkspaceConfig(workspaceFolder, services.diagnostics);
+        // runtimeConfig merges saved workspace settings with transient overrides for this run only
+        runtimeConfig = Object.assign({}, config, overrides || {});
+        diagnostics = services.diagnostics;
+    cacheService = (services.cacheService as CacheService) || new CacheService();
+        digestGenerator = new DigestGenerator(services.contentProcessor, services.tokenAnalyzer);
+        // Prepare token model and divisor overrides from config
+        tokenModel = runtimeConfig.tokenModel || config.tokenModel || 'chars-approx';
+        tokenDivisorOverrides = runtimeConfig.tokenDivisorOverrides || config.tokenDivisorOverrides || {};
+
+        // Step 1: resolve remote repo if needed
+        if (config.remoteRepo) {
+            try {
+                vscode.window.showInformationMessage(`Ingesting remote repo: ${config.remoteRepo}`);
+                const result = await ingestRemoteRepo(config.remoteRepo, config.remoteRepoOptions || {});
+                remoteTmpDir = result.localPath;
+                remoteMeta = result.meta;
+                files = await require('../services/contentProcessor').ContentProcessor.scanDirectory(remoteTmpDir, config);
+            } catch (err) {
+                if (remoteTmpDir) {
+                    await cleanupRemoteTmp(remoteTmpDir);
+                }
+                const details = String(err);
+                diagnostics?.error && diagnostics.error('Remote repo ingest failed: ' + details);
+                // Centralized error handling: log, diagnostics, and show user message
+                try { await handleError(err, 'Remote repo ingest failed.', { diagnostics, showUser: true, userMessage: 'Remote repo ingest failed.' }); } catch (_) { /* ignore */ }
+                try { broadcastGenerationResult({ error: 'Remote repo ingest failed.' }, workspacePath); } catch (e) { try { console.warn('digestProvider: broadcastGenerationResult failed', e); } catch {} }
+                return;
+            }
+        } else {
+            const selectedFiles: FileNode[] = treeProvider ? treeProvider.getSelectedFiles() : [];
+            if (!selectedFiles || selectedFiles.length === 0) {
+                const pick = await vscode.window.showQuickPick([
+                    { label: 'Select All Files', value: 'all' },
+                    { label: 'Cancel', value: 'cancel' }
+                ], { placeHolder: 'No files selected. What would you like to do?' });
+                if (!pick || pick.value === 'cancel') {
+                    errorsUtil.showUserWarning('Digest generation cancelled: no files selected.');
+                    try { broadcastGenerationResult({ error: 'Digest generation cancelled: no files selected.' }, workspacePath); } catch (e) { /* swallow */ }
+                    return;
+                }
+                if (pick.value === 'all' && treeProvider) {
+                    treeProvider.selectAll();
+                    // Do not refresh here; immediately re-read selected files
+                }
+            }
+            files = treeProvider ? treeProvider.getSelectedFiles() : [];
+            if (!files || files.length === 0) {
+                errorsUtil.showUserWarning('Digest generation cancelled: no files selected.');
+                try { broadcastGenerationResult({ error: 'Digest generation cancelled: no files selected.' }, workspacePath); } catch (e) { /* swallow */ }
+                return;
+            }
+        }
+    } catch (err) {
+        // Unexpected error during pre-lock checks: ensure remote tmp cleanup and surface error
+        try { if (remoteTmpDir) { await cleanupRemoteTmp(remoteTmpDir); } } catch (e) { /* swallow */ }
+        try { await handleError(err, 'Digest generation pre-check failed.', { showUser: true, userMessage: 'Digest generation failed during initial checks.' }); } catch (e) { /* ignore */ }
+        try { broadcastGenerationResult({ error: 'Digest generation failed during initial checks.' }, workspacePath); } catch (e) { /* swallow */ }
         return;
-            }
-            if (pick.value === 'all' && treeProvider) {
-                treeProvider.selectAll();
-                // Do not refresh here; immediately re-read selected files
-            }
-        }
-        files = treeProvider ? treeProvider.getSelectedFiles() : [];
-        if (!files || files.length === 0) {
-            errorsUtil.showUserWarning('Digest generation cancelled: no files selected.');
-            try { broadcastGenerationResult({ error: 'Digest generation cancelled: no files selected.' }, workspacePath); } catch (e) { /* swallow */ }
-            return;
-        }
     }
+
     // At this point initial checks and any user prompts are complete. Acquire the
     // per-workspace mutex so the subsequent generation, write and cache steps run
     // exclusively for this workspace. The mutex is released in the finally below

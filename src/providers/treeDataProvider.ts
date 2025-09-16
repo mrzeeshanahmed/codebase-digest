@@ -13,6 +13,7 @@ import { emitProgress } from './eventBus';
 import { debounce } from '../utils/debounce';
 import { getMutex } from '../utils/asyncLock';
 import { minimatch } from 'minimatch';
+import * as path from 'path';
 import { ConfigurationService } from '../services/configurationService';
 
 export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileNode>, vscode.Disposable {
@@ -966,7 +967,7 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
                 const loadingNode: FileNode = {
                     type: 'file',
                     name: 'Loading...',
-                    relPath: element.relPath + '/__loading__',
+                    relPath: path.posix.join(element.relPath || '', '__loading__'),
                     path: '',
                     isSelected: false,
                     depth: element.depth + 1
@@ -990,7 +991,7 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
                             const loadMore: FileNode & { virtualType: 'loadMore'; parentPath?: string; nextIndex?: number; pageSize?: number } = {
                                 type: 'file',
                                 name: 'Load more...',
-                                relPath: element.relPath + '/__loadmore__',
+                                relPath: path.posix.join(element.relPath || '', '__loadmore__'),
                                 path: '',
                                 isSelected: false,
                                 depth: element.depth + 1,

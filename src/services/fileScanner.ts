@@ -113,8 +113,8 @@ export class FileScanner {
                     // under this directory. Use two variants to catch single-level and multi-level matches.
                     // Use posix join for pattern tests because include/exclude patterns
                     // are evaluated against posix-style rel paths (forward slashes).
-                    const sample1 = dirKey ? [dirKey, '__includetest__'].join('/') : '__includetest__';
-                    const sample2 = dirKey ? [dirKey, '__includetest__', 'x'].join('/') : '__includetest__/x';
+                    const sample1 = dirKey ? path.posix.join(dirKey, '__includetest__') : '__includetest__';
+                    const sample2 = dirKey ? path.posix.join(dirKey, '__includetest__', 'x') : path.posix.join('__includetest__', 'x');
                     for (const p of includePatterns) {
                         try {
                             if (typeof p !== 'string') { continue; }
@@ -141,7 +141,7 @@ export class FileScanner {
                         const nn = String(n || '').replace(/^\/+|\/+$/g, '');
                         if (!nn) { return false; }
                         if (dirKey === '') { return true; } // conservatively assume root may be affected
-                        const dirPrefix = dirKey.endsWith('/') ? dirKey : dirKey + '/';
+                        const dirPrefix = dirKey.endsWith('/') ? dirKey : path.posix.join(dirKey, '');
                         return nn === dirKey || nn.startsWith(dirPrefix);
                     });
                     // If explicit gitignore negations don't reference this dir, also check includePatterns

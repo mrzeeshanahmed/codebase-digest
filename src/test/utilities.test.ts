@@ -1,4 +1,5 @@
 import { describe, it, expect } from '@jest/globals';
+import * as path from 'path';
 import { FilterService } from '../services/filterService';
 import { GitignoreService } from '../services/gitignoreService';
 import { TokenAnalyzer } from '../services/tokenAnalyzer';
@@ -69,7 +70,7 @@ describe('TokenAnalyzer', () => {
 
 describe('NotebookProcessor', () => {
     it('parse and toText with truncation', () => {
-        const nb = NotebookProcessor.parseIpynb(__dirname + '/fixtures/sample.ipynb');
+    const nb = NotebookProcessor.parseIpynb(path.join(__dirname, 'fixtures', 'sample.ipynb'));
         const text = NotebookProcessor.toText(nb, { outputMaxChars: 10, includeCodeCells: true, includeMarkdownCells: true, includeOutputs: true });
         expect(text).toMatch(/Jupyter Notebook:/);
         expect(text.length).toBeLessThan(500);
