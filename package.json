@@ -27,8 +27,7 @@
       "codebase-digest": [
         {
           "id": "codebaseDigestDashboard",
-          "name": "Code Ingest",
-          "type": "webview"
+          "name": "Code Ingest"
         }
       ]
     },
