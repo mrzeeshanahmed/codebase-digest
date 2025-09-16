@@ -1287,8 +1287,7 @@ window.onload = function() {
         const refRaw = (document.getElementById('ingest-ref') || {}).value || '';
         const subpathRaw = (document.getElementById('ingest-subpath') || {}).value || '';
             const includeSubmodules = !!(document.getElementById('ingest-submodules') && document.getElementById('ingest-submodules').checked);
-            if (!repo || repo.trim().length === 0) { showToast('Please enter a repo URL or owner/repo slug', 'error'); return; }
-            // Normalize common URL/SSH forms to the owner/repo slug used by the host.
+            if (!repoRaw || repoRaw.trim().length === 0) { showToast('Please enter a repo URL or owner/repo slug', 'error'); return; }            // Normalize common URL/SSH forms to the owner/repo slug used by the host.
             // Accepts: owner/repo, https://github.com/owner/repo, http(s) with www, git@github.com:owner/repo.git, and similar.
             const raw = repo.trim();
             let normalized = raw;
