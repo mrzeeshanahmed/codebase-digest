@@ -65,7 +65,8 @@ export class GitignoreService {
         if (looksAbsolute) {
             const full = this.normalizeAbs(relPath);
             for (const [dir, matchers] of this.matchersByDir.entries()) {
-                if (full === dir || full.startsWith(dir + '/')) { all.push({ dir, matchers }); }
+                const dirPrefix = dir.endsWith('/') ? dir : dir + '/';
+                if (full === dir || full.startsWith(dirPrefix)) { all.push({ dir, matchers }); }
             }
         } else {
             for (const [dir, matchers] of this.matchersByDir.entries()) { all.push({ dir, matchers }); }
@@ -93,18 +94,21 @@ export class GitignoreService {
                     let testPath = inputPath.replace(/\\/g, '/').replace(/^\/+/, '');
                     if (looksAbsolute) {
                         const full = this.normalizeAbs(inputPath);
-                        if (!(full === dirKey || full.startsWith(dirKey + '/'))) { return false; }
+                        const dirKeyPrefix = dirKey.endsWith('/') ? dirKey : dirKey + '/';
+                        if (!(full === dirKey || full.startsWith(dirKeyPrefix))) { return false; }
                         testPath = full === dirKey ? '' : full.slice(dirKey.length + 1);
                     }
                     if (anchored) {
                         const anchoredPat = cleaned.startsWith('/') ? cleaned.slice(1) : cleaned;
                         if (!anchoredPat) { return false; }
-                        if (dirOnly) { return testPath === anchoredPat || testPath.startsWith(anchoredPat + '/'); }
-                        return testPath === anchoredPat || testPath.startsWith(anchoredPat + '/');
+                        const anchoredPrefix = anchoredPat.endsWith('/') ? anchoredPat : anchoredPat + '/';
+                        if (dirOnly) { return testPath === anchoredPat || testPath.startsWith(anchoredPrefix); }
+                        return testPath === anchoredPat || testPath.startsWith(anchoredPrefix);
                     }
                     if (dirOnly) {
                         if (testPath === cleaned) { return !!isDir; }
-                        if (testPath.startsWith(cleaned + '/')) { return true; }
+                        const cleanedPrefix = cleaned.endsWith('/') ? cleaned : cleaned + '/';
+                        if (testPath.startsWith(cleanedPrefix)) { return true; }
                         return false;
                     }
                     if (minimatch(testPath, cleaned, { dot: true })) { return true; }

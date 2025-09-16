@@ -146,20 +146,24 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
                 parentNode = findNode(this.rootNodes);
                 if (parentNode) {
                     const config = this.loadConfig();
-                    // Acquire workspace mutex so directory-level scans do not overlap with
-                    // full workspace scans (scanWorkspace) which also use the same mutex.
-                    const m = getMutex(this.workspaceRoot || this.workspaceFolder.uri.fsPath);
-                    const relRelease = await m.lock();
-                    try {
-                        // Do not reuse possibly-cancelled scan token for individual
-                        // directory hydrations. Passing undefined ensures a fresh
-                        // uncancelled run so the Loading... node won't get stuck.
-                        parentNode.children = await this.fileScanner.scanDirectory(parentNode.path, config, undefined);
-                        this.directoryCache.set(parentNode.path, parentNode.children);
-                        this._onDidChangeTreeData.fire(parentNode);
-                    } finally {
-                        try { relRelease(); } catch (e) { /* swallow */ }
-                    }
+                    // Defer acquiring the workspace mutex until immediately before the
+                    // critical section to avoid holding the lock across any early
+                    // checks or potential exceptions. This mirrors the safer pattern
+                    // used in other providers (e.g. digestProvider).
+                    (async () => {
+                        const m = getMutex(this.workspaceRoot || this.workspaceFolder.uri.fsPath);
+                        const relRelease = await m.lock();
+                        try {
+                            // Do not reuse possibly-cancelled scan token for individual
+                            // directory hydrations. Passing undefined ensures a fresh
+                            // uncancelled run so the Loading... node won't get stuck.
+                            parentNode.children = await this.fileScanner.scanDirectory(parentNode.path, config, undefined);
+                            this.directoryCache.set(parentNode.path, parentNode.children);
+                            this._onDidChangeTreeData.fire(parentNode);
+                        } finally {
+                            try { relRelease(); } catch (e) { /* swallow */ }
+                        }
+                    })();
                 }
             };
 
@@ -545,16 +549,21 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
                                 };
                                 const parentNode = findNode(this.rootNodes);
                                 if (!parentNode) { continue; }
-                                const m = getMutex(this.workspaceRoot || this.workspaceFolder.uri.fsPath);
-                                const relRelease = await m.lock();
-                                try {
-                                    const children = await this.fileScanner.scanDirectory(parentNode.path, config, undefined);
-                                    parentNode.children = children;
-                                    this.directoryCache.set(parentNode.path, children);
-                                    this._onDidChangeTreeData.fire(parentNode);
-                                } finally {
-                                    try { relRelease(); } catch (e) { /* swallow */ }
-                                }
+                                // Defer acquiring the workspace mutex into a background task
+                                // so we don't hold the lock across the loop's checks and
+                                // potential exceptions.
+                                (async () => {
+                                    const m = getMutex(this.workspaceRoot || this.workspaceFolder.uri.fsPath);
+                                    const rel = await m.lock();
+                                    try {
+                                        const children = await this.fileScanner.scanDirectory(parentNode.path, config, undefined);
+                                        parentNode.children = children;
+                                        this.directoryCache.set(parentNode.path, children);
+                                        this._onDidChangeTreeData.fire(parentNode);
+                                    } finally {
+                                        try { rel(); } catch (e) { /* swallow */ }
+                                    }
+                                })();
                             } catch (e) {
                                 try { this.diagnostics && this.diagnostics.warn ? this.diagnostics.warn('pending hydration failed', e) : console.warn('pending hydration failed', e); } catch {}
                             }

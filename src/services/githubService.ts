@@ -53,6 +53,23 @@ function isSafeSubpath(p: string): boolean {
     return /^[A-Za-z0-9_\-\.\/]+$/.test(trimmed);
 }
 
+// Ensure any args we pass to git are simple, tokenized values and do not
+// contain shell-control characters that could be abused. spawnGitPromise also
+// performs validation, but validate early at the call sites to fail fast and
+// provide clearer diagnostics closer to the source of the input.
+function validateGitArgs(args: string[], context?: string) {
+    if (!Array.isArray(args)) { throw new Error('Invalid git args'); }
+    for (const a of args) {
+        if (typeof a !== 'string') { throw new Error('Invalid git arg type'); }
+        // Disallow common shell metacharacters and control characters.
+        // We allow URL characters like ':' and '/' and allow backslashes for
+        // Windows paths. spawnGitPromise applies a similar check as well.
+        if (/[*`$<>|;&\n\r]/.test(a)) {
+            throw new Error(`Suspicious characters in git arg${context ? ` (${context})` : ''}`);
+        }
+    }
+}
+
 export interface RemoteRepoMeta {
     ownerRepo: string;
     resolved: {
@@ -75,7 +92,9 @@ export function buildRemoteSummary(meta: RemoteRepoMeta): string {
 
 export async function runSubmoduleUpdate(repoPath: string): Promise<void> {
     // Use spawnGitPromise wrapper which validates args and scrubs output
-    await spawnGitPromise(['submodule', 'update', '--init', '--recursive'], { cwd: repoPath, env: process.env }).then(() => {});
+    const args = ['submodule', 'update', '--init', '--recursive'];
+    validateGitArgs(args, 'submodule update');
+    await spawnGitPromise(args, { cwd: repoPath, env: process.env }).then(() => {});
 }
 
 export async function authenticate(): Promise<string> {
@@ -199,7 +218,9 @@ export async function resolveRefToSha(ownerRepo: string, ref?: { tag?: string; b
     }
             try {
                 const remoteUrl = token ? `https://x-access-token:${encodeURIComponent(token)}@github.com/${owner}/${repo}.git` : `https://github.com/${owner}/${repo}.git`;
-                return await spawnGitPromise(['ls-remote', remoteUrl, refName]).then(r => {
+                const args = ['ls-remote', remoteUrl, refName];
+                validateGitArgs(args, 'ls-remote');
+                return await spawnGitPromise(args).then(r => {
                     let stdout = '';
                     if (r && typeof r === 'object') {
                         const s = (r as Record<string, unknown>)['stdout'];
@@ -231,7 +252,7 @@ export async function resolveRefToSha(ownerRepo: string, ref?: { tag?: string; b
     }
 }
 
-export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?: string, tmpDir?: string, opts?: { skipSparse?: boolean, skipFilter?: boolean }, authToken?: string): Promise<string> {
+export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?: string, tmpDir?: string, opts?: { skipSparse?: boolean, skipFilter?: boolean }, authToken?: string, onChunk?: (chunk: { stream: 'stdout' | 'stderr'; data: string }) => void): Promise<string> {
     const [owner, repo] = ownerRepo.split('/');
     // Optional token passed from caller; if provided, use it for authenticated clone via GIT_ASKPASS
     const providedToken = authToken;
@@ -261,6 +282,8 @@ export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?
     }
     let env: any = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
     // Optional output channel and buffered chunk writer for streaming git output
+    // If an external onChunk callback is provided we will call it for each
+    // stdout/stderr chunk and avoid creating a second internal OutputChannel
     let outChannel: vscode.OutputChannel | undefined;
     // Buffer and timer for coalescing small writes
     let writeBuffer = '';
@@ -300,8 +323,17 @@ export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?
         } catch (_) { /* ignore */ }
     };
 
+    // Build a composed chunk writer. If an external onChunk callback was
+    // provided by the caller, call it for each chunk. When no external
+    // callback is present, fall back to writing into our local OutputChannel.
     const chunkWriter = (chunk: { stream: 'stdout' | 'stderr'; data: string }) => {
         try {
+            // If caller provided a callback, prefer delivering raw chunk
+            // (caller may scrub or format it). If not, scrub and buffer-write.
+            if (typeof onChunk === 'function') {
+                try { onChunk(chunk); } catch (_) { /* swallow external callback errors */ }
+                return;
+            }
             const text = scrubTokens(chunk.data || '');
             // Coalesce into buffer and schedule a flush
             writeBuffer += text;
@@ -357,6 +389,7 @@ export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?
         while (true) {
             const baseCloneArgs = [...baseCloneArgsTemplate, dir];
             try {
+                validateGitArgs(baseCloneArgs, 'git clone');
                 await spawnGitPromise(baseCloneArgs, { env }, chunkWriter).then(() => {});
                 break; // success
             } catch (cloneErr: any) {
@@ -415,7 +448,9 @@ export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?
                 throw new Error(scrubTokens(`Invalid subpath for sparse-checkout: ${subpath}`));
             }
             try {
+                validateGitArgs(['sparse-checkout','init','--cone'], 'sparse-checkout init');
                 await spawnGitPromise(['sparse-checkout','init','--cone'], { cwd: dir, env }, chunkWriter).then(() => {});
+                validateGitArgs(['sparse-checkout','set', subpath], 'sparse-checkout set');
                 await spawnGitPromise(['sparse-checkout','set', subpath], { cwd: dir, env }, chunkWriter).then(() => {});
             } catch (sparseErr: any) {
                 // Scrub error and present retry choices to the user to try less strict clone options.
@@ -437,12 +472,16 @@ export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?
                     try { writeAskpass(); } catch (e) { /* ignore */ }
                     if (choice.id === 'nofilter') {
                         // Retry clone without blob filter and attempt sparse again
+                        validateGitArgs(['clone','--no-checkout','--depth','1','--single-branch',url,dir], 'git clone (retry nofilter)');
                         await spawnGitPromise(['clone','--no-checkout','--depth','1','--single-branch',url,dir], { env }, chunkWriter);
                         // attempt sparse again
+                        validateGitArgs(['sparse-checkout','init','--cone'], 'sparse-checkout init (retry)');
                         await spawnGitPromise(['sparse-checkout','init','--cone'], { cwd: dir, env }, chunkWriter).then(() => {});
+                        validateGitArgs(['sparse-checkout','set', subpath], 'sparse-checkout set (retry)');
                         await spawnGitPromise(['sparse-checkout','set', subpath], { cwd: dir, env }, chunkWriter).then(() => {});
                     } else if (choice.id === 'full') {
                         // Full shallow clone (no --no-checkout necessary)
+                        validateGitArgs(['clone','--depth','1','--single-branch',url,dir], 'git clone (retry full)');
                         await spawnGitPromise(['clone','--depth','1','--single-branch',url,dir], { env }, chunkWriter);
                         // No sparse needed; subpath will be present in working tree after checkout
                     }
@@ -490,6 +529,7 @@ export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?
         if (!(isFullSha || isShortSha || isSafeRefName(shaOrRef))) {
             throw new Error(scrubTokens(`Invalid git ref or sha: ${shaOrRef}`));
         }
+    validateGitArgs(['checkout', shaOrRef], 'git checkout');
     await spawnGitPromise(['checkout', shaOrRef], { cwd: dir, env }, chunkWriter).then(() => {});
     } catch (checkoutErr: any) {
         const details = scrubTokens(String(checkoutErr && typeof checkoutErr === 'object' ? String((checkoutErr as Record<string, unknown>)['details'] || (checkoutErr as Record<string, unknown>)['message'] || String(checkoutErr)) : String(checkoutErr || '')));
@@ -579,8 +619,26 @@ export async function ingestRemoteRepo(urlOrSlug: string, options?: { ref?: { ta
             throw err;
         }
 
+        // Prepare an output channel and chunk callback so clone progress is streamed
+        // into the `Code Ingest` channel to provide user feedback during long ops.
+        let outChannel: vscode.OutputChannel | undefined;
+        try {
+            outChannel = vscode.window.createOutputChannel('Code Ingest');
+            outChannel.show(true);
+            outChannel.appendLine(`=== Cloning ${ownerRepo} @ ${sha} ===`);
+        } catch (_) { outChannel = undefined; }
+
+        const onChunk = (chunk: { stream: 'stdout' | 'stderr'; data: string }) => {
+            try {
+                const text = scrubTokens(chunk.data || '');
+                if (outChannel) {
+                    outChannel.append(text);
+                }
+            } catch (_) { /* ignore logging errors */ }
+        };
+
         // Perform partial clone into the caller-provided tmpDir
-        localPath = await partialClone(ownerRepo, sha, options?.subpath, tmpDir, undefined, token);
+        localPath = await partialClone(ownerRepo, sha, options?.subpath, tmpDir, undefined, token, onChunk);
 
         // If includeSubmodules, run git submodule update --init --recursive
         if (options?.includeSubmodules) {

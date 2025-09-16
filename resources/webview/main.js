@@ -33,21 +33,46 @@ let paused = false;
 // Track expanded folder paths: canonical array lives in `store`; keep a Set locally and sync
 let expandedPaths = new Set();
 
-// Zustand (vanilla) store for centralizing file tree + selection state in the webview.
-// We only manage fileTree and selectedPaths here to keep the change minimal and
-// avoid touching other existing transient variables used elsewhere in the file.
+// Zustand-like store for centralizing file tree + selection state in the webview.
+// We expose a small action surface so UI code and message handlers can call
+// intentful actions rather than mutating transient variables directly.
 const store = create((set) => ({
+    // core state
     fileTree: {},
     selectedPaths: [],
     expandedPaths: [],
     paused: false,
     pendingPersistedSelection: null,
     pendingPersistedFocusIndex: undefined,
-    // small helper to patch state from incoming host messages
-    setState: (patch) => set((s) => Object.assign({}, s, patch))
+    // actions: intentful APIs for updating state
+    setState: (patch) => set((s) => Object.assign({}, s, patch)),
+    setFileTree: (tree, selectedPaths) => set((s) => Object.assign({}, s, { fileTree: tree || {}, selectedPaths: Array.isArray(selectedPaths) ? selectedPaths.slice() : (s.selectedPaths || []) })),
+    setSelection: (paths) => set(() => ({ selectedPaths: Array.isArray(paths) ? paths.slice() : [] })),
+    clearSelection: () => set(() => ({ selectedPaths: [] })),
+    // collectLeaves is declared below and referenced here to avoid inlining
+    selectAllFiles: () => set((s) => ({ selectedPaths: collectLeaves(s.fileTree) })),
+    togglePause: (p) => set(() => ({ paused: typeof p === 'undefined' ? !(store.getState().paused) : !!p })),
+    setExpandedPaths: (arr) => set(() => ({ expandedPaths: Array.isArray(arr) ? arr.slice() : [] })),
+    setPendingPersistedSelection: (sel, idx) => set(() => ({ pendingPersistedSelection: sel || null, pendingPersistedFocusIndex: typeof idx === 'number' ? idx : undefined }))
 }));
 
-// Initialize local mirrors from store
+// Helper used by the store action selectAllFiles to collect leaf file paths
+function collectLeaves(node, prefix = '') {
+    const out = [];
+    if (!node || typeof node !== 'object') { return out; }
+    for (const k of Object.keys(node)) {
+        const n = node[k];
+        const full = n && n.path ? n.path : `${prefix}${k}`;
+        if (n && n.__isFile) { out.push(full); }
+        else { out.push(...collectLeaves(n, `${full}/`)); }
+    }
+    return out;
+}
+
+// Initialize local mirrors from store and subscribe to updates to keep the UI
+// and local transient mirrors in sync. We intentionally keep a small set of
+// mirrors (paused, expandedPaths, pendingPersistedSelection) for performance
+// in hot paths like checkbox wiring and expand/collapse handlers.
 try {
     const s = store.getState();
     paused = !!s.paused;
@@ -56,7 +81,6 @@ try {
     pendingPersistedFocusIndex = typeof s.pendingPersistedFocusIndex !== 'undefined' ? s.pendingPersistedFocusIndex : undefined;
 } catch (e) { /* best-effort */ }
 
-// Subscribe store updates to keep local mirrors and UI in sync
 store.subscribe((st) => {
     try {
         if (typeof st.paused !== 'undefined' && paused !== !!st.paused) { paused = !!st.paused; updatePauseButton(); }
@@ -68,6 +92,10 @@ store.subscribe((st) => {
     try {
         pendingPersistedSelection = st.pendingPersistedSelection || null;
         pendingPersistedFocusIndex = typeof st.pendingPersistedFocusIndex !== 'undefined' ? st.pendingPersistedFocusIndex : undefined;
+    } catch (e) {}
+    // Rerender file list whenever fileTree or selectedPaths changes.
+    try {
+        debouncedRenderFileList();
     } catch (e) {}
 });
 
@@ -209,6 +237,50 @@ function sanitizePayload(obj) {
         }
         return copy;
     } catch (e) { return obj; }
+}
+
+// Client-side input sanitizers for common user-provided fields (defence-in-depth).
+// These perform a simple allowlist of characters typically found in GitHub
+// repository URLs/slugs, git refs and repository subpaths. They return either
+// a cleaned string or null when the input contains disallowed characters.
+function sanitizeRepoInput(s) {
+    if (!s && s !== '') { return null; }
+    try {
+        const cleaned = String(s).trim().replace(/[\x00-\x1F\x7F]/g, '');
+        // Allow common URL and SCP forms and owner/repo slugs. Disallow shell metacharacters
+        // like ; | & ` $ < > and line breaks. Characters allowed: alnum, - _ . / : @ ? & % = + #
+        const allowed = /^[A-Za-z0-9\-._\/:@?&%=+#]+$/;
+        if (!cleaned || !allowed.test(cleaned)) { return null; }
+        // Clamp length to a reasonable max to avoid huge payloads
+        if (cleaned.length > 2000) { return null; }
+        return cleaned;
+    } catch (e) { return null; }
+}
+
+function sanitizeRefName(s) {
+    if (!s && s !== '') { return null; }
+    try {
+        const cleaned = String(s).trim().replace(/[\x00-\x1F\x7F]/g, '');
+        // Git refs typically contain alphanumerics, dots, dashes and slashes.
+        const allowed = /^[A-Za-z0-9\-._\/]+$/;
+        if (cleaned === '') { return '';} // empty ref is acceptable (means use default)
+        if (!allowed.test(cleaned)) { return null; }
+        if (cleaned.length > 500) { return null; }
+        return cleaned;
+    } catch (e) { return null; }
+}
+
+function sanitizeSubpath(s) {
+    if (!s && s !== '') { return null; }
+    try {
+        const cleaned = String(s).trim().replace(/[\x00-\x1F\x7F]/g, '');
+        // Subpaths are like filesystem paths within the repo; allow alnum, - _ . and /
+        const allowed = /^[A-Za-z0-9\-._\/]+$/;
+        if (cleaned === '') { return '';} // empty subpath is acceptable
+        if (!allowed.test(cleaned)) { return null; }
+        if (cleaned.length > 1000) { return null; }
+        return cleaned;
+    } catch (e) { return null; }
 }
 
 // Modal focus-trap & restore helpers
@@ -448,7 +520,7 @@ function renderFileList(state) {
                         if (isExpanded) { expandedPaths.add(fullPath); }
                         else { expandedPaths.delete(fullPath); }
                         // persist array form into store
-                        try { store.setState({ expandedPaths: Array.from(expandedPaths) }); } catch (e) {}
+                        try { store.setExpandedPaths && store.setExpandedPaths(Array.from(expandedPaths)); } catch (e) {}
                     } catch (e) {}
                 };
                 name.addEventListener('click', toggleExpand);
@@ -511,18 +583,16 @@ window.addEventListener('message', event => {
         try {
             const s = msg.state || {};
             if (Array.isArray(s.selectedFiles) && s.selectedFiles.length > 0) {
-                pendingPersistedSelection = s.selectedFiles.slice();
-                try { store.setState({ pendingPersistedSelection: pendingPersistedSelection }); } catch (e) {}
+                const sel = s.selectedFiles.slice();
+                try { store.setPendingPersistedSelection && store.setPendingPersistedSelection(sel, typeof s.focusIndex === 'number' ? s.focusIndex : undefined); } catch (e) {}
             }
             if (s.focusIndex !== undefined && typeof s.focusIndex === 'number') {
-                pendingPersistedFocusIndex = s.focusIndex;
-                try { store.setState({ pendingPersistedFocusIndex: pendingPersistedFocusIndex }); } catch (e) {}
+                try { store.setPendingPersistedSelection && store.setPendingPersistedSelection(null, s.focusIndex); } catch (e) {}
             }
         } catch (e) { /* swallow */ }
     }
     if (msg.type === 'state') {
-        try { store.getState().setState ? store.getState().setState(msg.state || {}) : store.setState(msg.state || {}); } catch (e) { try { store.setState && store.setState(msg.state || {}); } catch (ex) {} }
-        debouncedRenderFileList();
+    try { store.setState && store.setState(msg.state || {}); } catch (e) {}
         try {
             const s = msg.state || {};
             if (typeof s.paused !== 'undefined') {
@@ -551,16 +621,18 @@ window.addEventListener('message', event => {
                 };
                 try { totalFiles = countLeaves(s.fileTree); } catch (e) { /* ignore counting errors */ }
             }
-            if (pendingPersistedSelection && totalFiles > 0) {
-                postAction('setSelection', { relPaths: pendingPersistedSelection });
-                try {
-                    const persist = { selectedFiles: pendingPersistedSelection, focusIndex: pendingPersistedFocusIndex };
-                                    try { vscode.postMessage(sanitizePayload({ type: 'persistState', state: persist })); } catch (e) { console.warn('persistState postMessage failed', e); }
-                } catch (e) {}
-                pendingPersistedSelection = null;
-                pendingPersistedFocusIndex = undefined;
-                try { store.setState({ pendingPersistedSelection: null, pendingPersistedFocusIndex: undefined }); } catch (e) {}
-            }
+            try {
+                const stPending = store.getState ? store.getState().pendingPersistedSelection : pendingPersistedSelection;
+                const stPendingIdx = store.getState ? store.getState().pendingPersistedFocusIndex : pendingPersistedFocusIndex;
+                if (stPending && stPending.length > 0 && totalFiles > 0) {
+                    postAction('setSelection', { relPaths: stPending });
+                    try {
+                        const persist = { selectedFiles: stPending, focusIndex: stPendingIdx };
+                        try { vscode.postMessage(sanitizePayload({ type: 'persistState', state: persist })); } catch (e) { console.warn('persistState postMessage failed', e); }
+                    } catch (e) {}
+                    try { store.setPendingPersistedSelection && store.setPendingPersistedSelection(null, undefined); } catch (e) {}
+                }
+            } catch (e) { /* swallow */ }
         } catch (e) { /* swallow */ }
         try {
             const s = msg.state || {};
@@ -582,17 +654,10 @@ window.addEventListener('message', event => {
             }
         } catch (e) {}
     } else if (msg.type === 'previewDelta') {
-        // This is the core of the fix. We now call renderFileList from here.
-    renderPreviewDelta(msg.delta); // Update the chips
+        // Update the chips
+        renderPreviewDelta(msg.delta);
         if (msg.delta && msg.delta.fileTree) {
-            // Construct a minimal state object for the rendering function using fileTree/selectedPaths
-            const syntheticState = {
-                fileTree: msg.delta.fileTree,
-                selectedPaths: Array.isArray(msg.delta.selectedPaths) ? msg.delta.selectedPaths : [],
-                minimalSelectedTreeLines: msg.delta.minimalSelectedTreeLines
-            };
-            try { store.getState().setState ? store.getState().setState(syntheticState) : store.setState(syntheticState); } catch (e) { try { store.setState && store.setState(syntheticState); } catch (ex) {} }
-            debouncedRenderFileList(); // Re-render the file list (debounced)
+            try { store.setFileTree && store.setFileTree(msg.delta.fileTree, Array.isArray(msg.delta.selectedPaths) ? msg.delta.selectedPaths : []); } catch (e) {}
         }
     } else if (msg.type === 'ingestPreview') {
         const previewRoot = nodes.ingestPreviewRoot || document.getElementById('ingest-preview');
@@ -1011,7 +1076,7 @@ window.onload = function() {
                         } catch (e) { /* ignore per-node errors */ }
                     });
                     // persist expandedPaths to store after batch update
-                    try { store.setState({ expandedPaths: Array.from(expandedPaths) }); } catch (e) {}
+                    try { store.setExpandedPaths && store.setExpandedPaths(Array.from(expandedPaths)); } catch (e) {}
                 } catch (e) { /* swallow DOM errors */ }
                 // Also notify the host so provider/tree state stays in sync
                 postAction(action);
@@ -1020,7 +1085,7 @@ window.onload = function() {
             if (action === 'togglePause') {
                 paused = !paused;
                 try { window.localStorage.setItem('cbd_paused', paused ? '1' : '0'); } catch (e) {}
-                try { store.setState({ paused: paused }); } catch (e) {}
+                try { store.togglePause && store.togglePause(paused); } catch (e) {}
                 updatePauseButton();
                 postAction(paused ? 'pauseScan' : 'resumeScan');
                 return;
@@ -1128,7 +1193,7 @@ window.onload = function() {
                 ev.preventDefault(); ev.stopPropagation();
                 paused = !paused;
                 try { window.localStorage.setItem('cbd_paused', paused ? '1' : '0'); } catch (e) {}
-                try { store.setState({ paused: paused }); } catch (e) {}
+                try { store.togglePause && store.togglePause(paused); } catch (e) {}
                 updatePauseButton();
                 postAction(paused ? 'pauseScan' : 'resumeScan');
             });
@@ -1218,9 +1283,9 @@ window.onload = function() {
     document.getElementById('ingest-cancel')?.addEventListener('click', () => { const m = document.getElementById('ingestModal'); if (m) { closeModal(m); } });
     // Two-stage ingest flow: Load repo first, then start ingest on the loaded repo
     document.getElementById('ingest-load-repo')?.addEventListener('click', () => {
-            const repo = (document.getElementById('ingest-repo') || {}).value || '';
-            const ref = (document.getElementById('ingest-ref') || {}).value || '';
-            const subpath = (document.getElementById('ingest-subpath') || {}).value || '';
+        const repoRaw = (document.getElementById('ingest-repo') || {}).value || '';
+        const refRaw = (document.getElementById('ingest-ref') || {}).value || '';
+        const subpathRaw = (document.getElementById('ingest-subpath') || {}).value || '';
             const includeSubmodules = !!(document.getElementById('ingest-submodules') && document.getElementById('ingest-submodules').checked);
             if (!repo || repo.trim().length === 0) { showToast('Please enter a repo URL or owner/repo slug', 'error'); return; }
             // Normalize common URL/SSH forms to the owner/repo slug used by the host.
@@ -1262,8 +1327,30 @@ window.onload = function() {
         if (nodes.ingestPreviewRoot) { nodes.ingestPreviewRoot.classList.add('loading'); }
         if (nodes.ingestSpinner) { nodes.ingestSpinner.hidden = false; nodes.ingestSpinner.removeAttribute('aria-hidden'); }
         if (nodes.ingestPreviewText) { nodes.ingestPreviewText.textContent = 'Cloning repository...'; nodes.ingestPreviewText.classList.add('loading-placeholder'); }
-        // send loadRemoteRepo action to host
-        postAction('loadRemoteRepo', { repo: normalized, ref: ref.trim() || undefined, subpath: subpath.trim() || undefined, includeSubmodules });
+        // Client-side sanitize the fields as a defence-in-depth measure before sending
+        const sanitizedRepo = sanitizeRepoInput(normalized);
+        const sanitizedRef = sanitizeRefName(refRaw);
+        const sanitizedSubpath = sanitizeSubpath(subpathRaw);
+        if (!sanitizedRepo) {
+            showToast('Repository input contains disallowed characters and was rejected.', 'error');
+            if (nodes.ingestPreviewRoot) { nodes.ingestPreviewRoot.classList.remove('loading'); }
+            if (nodes.ingestSpinner) { nodes.ingestSpinner.hidden = true; nodes.ingestSpinner.setAttribute('aria-hidden', 'true'); }
+            return;
+        }
+        if (sanitizedRef === null) {
+            showToast('Ref input contains disallowed characters and was rejected.', 'error');
+            if (nodes.ingestPreviewRoot) { nodes.ingestPreviewRoot.classList.remove('loading'); }
+            if (nodes.ingestSpinner) { nodes.ingestSpinner.hidden = true; nodes.ingestSpinner.setAttribute('aria-hidden', 'true'); }
+            return;
+        }
+        if (sanitizedSubpath === null) {
+            showToast('Subpath input contains disallowed characters and was rejected.', 'error');
+            if (nodes.ingestPreviewRoot) { nodes.ingestPreviewRoot.classList.remove('loading'); }
+            if (nodes.ingestSpinner) { nodes.ingestSpinner.hidden = true; nodes.ingestSpinner.setAttribute('aria-hidden', 'true'); }
+            return;
+        }
+        // send loadRemoteRepo action to host with sanitized values
+        postAction('loadRemoteRepo', { repo: sanitizedRepo, ref: sanitizedRef || undefined, subpath: sanitizedSubpath || undefined, includeSubmodules });
     });
 
     // Start ingest of a previously-loaded repository. The host should have returned

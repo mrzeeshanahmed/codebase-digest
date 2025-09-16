@@ -46,20 +46,21 @@ export async function generateDigest(
     treeProvider?: CodebaseDigestTreeProvider,
     overrides?: Record<string, any>
 ): Promise<DigestResult | undefined> {
-    // Acquire per-workspace mutex so multiple generateDigest invocations don't run
-    // concurrently (user may click generate repeatedly or webview may trigger twice).
+    // Prepare workspace context and lazy mutex (do not lock yet)
     const workspacePath = workspaceFolder.uri.fsPath;
     const _mutex = getMutex(workspacePath);
     let _release: (() => void) | undefined;
-    try {
-        _release = await _mutex.lock();
-        const services = workspaceManager.getBundleForFolder(workspaceFolder);
-        if (!services) {
-            // Log and show error consistently, then broadcast to any webviews
-            errorsUtil.showUserError('No services found for workspace folder.', workspaceFolder.uri.fsPath);
-            try { broadcastGenerationResult({ error: 'No services found for workspace folder.' }, workspacePath); } catch (e) { try { console.warn('digestProvider: broadcastGenerationResult failed', e); } catch {} }
-            return;
-        }
+
+    // Perform initial checks that may throw or prompt the user BEFORE acquiring the mutex.
+    // This prevents the mutex being held across user prompts or early failures which
+    // could otherwise cause deadlocks if an exception occurs before the release.
+    const services = workspaceManager.getBundleForFolder(workspaceFolder);
+    if (!services) {
+        // Log and show error consistently, then broadcast to any webviews
+        errorsUtil.showUserError('No services found for workspace folder.', workspaceFolder.uri.fsPath);
+        try { broadcastGenerationResult({ error: 'No services found for workspace folder.' }, workspacePath); } catch (e) { try { console.warn('digestProvider: broadcastGenerationResult failed', e); } catch {} }
+        return;
+    }
     // Read workspace configuration via centralized ConfigurationService (validated/coerced)
     const config: DigestConfig = ConfigurationService.getWorkspaceConfig(workspaceFolder, services.diagnostics);
     // runtimeConfig merges saved workspace settings with transient overrides for this run only
@@ -121,12 +122,19 @@ export async function generateDigest(
             return;
         }
     }
-    // Emit generation start (indeterminate until generator provides progress)
-    emitProgress({ op: 'generate', mode: 'start', determinate: false, message: 'Generating digest...' });
-    files.sort((a: FileNode, b: FileNode) => a.relPath.localeCompare(b.relPath));
-    // Step 2: compute cache key (after remoteMeta is available)
-    // Use runtimeConfig so transient overrides are included in the cache key
-    const cacheKey = cacheService.computeKey({
+    // At this point initial checks and any user prompts are complete. Acquire the
+    // per-workspace mutex so the subsequent generation, write and cache steps run
+    // exclusively for this workspace. The mutex is released in the finally below
+    // to guarantee it is not leaked if an error occurs during generation.
+    try {
+        _release = await _mutex.lock();
+
+        // Emit generation start (indeterminate until generator provides progress)
+        emitProgress({ op: 'generate', mode: 'start', determinate: false, message: 'Generating digest...' });
+        files.sort((a: FileNode, b: FileNode) => a.relPath.localeCompare(b.relPath));
+        // Step 2: compute cache key (after remoteMeta is available)
+        // Use runtimeConfig so transient overrides are included in the cache key
+        const cacheKey = cacheService.computeKey({
         sourceType: runtimeConfig.remoteRepo ? 'remote' : 'local',
         remoteRepo: runtimeConfig.remoteRepo || '',
         commitSha: remoteMeta?.resolved?.sha || '',
@@ -377,14 +385,14 @@ export async function generateDigest(
         redactionApplied: !!digestRec.redactionApplied,
     };
 
-    // Broadcast generation result to any open panels or sidebar views so webviews can react (e.g., show redaction toast)
-    try {
-        broadcastGenerationResult(finalResult, workspaceFolder.uri.fsPath);
-    } catch (e) {
-        try { diagnostics.warn && diagnostics.warn('Failed to broadcast generation result'); } catch {}
-    }
+        // Broadcast generation result to any open panels or sidebar views so webviews can react (e.g., show redaction toast)
+        try {
+            broadcastGenerationResult(finalResult, workspaceFolder.uri.fsPath);
+        } catch (e) {
+            try { diagnostics.warn && diagnostics.warn('Failed to broadcast generation result'); } catch {}
+        }
 
-    return finalResult;
+        return finalResult;
     } finally {
         try { if (typeof _release === 'function') { _release(); } } catch (e) { }
     }

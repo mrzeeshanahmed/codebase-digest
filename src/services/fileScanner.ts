@@ -111,8 +111,10 @@ export class FileScanner {
                     if (!includePatterns || includePatterns.length === 0) { return false; }
                     // Test each include pattern against a representative descendant path
                     // under this directory. Use two variants to catch single-level and multi-level matches.
-                    const sample1 = dirKey ? `${dirKey}/__includetest__` : '__includetest__';
-                    const sample2 = dirKey ? `${dirKey}/__includetest__/x` : '__includetest__/x';
+                    // Use posix join for pattern tests because include/exclude patterns
+                    // are evaluated against posix-style rel paths (forward slashes).
+                    const sample1 = dirKey ? [dirKey, '__includetest__'].join('/') : '__includetest__';
+                    const sample2 = dirKey ? [dirKey, '__includetest__', 'x'].join('/') : '__includetest__/x';
                     for (const p of includePatterns) {
                         try {
                             if (typeof p !== 'string') { continue; }
@@ -128,8 +130,8 @@ export class FileScanner {
             };
 
             if (matchesExcludePattern) {
-                const dirKey = String(relPosix || '').replace(/^\/+|\/+$/g, '');
-                if (!includeTargetsDescendant(dirKey)) { stats.skippedByIgnore++; return true; }
+                        const dirKey = String(relPosix || '').replace(/^\/+|\/+$/g, '');
+                        if (!includeTargetsDescendant(dirKey)) { stats.skippedByIgnore++; return true; }
             }
             if (gitignoreIgnored) {
                 try {
@@ -139,7 +141,8 @@ export class FileScanner {
                         const nn = String(n || '').replace(/^\/+|\/+$/g, '');
                         if (!nn) { return false; }
                         if (dirKey === '') { return true; } // conservatively assume root may be affected
-                        return nn === dirKey || nn.startsWith(dirKey + '/');
+                        const dirPrefix = dirKey.endsWith('/') ? dirKey : dirKey + '/';
+                        return nn === dirKey || nn.startsWith(dirPrefix);
                     });
                     // If explicit gitignore negations don't reference this dir, also check includePatterns
                     const includeTargets = includeTargetsDescendant(dirKey);
