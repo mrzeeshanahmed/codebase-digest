@@ -5,18 +5,19 @@ import { onProgress } from './eventBus';
 import { setWebviewHtml, wireWebviewMessages } from './webviewHelpers';
 import { ConfigurationService } from '../services/configurationService';
 import { Diagnostics } from '../utils/diagnostics';
+import { WebviewCommands, WebviewCommand } from '../types/webview';
 const diagnostics = new Diagnostics('debug', 'Code Ingest');
 
 // Small typed payload shapes sent to the webview. Keep these minimal and
 // only include primitives and small arrays to avoid sending large or sensitive
 // objects accidentally.
 interface ProgressEventPayload {
-    type: 'progress';
+    type: WebviewCommand;
     event: { op?: string; mode?: string; [k: string]: unknown };
 }
 
 interface PreviewDeltaPayload {
-    type: 'previewDelta';
+    type: WebviewCommand;
     delta: {
         selectedCount?: number;
         totalFiles?: number;
@@ -29,12 +30,12 @@ interface PreviewDeltaPayload {
 }
 
 interface StatePayload {
-    type: 'state';
+    type: WebviewCommand;
     state: unknown;
 }
 
 interface DiagnosticPayload {
-    type: 'diagnostic';
+    type: WebviewCommand;
     level: 'error' | 'warning' | 'info';
     message: string;
 }
@@ -117,7 +118,7 @@ export class CodebaseDigestPanel {
                 const rawOp = (e && typeof e === 'object') ? (e as Record<string, unknown>)['op'] : undefined;
                 const rawMode = (e && typeof e === 'object') ? (e as Record<string, unknown>)['mode'] : undefined;
                 const evt = { op: typeof rawOp === 'string' ? rawOp : undefined, mode: typeof rawMode === 'string' ? rawMode : undefined };
-                const payload: ProgressEventPayload = { type: 'progress', event: evt };
+                const payload: ProgressEventPayload = { type: WebviewCommands.progress, event: evt };
                 this.panel.webview.postMessage(payload);
             } catch (err) { try { diagnostics.warn('postMessage progress failed', err); } catch {} }
         }
@@ -157,7 +158,7 @@ export class CodebaseDigestPanel {
                 const thresholdsDefault = { maxFiles: 25000, maxTotalSizeBytes: 536870912, tokenLimit: 32000 };
                 const thresholds = (cfgSnapshot as any).thresholds || {};
                 const payload = {
-                    type: 'config',
+                    type: WebviewCommands.config,
                     folderPath: this.folderPath,
                     settings: {
                         respectGitignore: cfgSnapshot.respectGitignore,
@@ -204,7 +205,7 @@ export class CodebaseDigestPanel {
     private postPreviewState() {
         if (!this.panel) { return; }
         const preview = this.treeProvider.getPreviewData();
-    const statePayload: StatePayload = { type: 'state', state: preview };
+        const statePayload: StatePayload = { type: WebviewCommands.state, state: preview } as StatePayload;
     this.panel.webview.postMessage(statePayload);
     }
 
@@ -220,8 +221,8 @@ export class CodebaseDigestPanel {
             fileTree: preview.fileTree,
             selectedPaths: Array.isArray(preview.selectedPaths) ? (preview.selectedPaths as unknown[]).map((p: unknown) => String(p)) : []
         };
-        const payload: PreviewDeltaPayload = { type: 'previewDelta', delta };
-        this.panel.webview.postMessage(payload);
+    const payload: PreviewDeltaPayload = { type: WebviewCommands.previewDelta, delta } as PreviewDeltaPayload;
+    this.panel.webview.postMessage(payload);
     }
     private setHtml(webview: vscode.Webview) {
     // Delegate to shared helper so panel and view rendering stay consistent
@@ -406,7 +407,7 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                         fileTree: preview.fileTree,
                         selectedPaths: Array.isArray(preview.selectedPaths) ? (preview.selectedPaths as unknown[]).map((p: unknown) => String(p)) : []
                     };
-                    const payload: PreviewDeltaPayload = { type: 'previewDelta', delta };
+                    const payload: PreviewDeltaPayload = { type: WebviewCommands.previewDelta, delta } as PreviewDeltaPayload;
                     webviewView.webview.postMessage(payload);
                 } catch (e) { try { console.warn('codebasePanel: post previewDelta failed', e); } catch {} }
 
@@ -428,7 +429,7 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                                     fileTree: preview.fileTree,
                                     selectedPaths: Array.isArray(preview.selectedPaths) ? (preview.selectedPaths as unknown[]).map((p: unknown) => String(p)) : []
                                 };
-                                const payload: PreviewDeltaPayload = { type: 'previewDelta', delta };
+                                const payload: PreviewDeltaPayload = { type: WebviewCommands.previewDelta, delta } as PreviewDeltaPayload;
                                 webviewView.webview.postMessage(payload);
                             } catch (inner) { /* ignore */ }
                         }
@@ -453,7 +454,7 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                             fileTree: preview.fileTree,
                             selectedPaths: Array.isArray(preview.selectedPaths) ? (preview.selectedPaths as unknown[]).map((p: unknown) => String(p)) : []
                         };
-                        const payload: PreviewDeltaPayload = { type: 'previewDelta', delta };
+                        const payload: PreviewDeltaPayload = { type: WebviewCommands.previewDelta, delta } as PreviewDeltaPayload;
                         webviewView.webview.postMessage(payload);
                     } catch (e) { /* ignore */ }
                 }, 5000);

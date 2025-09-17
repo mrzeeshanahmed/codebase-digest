@@ -2,8 +2,34 @@
   'use strict';
   if (typeof window === 'undefined') { return; }
 
-  // Consolidated single registration for 'previewDelta' to avoid duplicate
-  // registrations which caused nondeterministic test behavior.
+  /**
+   * Handle `previewDelta` messages from the extension host.
+   *
+   * Expected message shape:
+   * {
+   *   type: 'previewDelta',
+   *   delta: {
+   *     // optional fileTree object to replace current tree
+   *     fileTree?: Object,
+   *     // optional array of selectedPaths to apply with the tree
+   *     selectedPaths?: string[],
+   *     // quick preview properties such as tokenEstimate, selectedCount, etc.
+   *   }
+   * }
+   *
+   * Side effects:
+   * - writes `fileTree` and `selectedPaths` to `window.store` via `setFileTree` if present
+   * - writes the compact delta to `window.store.setPreviewDelta` so subscribers react
+   * - calls optional UI helpers `renderPreviewDelta` and `renderTree` for immediate feedback
+   *
+   * The handler registers itself on `window.__registerHandler`, `window.__registeredHandlers`
+   * and `window.__commandRegistry` for compatibility with lightweight test harnesses.
+   *
+   * The function is defensive: it checks for the presence of `window.store` and helper
+   * functions and logs warnings on failures without throwing.
+   *
+   * @param {{type?:string, delta?:Object}} msg
+   */
   var previewDeltaHandler = function (msg) {
     try {
       const d = msg && msg.delta ? msg.delta : {};
@@ -30,31 +56,33 @@
   };
 
   // Register using the standard hook if available
+  // Prefer centralized command names if available, fall back to literal.
+  var cmd = (window.COMMANDS && window.COMMANDS.previewDelta) ? window.COMMANDS.previewDelta : (window.__commandNames && window.__commandNames.previewDelta) ? window.__commandNames.previewDelta : 'previewDelta';
   if (typeof window.__registerHandler === 'function') {
-    try { window.__registerHandler('previewDelta', previewDeltaHandler); } catch (e) { /* ignore */ }
+    try { window.__registerHandler(cmd, previewDeltaHandler); } catch (e) { /* ignore */ }
   }
 
 
   // Also be friendly to lightweight test harnesses that expect a simple map
   // on window.__registeredHandlers and to the commandRegistry which uses
   // window.__commandRegistry.
-  try {
-    if (!window.__registeredHandlers) { window.__registeredHandlers = {}; }
     try {
-      Object.defineProperty(window.__registeredHandlers, 'previewDelta', { value: previewDeltaHandler, writable: false, configurable: true });
-    } catch (e) {
-      window.__registeredHandlers['previewDelta'] = previewDeltaHandler;
-    }
+      if (!window.__registeredHandlers) { window.__registeredHandlers = {}; }
+      try {
+        Object.defineProperty(window.__registeredHandlers, cmd, { value: previewDeltaHandler, writable: false, configurable: true });
+      } catch (e) {
+        window.__registeredHandlers[cmd] = previewDeltaHandler;
+      }
   // attached to __registeredHandlers
   } catch (e) { /* ignore */ }
 
-  try {
-    if (!window.__commandRegistry) { window.__commandRegistry = {}; }
     try {
-      Object.defineProperty(window.__commandRegistry, 'previewDelta', { value: previewDeltaHandler, writable: false, configurable: true });
-    } catch (e) {
-      window.__commandRegistry['previewDelta'] = previewDeltaHandler;
-    }
+      if (!window.__commandRegistry) { window.__commandRegistry = {}; }
+      try {
+        Object.defineProperty(window.__commandRegistry, cmd, { value: previewDeltaHandler, writable: false, configurable: true });
+      } catch (e) {
+        window.__commandRegistry[cmd] = previewDeltaHandler;
+      }
   // attached to __commandRegistry
   } catch (e) { /* ignore */ }
 })();

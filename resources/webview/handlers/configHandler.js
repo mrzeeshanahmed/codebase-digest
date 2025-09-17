@@ -2,6 +2,19 @@
   'use strict';
   if (typeof window === 'undefined') { return; }
 
+  /**
+   * Handle `config` messages delivering workspace or folder settings.
+   *
+   * Expected message shape:
+   * { type: 'config', folderPath?: string, workspaceFolder?: string, settings: Object }
+   *
+   * Side effects:
+   * - updates `window.currentFolderPath` for context
+   * - writes `settings` into `window.store` via `setState({ settings })`
+   * - optionally calls UI helpers to populate settings and active preset UI
+   *
+   * @param {{type?:string, folderPath?:string, workspaceFolder?:string, settings?:Object}} msg
+   */
   var configHandler = function (msg) {
     try {
       try { window.currentFolderPath = msg.folderPath || msg.workspaceFolder || window.currentFolderPath; } catch (e) {}
@@ -21,7 +34,8 @@
     } catch (e) { console.warn('configHandler error', e); }
   };
 
-  if (typeof window.__registerHandler === 'function') { try { window.__registerHandler('config', configHandler); } catch (e) {} }
-  try { if (!window.__registeredHandlers) { window.__registeredHandlers = {}; } window.__registeredHandlers['config'] = configHandler; } catch (e) {}
-  try { if (!window.__commandRegistry) { window.__commandRegistry = {}; } window.__commandRegistry['config'] = configHandler; } catch (e) {}
+  var cmd = (window.COMMANDS && window.COMMANDS.config) ? window.COMMANDS.config : (window.__commandNames && window.__commandNames.config) ? window.__commandNames.config : 'config';
+  if (typeof window.__registerHandler === 'function') { try { window.__registerHandler(cmd, configHandler); } catch (e) {} }
+  try { if (!window.__registeredHandlers) { window.__registeredHandlers = {}; } window.__registeredHandlers[cmd] = configHandler; } catch (e) {}
+  try { if (!window.__commandRegistry) { window.__commandRegistry = {}; } window.__commandRegistry[cmd] = configHandler; } catch (e) {}
 })();

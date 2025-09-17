@@ -2,6 +2,18 @@
   'use strict';
   if (typeof window === 'undefined') { return; }
 
+  /**
+   * Handle `ingestError` messages reported by the host when ingest fails.
+   *
+   * Expected message shape:
+   * { type: 'ingestError', error: string }
+   *
+   * Side effects:
+   * - appends the error message to `window.store.errors` via `addError`
+   * - attempts to clear the ingest preview UI (spinner/text) and show a toast
+   *
+   * @param {{type?:string, error?:string}} msg
+   */
   var ingestErrorHandler = function (msg) {
     try {
       // Push error into store; subscribers may show toast / update ingest UI
@@ -22,7 +34,8 @@
     } catch (e) { console.warn('ingestErrorHandler error', e); }
   };
 
-  if (typeof window.__registerHandler === 'function') { try { window.__registerHandler('ingestError', ingestErrorHandler); } catch (e) {} }
-  try { if (!window.__registeredHandlers) { window.__registeredHandlers = {}; } window.__registeredHandlers['ingestError'] = ingestErrorHandler; } catch (e) {}
-  try { if (!window.__commandRegistry) { window.__commandRegistry = {}; } window.__commandRegistry['ingestError'] = ingestErrorHandler; } catch (e) {}
+  var cmd = (window.COMMANDS && window.COMMANDS.ingestError) ? window.COMMANDS.ingestError : (window.__commandNames && window.__commandNames.ingestError) ? window.__commandNames.ingestError : 'ingestError';
+  if (typeof window.__registerHandler === 'function') { try { window.__registerHandler(cmd, ingestErrorHandler); } catch (e) {} }
+  try { if (!window.__registeredHandlers) { window.__registeredHandlers = {}; } window.__registeredHandlers[cmd] = ingestErrorHandler; } catch (e) {}
+  try { if (!window.__commandRegistry) { window.__commandRegistry = {}; } window.__commandRegistry[cmd] = ingestErrorHandler; } catch (e) {}
 })();

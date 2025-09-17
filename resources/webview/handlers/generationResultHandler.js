@@ -2,6 +2,19 @@
   'use strict';
   if (typeof window === 'undefined') { return; }
 
+  /**
+   * Handle `generationResult` messages produced after a digest generation run.
+   *
+   * Expected message shape:
+   * { type: 'generationResult', result: { redactionApplied?: boolean, error?: string, ... } }
+   *
+   * Side effects:
+   * - writes `lastGenerationResult` into the store (so subscribers can show warnings)
+   * - appends errors to `store.errors` and shows toasts as appropriate
+   * - clears transient UI override flags used for disabling redaction
+   *
+   * @param {{type?:string, result?:Object}} msg
+   */
   var generationResultHandler = function (msg) {
     try {
       const res = msg && msg.result ? msg.result : {};
@@ -28,7 +41,8 @@
     } catch (e) { console.warn('generationResultHandler error', e); }
   };
 
-  if (typeof window.__registerHandler === 'function') { try { window.__registerHandler('generationResult', generationResultHandler); } catch (e) {} }
-  try { if (!window.__registeredHandlers) { window.__registeredHandlers = {}; } window.__registeredHandlers['generationResult'] = generationResultHandler; } catch (e) {}
-  try { if (!window.__commandRegistry) { window.__commandRegistry = {}; } window.__commandRegistry['generationResult'] = generationResultHandler; } catch (e) {}
+  var cmd = (window.COMMANDS && window.COMMANDS.generationResult) ? window.COMMANDS.generationResult : (window.__commandNames && window.__commandNames.generationResult) ? window.__commandNames.generationResult : 'generationResult';
+  if (typeof window.__registerHandler === 'function') { try { window.__registerHandler(cmd, generationResultHandler); } catch (e) {} }
+  try { if (!window.__registeredHandlers) { window.__registeredHandlers = {}; } window.__registeredHandlers[cmd] = generationResultHandler; } catch (e) {}
+  try { if (!window.__commandRegistry) { window.__commandRegistry = {}; } window.__commandRegistry[cmd] = generationResultHandler; } catch (e) {}
 })();

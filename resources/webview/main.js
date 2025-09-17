@@ -671,10 +671,17 @@ const MODEL_CONTEXT_MAP = Object.freeze({
 window.addEventListener('message', event => {
     const msg = event.data;
     try {
-        // If a handler is registered for this message type, prefer it.
-        if (window.__commandRegistry && msg && msg.type && typeof window.__commandRegistry[msg.type] === 'function') {
-            try { window.__commandRegistry[msg.type](msg); } catch (e) { console.warn('commandRegistry handler error', e); }
-            // allow handlers to fully own the message; if they want fallback they can call into legacy functions
+        // Prefer a handler registered under the centralized command name map when present.
+        // This allows migrating literal strings to a single source of truth while remaining
+        // backwards compatible with the existing registry maps.
+        const cmdName = (window.__commandNames && msg && msg.type && window.__commandNames[msg.type]) ? window.__commandNames[msg.type] : (msg && msg.type);
+        if (cmdName && window.__commandRegistry && typeof window.__commandRegistry[cmdName] === 'function') {
+            try { window.__commandRegistry[cmdName](msg); } catch (e) { console.warn('commandRegistry handler error', e); }
+            return;
+        }
+        // Fallback: if no registry entry found by mapped name, try legacy direct lookup using msg.type
+        if (msg && msg.type && window.__commandRegistry && typeof window.__commandRegistry[msg.type] === 'function') {
+            try { window.__commandRegistry[msg.type](msg); } catch (e) { console.warn('commandRegistry handler error (legacy)', e); }
             return;
         }
     } catch (e) { /* swallow dispatch errors and fall back to legacy handling below */ }

@@ -2,6 +2,20 @@
   'use strict';
   if (typeof window === 'undefined') { return; }
 
+  /**
+   * Handle a full `state` snapshot message from the extension host.
+   *
+   * Expected message shape:
+   * { type: 'state', state: { ... } }
+   *
+   * Side effects:
+   * - writes the snapshot into `window.store` using `setState` (merge semantics)
+   * - updates UI pause controls via `updatePauseButton` if present
+   *
+   * The handler is defensive and will not throw when store or helpers are absent.
+   *
+   * @param {{type?:string, state?:Object}} msg
+   */
   var stateHandler = function (msg) {
     try {
       const s = msg && msg.state ? msg.state : {};
@@ -17,9 +31,10 @@
     } catch (e) { console.warn('stateHandler error', e); }
   };
 
+  var cmd = (window.COMMANDS && window.COMMANDS.state) ? window.COMMANDS.state : (window.__commandNames && window.__commandNames.state) ? window.__commandNames.state : 'state';
   if (typeof window.__registerHandler === 'function') {
-    try { window.__registerHandler('state', stateHandler); } catch (e) { }
+    try { window.__registerHandler(cmd, stateHandler); } catch (e) { }
   }
-  try { if (!window.__registeredHandlers) { window.__registeredHandlers = {}; } window.__registeredHandlers['state'] = stateHandler; } catch (e) {}
-  try { if (!window.__commandRegistry) { window.__commandRegistry = {}; } window.__commandRegistry['state'] = stateHandler; } catch (e) {}
+  try { if (!window.__registeredHandlers) { window.__registeredHandlers = {}; } window.__registeredHandlers[cmd] = stateHandler; } catch (e) {}
+  try { if (!window.__commandRegistry) { window.__commandRegistry = {}; } window.__commandRegistry[cmd] = stateHandler; } catch (e) {}
 })();

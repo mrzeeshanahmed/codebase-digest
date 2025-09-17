@@ -2,6 +2,31 @@
   'use strict';
   if (typeof window === 'undefined') { return; }
 
+  /**
+   * Handle `remoteRepoLoaded` messages emitted by the extension when a remote
+   * repository has been cloned/loaded to a temporary path for subsequent ingest.
+   *
+   * Expected message shape:
+   * {
+   *   type: 'remoteRepoLoaded',
+   *   payload: {
+   *     tmpPath?: string | null
+   *   }
+   * }
+   *
+   * Side effects:
+   * - writes `loadedRepoTmpPath` into the webview `window.store` (via setState)
+   *   so subscribers can update the ingest dialog/UI.
+   * - sets `window.loadedRepoTmpPath` as a transient holder for the loaded path.
+   * - performs small DOM updates for the ingest modal (preview text, hide/show
+   *   Load/Start buttons) when the relevant nodes are available.
+   * - on failure, shows a toast (if showToast is available).
+   *
+   * The handler is defensive: it checks for the presence of `window.store`, DOM
+   * nodes and helper functions and logs warnings instead of throwing.
+   *
+   * @param {{type?:string, payload?:{tmpPath?:string|null}}} msg
+   */
   var remoteRepoLoadedHandler = function (msg) {
     try {
       const payload = msg && msg.payload ? msg.payload : {};
@@ -25,7 +50,8 @@
     } catch (e) { console.warn('remoteRepoLoadedHandler error', e); }
   };
 
-  if (typeof window.__registerHandler === 'function') { try { window.__registerHandler('remoteRepoLoaded', remoteRepoLoadedHandler); } catch (e) {} }
-  try { if (!window.__registeredHandlers) { window.__registeredHandlers = {}; } window.__registeredHandlers['remoteRepoLoaded'] = remoteRepoLoadedHandler; } catch (e) {}
-  try { if (!window.__commandRegistry) { window.__commandRegistry = {}; } window.__commandRegistry['remoteRepoLoaded'] = remoteRepoLoadedHandler; } catch (e) {}
+  var cmd = (window.COMMANDS && window.COMMANDS.remoteRepoLoaded) ? window.COMMANDS.remoteRepoLoaded : (window.__commandNames && window.__commandNames.remoteRepoLoaded) ? window.__commandNames.remoteRepoLoaded : 'remoteRepoLoaded';
+  if (typeof window.__registerHandler === 'function') { try { window.__registerHandler(cmd, remoteRepoLoadedHandler); } catch (e) {} }
+  try { if (!window.__registeredHandlers) { window.__registeredHandlers = {}; } window.__registeredHandlers[cmd] = remoteRepoLoadedHandler; } catch (e) {}
+  try { if (!window.__commandRegistry) { window.__commandRegistry = {}; } window.__commandRegistry[cmd] = remoteRepoLoadedHandler; } catch (e) {}
 })();

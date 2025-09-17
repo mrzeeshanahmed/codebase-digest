@@ -2,6 +2,19 @@
   'use strict';
   if (typeof window === 'undefined') { return; }
 
+  /**
+   * Handle `ingestPreview` messages containing a richer preview payload used
+   * by the ingest modal or preview panel.
+   *
+   * Expected message shape:
+   * { type: 'ingestPreview', payload: { preview?: { summary?:string, tree?:string }, output?: any, ... } }
+   *
+   * Side effects:
+   * - writes the payload to `window.store.setPreview` so subscribers can react
+   * - attempts minimal DOM updates (preview root, text and spinner) for immediate feedback
+   *
+   * @param {{type?:string, payload?:Object}} msg
+   */
   var ingestPreviewHandler = function (msg) {
     try {
       const payload = msg && msg.payload ? msg.payload : {};
@@ -25,7 +38,8 @@
     } catch (e) { console.warn('ingestPreviewHandler error', e); }
   };
 
-  if (typeof window.__registerHandler === 'function') { try { window.__registerHandler('ingestPreview', ingestPreviewHandler); } catch (e) {} }
-  try { if (!window.__registeredHandlers) { window.__registeredHandlers = {}; } window.__registeredHandlers['ingestPreview'] = ingestPreviewHandler; } catch (e) {}
-  try { if (!window.__commandRegistry) { window.__commandRegistry = {}; } window.__commandRegistry['ingestPreview'] = ingestPreviewHandler; } catch (e) {}
+  var cmd = (window.COMMANDS && window.COMMANDS.ingestPreview) ? window.COMMANDS.ingestPreview : (window.__commandNames && window.__commandNames.ingestPreview) ? window.__commandNames.ingestPreview : 'ingestPreview';
+  if (typeof window.__registerHandler === 'function') { try { window.__registerHandler(cmd, ingestPreviewHandler); } catch (e) {} }
+  try { if (!window.__registeredHandlers) { window.__registeredHandlers = {}; } window.__registeredHandlers[cmd] = ingestPreviewHandler; } catch (e) {}
+  try { if (!window.__commandRegistry) { window.__commandRegistry = {}; } window.__commandRegistry[cmd] = ingestPreviewHandler; } catch (e) {}
 })();

@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import { WebviewCommand, WebviewCommands } from '../types/webview';
 import { ConfigurationService } from '../services/configurationService';
 
 // Minimal HTML-escaping helper to avoid injecting unescaped paths into webview HTML.
@@ -16,7 +17,7 @@ function escapeHtml(s: string): string {
 // Lightweight typed shape for messages we accept from the webview. Additional
 // properties are permitted but treated as untrusted (unknown) until validated.
 export interface WebviewMessage {
-    type: string;
+    type: WebviewCommand | string;
     [key: string]: unknown;
 }
 
@@ -293,8 +294,8 @@ export function wireWebviewMessages(webview: vscode.Webview, treeProvider: unkno
         if (context) {
             const key = `codebaseDigest:webviewState:${folderPath || 'global'}`;
             const stored = context.workspaceState.get(key);
-            if (stored) {
-                try { webview.postMessage({ type: 'restoredState', state: stored }); } catch (e) { try { console.warn('webviewHelpers: post restoredState failed', stringifyError(e)); } catch {} }
+                if (stored) {
+                try { webview.postMessage({ type: WebviewCommands.restoredState, state: stored }); } catch (e) { try { console.warn('webviewHelpers: post restoredState failed', stringifyError(e)); } catch {} }
             }
         }
     } catch (e) { try { console.warn('webviewHelpers: workspaceState.update failed', stringifyError(e)); } catch {} }
@@ -375,7 +376,7 @@ export async function processWebviewMessage(msg: WebviewMessage, webview: vscode
             const maxFiles = typeof cfgSnapshot.maxFiles === 'number' ? cfgSnapshot.maxFiles : thresholds.maxFiles || thresholdsDefault.maxFiles;
             const maxTotalSizeBytes = typeof cfgSnapshot.maxTotalSizeBytes === 'number' ? cfgSnapshot.maxTotalSizeBytes : thresholds.maxTotalSizeBytes || thresholdsDefault.maxTotalSizeBytes;
             const tokenLimit = typeof cfgSnapshot.tokenLimit === 'number' ? cfgSnapshot.tokenLimit : thresholds.tokenLimit || thresholdsDefault.tokenLimit;
-            webview.postMessage({ type: 'config', folderPath: folder, settings: {
+            webview.postMessage({ type: WebviewCommands.config, folderPath: folder, settings: {
                 respectGitignore: cfgSnapshot.respectGitignore,
                 presets: Array.isArray((cfgSnapshot as any).presets) ? (cfgSnapshot as any).presets : [],
                 // include filterPresets for UI compatibility; fall back to presets if absent
@@ -440,7 +441,7 @@ export async function processWebviewMessage(msg: WebviewMessage, webview: vscode
                     try {
                         await safeExecuteCommand('codebaseDigest.pauseScan', targetFolder);
                     } catch (err) {
-                        try { webview.postMessage({ type: 'diagnostic', level: 'error', message: `pauseScan failed: ${stringifyError(err)}` }); } catch (e) { try { console.warn('webviewHelpers: post diagnostic failed', stringifyError(e)); } catch {} }
+                        try { webview.postMessage({ type: WebviewCommands.diagnostic, level: 'error', message: `pauseScan failed: ${stringifyError(err)}` }); } catch (e) { try { console.warn('webviewHelpers: post diagnostic failed', stringifyError(e)); } catch {} }
                         try { vscode.window.showErrorMessage(`pauseScan failed: ${stringifyError(err)}`); } catch (e) { /* swallow */ }
                         try { console.warn('webviewHelpers: pauseScan failed', stringifyError(err)); } catch (e) { /* swallow */ }
                     }
@@ -462,7 +463,7 @@ export async function processWebviewMessage(msg: WebviewMessage, webview: vscode
                     try {
                         // Read back using ConfigurationService snapshot for consistent shape when posting
                         const snapshot = ConfigurationService.getWorkspaceConfig(vscode.Uri.file(targetFolder || ''));
-                        try { webview.postMessage({ type: 'config', folderPath: targetFolder, settings: { filterPresets: (snapshot as any).filterPresets || [] } }); } catch (e) { try { console.warn('webviewHelpers: post config failed', stringifyError(e)); } catch {} }
+                        try { webview.postMessage({ type: WebviewCommands.config, folderPath: targetFolder, settings: { filterPresets: (snapshot as any).filterPresets || [] } }); } catch (e) { try { console.warn('webviewHelpers: post config failed', stringifyError(e)); } catch {} }
                     } catch (e) { try { console.warn('webviewHelpers: post config failed', stringifyError(e)); } catch {} }
                     return;
                 } catch (err) {
@@ -472,7 +473,7 @@ export async function processWebviewMessage(msg: WebviewMessage, webview: vscode
                         try {
                             await safeExecuteCommand('codebaseDigest.applyPreset', targetFolder, preset);
                         } catch (e) {
-                            try { webview.postMessage({ type: 'diagnostic', level: 'error', message: `applyPreset failed: ${stringifyError(e)}` }); } catch (ee) { try { console.warn('webviewHelpers: post diagnostic failed', stringifyError(ee)); } catch {} }
+                            try { webview.postMessage({ type: WebviewCommands.diagnostic, level: 'error', message: `applyPreset failed: ${stringifyError(e)}` }); } catch (ee) { try { console.warn('webviewHelpers: post diagnostic failed', stringifyError(ee)); } catch {} }
                             try { console.warn('webviewHelpers: applyPreset executeCommand failed', stringifyError(e)); } catch {}
                         }
                     } catch (err2) {
@@ -487,7 +488,7 @@ export async function processWebviewMessage(msg: WebviewMessage, webview: vscode
                 try {
                     await safeExecuteCommand('codebaseDigest.resumeScan', targetFolder);
                 } catch (err) {
-                    try { webview.postMessage({ type: 'diagnostic', level: 'error', message: `resumeScan failed: ${stringifyError(err)}` }); } catch (e) { try { console.warn('webviewHelpers: post diagnostic failed', stringifyError(e)); } catch {} }
+                    try { webview.postMessage({ type: WebviewCommands.diagnostic, level: 'error', message: `resumeScan failed: ${stringifyError(err)}` }); } catch (e) { try { console.warn('webviewHelpers: post diagnostic failed', stringifyError(e)); } catch {} }
                     try { vscode.window.showErrorMessage(`resumeScan failed: ${stringifyError(err)}`); } catch (e) { /* swallow */ }
                     try { console.warn('webviewHelpers: resumeScan failed', stringifyError(err)); } catch (e) { /* swallow */ }
                 }
@@ -514,9 +515,9 @@ export async function processWebviewMessage(msg: WebviewMessage, webview: vscode
                         const { safeExecuteCommand } = require('../utils/safeExecuteCommand');
                         try {
                             const result: any = await safeExecuteCommand('codebaseDigest.ingestRemoteRepoProgrammatic', params);
-                            try { webview.postMessage({ type: 'ingestPreview', payload: result }); } catch (e) { try { console.warn('webviewHelpers: post ingestPreview failed', stringifyError(e)); } catch {} }
+                            try { webview.postMessage({ type: WebviewCommands.ingestPreview, payload: result }); } catch (e) { try { console.warn('webviewHelpers: post ingestPreview failed', stringifyError(e)); } catch {} }
                         } catch (err) {
-                            try { webview.postMessage({ type: 'ingestError', error: String(err) }); } catch (e) { try { console.warn('webviewHelpers: post ingestError failed', stringifyError(e)); } catch {} }
+                            try { webview.postMessage({ type: WebviewCommands.ingestError, error: String(err) }); } catch (e) { try { console.warn('webviewHelpers: post ingestError failed', stringifyError(e)); } catch {} }
                         }
                     } catch (err) {
                         try { console.warn('webviewHelpers: ingestRemote require failed', stringifyError(err)); } catch {}
@@ -560,7 +561,7 @@ export async function processWebviewMessage(msg: WebviewMessage, webview: vscode
             } catch (e) { /* ignore provider errors */ }
             try {
                 const preview = tp && typeof tp.getPreviewData === 'function' ? tp.getPreviewData() : null;
-                if (preview) { webview.postMessage({ type: 'state', state: preview }); }
+                if (preview) { webview.postMessage({ type: WebviewCommands.state, state: preview }); }
             } catch (e) { try { console.warn('webviewHelpers: post state failed', stringifyError(e)); } catch {} }
             return;
         }
@@ -589,7 +590,7 @@ export async function processWebviewMessage(msg: WebviewMessage, webview: vscode
                     // getCommands(false) returns installed commands; includeInternal=false for performance
                     const registered = (await vscode.commands.getCommands(false));
                     if (!registered || !registered.includes(cmdId)) {
-                        try { webview.postMessage({ type: 'diagnostic', level: 'warning', message: `command '${cmdId}' not registered; action '${msg.actionType}' ignored.` }); } catch (e) { try { console.warn('webviewHelpers: post diagnostic failed', stringifyError(e)); } catch {} }
+                        try { webview.postMessage({ type: WebviewCommands.diagnostic, level: 'warning', message: `command '${cmdId}' not registered; action '${msg.actionType}' ignored.` }); } catch (e) { try { console.warn('webviewHelpers: post diagnostic failed', stringifyError(e)); } catch {} }
                         return;
                     }
                 }
@@ -613,7 +614,7 @@ export async function processWebviewMessage(msg: WebviewMessage, webview: vscode
                             try {
                                 await safeExecuteCommand(cmdId, targetFolder, overrides);
                             } catch (err) {
-                                try { webview.postMessage({ type: 'diagnostic', level: 'error', message: `${cmdId} failed: ${stringifyError(err)}` }); } catch (e) { try { console.warn('webviewHelpers: post diagnostic failed', stringifyError(e)); } catch {} }
+                                try { webview.postMessage({ type: WebviewCommands.diagnostic, level: 'error', message: `${cmdId} failed: ${stringifyError(err)}` }); } catch (e) { try { console.warn('webviewHelpers: post diagnostic failed', stringifyError(e)); } catch {} }
                                 try { vscode.window.showErrorMessage(`${cmdId} failed: ${stringifyError(err)}`); } catch (e) { /* swallow */ }
                                 try { console.warn('webviewHelpers: command failed', cmdId, stringifyError(err)); } catch {}
                             }
@@ -621,13 +622,13 @@ export async function processWebviewMessage(msg: WebviewMessage, webview: vscode
                             try {
                                 await safeExecuteCommand(cmdId, targetFolder);
                             } catch (err) {
-                                try { webview.postMessage({ type: 'diagnostic', level: 'error', message: `${cmdId} failed: ${stringifyError(err)}` }); } catch (e) { try { console.warn('webviewHelpers: post diagnostic failed', stringifyError(e)); } catch {} }
+                                try { webview.postMessage({ type: WebviewCommands.diagnostic, level: 'error', message: `${cmdId} failed: ${stringifyError(err)}` }); } catch (e) { try { console.warn('webviewHelpers: post diagnostic failed', stringifyError(e)); } catch {} }
                                 try { vscode.window.showErrorMessage(`${cmdId} failed: ${stringifyError(err)}`); } catch (e) { /* swallow */ }
                                 try { console.warn('webviewHelpers: command failed', cmdId, stringifyError(err)); } catch {}
                             }
                         }
                 } catch (err) {
-                    try { webview.postMessage({ type: 'diagnostic', level: 'error', message: `${cmdId} failed: ${stringifyError(err)}` }); } catch (e) { try { console.warn('webviewHelpers: post diagnostic failed', stringifyError(e)); } catch {} }
+                                try { webview.postMessage({ type: WebviewCommands.diagnostic, level: 'error', message: `${cmdId} failed: ${stringifyError(err)}` }); } catch (e) { try { console.warn('webviewHelpers: post diagnostic failed', stringifyError(e)); } catch {} }
                     try { vscode.window.showErrorMessage(`${cmdId} failed: ${stringifyError(err)}`); } catch (e) { /* swallow */ }
                 }
             } catch (e) {
