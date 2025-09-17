@@ -1,19 +1,27 @@
-// Minimal vanilla store helper compatible with a tiny subset of zustand's API
-function create(fn) {
-    let state = {};
-    const listeners = new Set();
-    const set = (updater) => {
-        const next = typeof updater === 'function' ? updater(state) : Object.assign({}, state, updater);
-        state = next;
-        listeners.forEach(l => { try { l(state); } catch (e) {} });
-    };
-    const getState = () => state;
-    const subscribe = (l) => { listeners.add(l); return () => listeners.delete(l); };
-    const api = fn((patch) => set((s) => Object.assign({}, s, patch)), getState, { set, subscribe });
-    return Object.assign(api || {}, { setState: (patch) => set(patch), getState, subscribe });
-}
-
+// If a store is provided globally (from store.js), reuse it. Otherwise, define a tiny create()
+// helper as a fallback for older deployments.
 const vscode = acquireVsCodeApi();
+if (typeof window !== 'undefined' && window.store) {
+    // prefer the preloaded store; expose getState/setState/subscribe helpers
+    var store = window.store;
+} else {
+    // Minimal vanilla store helper compatible with a tiny subset of zustand's API
+    function create(fn) {
+        let state = {};
+        const listeners = new Set();
+        const set = (updater) => {
+            const next = typeof updater === 'function' ? updater(state) : Object.assign({}, state, updater);
+            state = next;
+            listeners.forEach(l => { try { l(state); } catch (e) {} });
+        };
+        const getState = () => state;
+        const subscribe = (l) => { listeners.add(l); return () => listeners.delete(l); };
+        const api = fn((patch) => set((s) => Object.assign({}, s, patch)), getState, { set, subscribe });
+        return Object.assign(api || {}, { setState: (patch) => set(patch), getState, subscribe });
+    }
+
+    // local store will be created below (kept as before)
+}
 // track the current folder path (populated from incoming state/config)
 let currentFolderPath = null;
 // transient override for next generation only
@@ -662,275 +670,21 @@ const MODEL_CONTEXT_MAP = Object.freeze({
 // Lightweight message router: forward a few key message types to the UI functions
 window.addEventListener('message', event => {
     const msg = event.data;
-    if (msg.type === 'restoredState') {
-        try {
-            const s = msg.state || {};
-            if (Array.isArray(s.selectedFiles) && s.selectedFiles.length > 0) {
-                const sel = s.selectedFiles.slice();
-                try { store.setPendingPersistedSelection && store.setPendingPersistedSelection(sel, typeof s.focusIndex === 'number' ? s.focusIndex : undefined); } catch (e) {}
-            }
-            if (s.focusIndex !== undefined && typeof s.focusIndex === 'number') {
-                try { store.setPendingPersistedSelection && store.setPendingPersistedSelection(null, s.focusIndex); } catch (e) {}
-            }
-        } catch (e) { /* swallow */ }
-    }
-    if (msg.type === 'state') {
-    try { store.setState && store.setState(msg.state || {}); } catch (e) {}
-        try {
-            const s = msg.state || {};
-            if (typeof s.paused !== 'undefined') {
-                paused = !!s.paused;
-                updatePauseButton();
-            }
-        } catch (e) { /* swallow */ }
-        try {
-            const s = msg.state || {};
-            // Derive a sensible totalFiles value: prefer explicit totalFiles, otherwise
-            // infer from selectedPaths length, otherwise count leaves in fileTree.
-            let totalFiles = (typeof s.totalFiles === 'number') ? s.totalFiles : 0;
-            if ((!totalFiles || totalFiles === 0) && Array.isArray(s.selectedPaths) && s.selectedPaths.length > 0) {
-                totalFiles = s.selectedPaths.length;
-            }
-            if ((!totalFiles || totalFiles === 0) && s.fileTree && typeof s.fileTree === 'object') {
-                // count leaves in fileTree quickly
-                const countLeaves = (node) => {
-                    if (!node || typeof node !== 'object') { return 0; }
-                    let c = 0;
-                    for (const k of Object.keys(node)) {
-                        if (node[k] && node[k].__isFile) { c += 1; }
-                        if (node[k] && !node[k].__isFile) { c += countLeaves(node[k]); }
-                    }
-                    return c;
-                };
-                try { totalFiles = countLeaves(s.fileTree); } catch (e) { /* ignore counting errors */ }
-            }
-            try {
-                const stPending = store.getState ? store.getState().pendingPersistedSelection : pendingPersistedSelection;
-                const stPendingIdx = store.getState ? store.getState().pendingPersistedFocusIndex : pendingPersistedFocusIndex;
-                if (stPending && stPending.length > 0 && totalFiles > 0) {
-                    postAction('setSelection', { relPaths: stPending });
-                    try {
-                        const persist = { selectedFiles: stPending, focusIndex: stPendingIdx };
-                        try { vscode.postMessage(sanitizePayload({ type: 'persistState', state: persist })); } catch (e) { console.warn('persistState postMessage failed', e); }
-                    } catch (e) {}
-                    try { store.setPendingPersistedSelection && store.setPendingPersistedSelection(null, undefined); } catch (e) {}
-                }
-            } catch (e) { /* swallow */ }
-        } catch (e) { /* swallow */ }
-        try {
-            const s = msg.state || {};
-            const delta = {
-                selectedCount: s.selectedCount || (Array.isArray(s.selectedFiles) ? s.selectedFiles.length : (s.selectedCount || 0)),
-                totalFiles: s.totalFiles || 0,
-                selectedSize: s.selectedSize || 0,
-                tokenEstimate: s.tokenEstimate || (s.stats && s.stats.tokenEstimate) || 0,
-                contextLimit: (s && typeof s.contextLimit !== 'undefined') ? s.contextLimit : undefined
-            };
-            renderPreviewDelta(delta);
-        } catch (e) {}
-        try {
-            currentFolderPath = msg.state && (msg.state.folderPath || msg.state.workspaceFolder || msg.state.rootPath || msg.state.workspaceSlug) || null;
-            const slugEl = node('workspace-slug');
-            if (slugEl) {
-                const wf = msg.state && (msg.state.workspaceFolder || msg.state.workspaceSlug || msg.state.rootPath || msg.state.folderPath);
-                slugEl.textContent = wf ? String(wf) : '';
-            }
-        } catch (e) {}
-        // If the incoming state includes a configured preset and we haven't applied it
-        try {
-            const presets = (msg.state && msg.state.filterPresets) || (msg.state && msg.state.presets) || [];
-            const first = Array.isArray(presets) && presets.length > 0 ? String(presets[0]) : null;
-                if (first && lastAppliedPresetForTree !== first) {
-                try { togglePresetSelectionUI(first); } catch (e) {}
-                try { postAction('applyPreset', { preset: first }); } catch (e) {}
-                // Optimistic UI: attempt a local aligned render using the current store
-                try {
-                    const st = store.getState ? store.getState() : null;
-                    const files = st && st.fileTree ? st.fileTree : {};
-                    if (typeof applyPreset === 'function') {
-                        try {
-                            const aligned = applyPreset(first, files);
-                            try { store.setState && store.setState({ aligned }); } catch (e) {}
-                            try { renderTree(aligned, expandedSet); } catch (e) {}
-                        } catch (e) { /* swallow */ }
-                    }
-                } catch (e) { /* swallow */ }
-                lastAppliedPresetForTree = first;
-            }
-        } catch (e) {}
-    } else if (msg.type === 'previewDelta') {
-        // Update the chips
-        renderPreviewDelta(msg.delta);
-                if (msg.delta && msg.delta.fileTree) {
-                try {
-                    const incomingTree = msg.delta.fileTree;
-                    const incomingSelection = Array.isArray(msg.delta.selectedPaths) ? msg.delta.selectedPaths : [];
-                    if (userInteracting) {
-                        // defer applying the incoming tree until user is idle to avoid collapsing
-                        pendingIncomingTree = incomingTree;
-                        pendingIncomingSelectedPaths = incomingSelection;
-                    } else {
-                        try { store.setFileTree && store.setFileTree(incomingTree, incomingSelection); } catch (e) {}
-                        // Ensure the tree is rendered immediately after the store is populated so
-                        // the UI populates on initial scan completion without requiring user action.
-                        try { const st = store.getState ? store.getState() : null; renderTree((st && st.aligned) || st, expandedSet); } catch (e) {}
-                    }
-                } catch (e) { /* swallow to avoid breaking message handler */ }
-                // If previewDelta supplies preset metadata, apply once per new tree
-                try {
-                    const presets = (msg.delta && msg.delta.filterPresets) || (msg.delta && msg.delta.presets) || [];
-                    const first = Array.isArray(presets) && presets.length > 0 ? String(presets[0]) : null;
-                    if (first && lastAppliedPresetForTree !== first) {
-                        try { togglePresetSelectionUI(first); } catch (e) {}
-                        try { postAction('applyPreset', { preset: first }); } catch (e) {}
-                        // Optimistic UI update: apply preset locally and re-render immediately
-                        try {
-                            const st = store.getState ? store.getState() : null;
-                            const files = st && st.fileTree ? st.fileTree : {};
-                            if (typeof applyPreset === 'function') {
-                                try {
-                                    const aligned = applyPreset(first, files);
-                                    try { store.setState && store.setState({ aligned }); } catch (e) {}
-                                    try { renderTree(aligned, expandedSet); } catch (e) {}
-                                } catch (e) { /* swallow */ }
-                            }
-                        } catch (e) { /* swallow */ }
-                        lastAppliedPresetForTree = first;
-                    }
-                } catch (e) { /* swallow */ }
-                // After loading files into the store, compute an aligned view using the
-                // currently-selected preset so the file tree shown to the user reflects
-                // any preset-based categorization immediately. We do this locally for
-                // optimistic UI updates and also to avoid waiting for the host roundtrip.
-                try {
-                    const st = store.getState();
-                    // state.files is a thin alias for the fileTree used by older code paths
-                    const files = st && st.fileTree ? st.fileTree : {};
-                    // determine preset: prefer explicit currentPreset on state, otherwise
-                    // fall back to the lastAppliedPresetForTree (from metadata) or null
-                    const preset = (st && st.currentPreset) ? st.currentPreset : (lastAppliedPresetForTree || null);
-                    if (typeof applyPreset === 'function') {
-                        try {
-                            const aligned = applyPreset(preset, files);
-                            // store aligned result for callers that expect state.aligned
-                            try { store.setState && store.setState({ aligned }); } catch (e) {}
-                            // render using our local expandedSet mirror for immediate feedback
-                            try { renderTree(aligned, expandedSet); } catch (e) {}
-                        } catch (e) { /* swallow applyPreset errors */ }
-                    }
-                } catch (e) { /* swallow */ }
-            }
-    } else if (msg.type === 'ingestPreview') {
-        const previewRoot = nodes.ingestPreviewRoot || document.getElementById('ingest-preview');
-        const textEl = nodes.ingestPreviewText || document.getElementById('ingest-preview-text');
-        const spinner = nodes.ingestSpinner || document.getElementById('ingest-spinner');
-        if (previewRoot) { previewRoot.classList.remove('loading'); }
-        if (spinner) { spinner.hidden = true; spinner.setAttribute('aria-hidden', 'true'); }
-        if (textEl) {
-            const payload = msg.payload || {};
-            const p = payload.preview;
-            if (p) {
-                textEl.textContent = (p.summary || '') + '\n\n' + (p.tree || '');
-            } else if (payload.output) {
-                textEl.textContent = String(payload.output).slice(0, 2000);
-            } else {
-                textEl.textContent = 'No preview available';
-            }
+    try {
+        // If a handler is registered for this message type, prefer it.
+        if (window.__commandRegistry && msg && msg.type && typeof window.__commandRegistry[msg.type] === 'function') {
+            try { window.__commandRegistry[msg.type](msg); } catch (e) { console.warn('commandRegistry handler error', e); }
+            // allow handlers to fully own the message; if they want fallback they can call into legacy functions
+            return;
         }
-    } else if (msg.type === 'ingestError') {
-        const previewRoot = nodes.ingestPreviewRoot || document.getElementById('ingest-preview');
-        const spinner = nodes.ingestSpinner || document.getElementById('ingest-spinner');
-        const textEl = nodes.ingestPreviewText || document.getElementById('ingest-preview-text');
-        if (previewRoot) { previewRoot.classList.remove('loading'); }
-        if (spinner) { spinner.hidden = true; spinner.setAttribute('aria-hidden', 'true'); }
-        if (textEl) { textEl.textContent = ''; }
-        showToast('Ingest failed: ' + (msg.error || 'unknown'), 'error', 6000);
-    } else if (msg.type === 'config') {
-        try { currentFolderPath = msg.folderPath || msg.workspaceFolder || currentFolderPath; } catch (e) {}
-        populateSettings(msg.settings);
-        try {
-            const settings = msg.settings || {};
-            // Normalize presets: prefer a non-empty filterPresets (new key) but
-            // gracefully fall back to legacy presets. Accept either arrays or
-            // comma-separated strings and normalize to an array for selection.
-            let activeList = [];
-            const asArray = (v) => {
-                if (Array.isArray(v)) { return v.slice(); }
-                if (typeof v === 'string' && v.trim()) { return v.split(',').map(s => s.trim()).filter(Boolean); }
-                return [];
-            };
-            const fp = asArray(settings.filterPresets);
-            if (fp.length > 0) { activeList = fp; }
-            else {
-                const legacy = asArray(settings.presets);
-                if (legacy.length > 0) { activeList = legacy; }
-            }
-            const activePreset = (activeList.length > 0) ? String(activeList[0]) : null;
-            togglePresetSelectionUI(activePreset);
-        } catch (e) { /* swallow */ }
-    } else if (msg.type === 'progress') {
-        (window.__handleProgress || handleProgress)(msg.event);
-    } else if (msg.type === 'remoteRepoLoaded') {
-        // Host responded that the remote repo was cloned/loaded. msg.payload.tmpPath should
-        // contain the temporary filesystem path that the host created. Store it locally
-        // and update the modal UI to allow the user to start the ingest.
-        try {
-            const payload = msg.payload || {};
-            const tmp = payload.tmpPath || null;
-            if (tmp) {
-                loadedRepoTmpPath = tmp;
-                const textEl = nodes.ingestPreviewText || document.getElementById('ingest-preview-text');
-                if (textEl) { textEl.textContent = `Repository loaded: ${String(tmp)}`; }
-                // swap buttons: hide Load Repo, show Start Ingest
-                const loadBtn = document.getElementById('ingest-load-repo');
-                const startBtn = document.getElementById('ingest-submit');
-                try { if (loadBtn) { loadBtn.hidden = true; loadBtn.setAttribute('aria-hidden', 'true'); } } catch (e) {}
-                try { if (startBtn) { startBtn.hidden = false; startBtn.removeAttribute('aria-hidden'); startBtn.focus(); } } catch (e) {}
-            } else {
-                showToast('Failed to load repository', 'error');
-            }
-        } catch (e) { /* swallow to avoid breaking other handlers */ }
-    } else if (msg.type === 'generationResult') {
-        try {
-            const res = msg.result || {};
-            if (res.redactionApplied) {
-                showToast('Output contained redacted content (masked). Toggle "Show redacted" in Settings to reveal.', 'warn', 6000);
-            }
-            if (res && res.error) {
-                showToast(String(res.error), 'warn', 6000);
-                // The redaction override is a one-shot transient flag. If the generation
-                // failed, do NOT persist the disable-redaction state — clear transient
-                // flags and update the UI so the override is not sticky.
-                try {
-                    if (pendingOverrideUsed) {
-                        pendingOverrideUsed = false;
-                    }
-                    overrideDisableRedaction = false;
-                    const rb = document.getElementById('btn-disable-redaction');
-                    if (rb) { try { rb.setAttribute('aria-pressed', 'false'); } catch (e) {}
-                        try { rb.classList.remove('active'); } catch (e) {} }
-                } catch (e) { /* ignore UI errors */ }
-            } else {
-                // generation succeeded: explicitly clear transient override flags and UI state
-                // so the redaction toggle does not remain active accidentally. Be defensive
-                // in DOM manipulation so any partial state is removed.
-                try {
-                    pendingOverrideUsed = false;
-                } catch (e) { pendingOverrideUsed = false; }
-                try {
-                    overrideDisableRedaction = false;
-                } catch (e) { overrideDisableRedaction = false; }
-                try {
-                    const rb = document.getElementById('btn-disable-redaction');
-                    if (rb) {
-                        try { rb.setAttribute('aria-pressed', 'false'); } catch (ex) {}
-                        try { rb.classList.remove('active'); } catch (ex) {}
-                        try { rb.removeAttribute('data-pending-override'); } catch (ex) {}
-                    }
-                } catch (e) { /* ignore DOM errors */ }
-            }
-        } catch (e) {}
-    }
+    } catch (e) { /* swallow dispatch errors and fall back to legacy handling below */ }
+    // Legacy inline handlers have been moved to modular handler files under
+    // resources/webview/handlers and are registered via the command registry.
+    // If a message reaches this point it is unhandled by the registry and may
+    // represent a rare legacy case. For now, just log it for debugging.
+    try {
+        console.debug && console.debug('[codebase-digest][webview] unhandled message type:', msg && msg.type);
+    } catch (e) {}
 });
 
 function renderPreviewDelta(delta) {

@@ -20,15 +20,11 @@ import { ensureZustandReferenced } from './utils/ensureZustandUsed';
 
 import { CodebaseDigestTreeProvider } from './providers/treeDataProvider';
 import { registerCodebasePanel } from './providers/codebasePanel';
-import { viewMetricsCommand } from './commands/viewMetrics';
-import { registerCommands } from './commands/generateDigest';
-import { registerToggles } from './commands/toggles';
-import { registerSelectionCommands } from './commands/selectionCommands';
-import { registerRefreshTree } from './commands/refreshTree';
+import { registerAllCommands, registerFolderCommands } from './commands/index';
 import { Diagnostics } from './utils/diagnostics';
 import { GitignoreService } from './services/gitignoreService';
 import { FileScanner } from './services/fileScanner';
-import { registerIngestRemoteRepo } from './commands/ingestRemoteRepo';
+// per-command registration now handled by src/commands/index
 import { validateConfig, isDigestConfig } from './utils/validateConfig';
 import { logUserError } from './utils/errors';
 import { setTransientOverride } from './utils/transientOverrides';
@@ -242,7 +238,7 @@ try { console.log('[codebase-digest] activate() called'); } catch (e) { try { co
 					registerCodebaseView(context, context.extensionUri, treeProvider);
 				}
 			} catch (e) {
-				// ignore — fallback: panel can still be opened via command/status bar
+				// ignore  fallback: panel can still be opened via command/status bar
 			}
 
 				// On activation, optionally focus the contributed Primary Sidebar view (config validation runs later once Diagnostics is available)
@@ -437,10 +433,8 @@ try { console.log('[codebase-digest] activate() called'); } catch (e) { try { co
 			// Defensive: do not allow validation errors to block activation
 		}
 
-	// Register toggles for each treeProvider
-	for (const [folderPath, treeProvider] of treeProviders.entries()) {
-		registerToggles(context, treeProvider);
-	}
+	// Per-folder command registration is handled centrally by `registerAllCommands` below.
+	// This avoids duplicate registrations and keeps all command wiring in one place.
 
 	// Note: TreeView UI registration removed. The CodebaseDigestTreeProvider remains
 	// as the backing model for scans, selections and preview computations used by
@@ -466,20 +460,9 @@ try { console.log('[codebase-digest] activate() called'); } catch (e) { try { co
 		// No further action required — the view provider will resolve when visible. If a user prefers the panel, they can still run openDashboardPanel.
 	}));
 
-	// Register all commands to route to correct provider/folder
-	for (const [folderPath, treeProvider] of treeProviders.entries()) {
-		registerCommands(context, treeProvider, { workspaceManager });
-		// Register view metrics command scoped to this folder
-		context.subscriptions.push(vscode.commands.registerCommand('codebaseDigest.viewMetrics', (fp?: string) => {
-			const resolved = getFolderPath(fp);
-			const folder = resolved ? workspaceFolders?.find(f => f.uri.fsPath === resolved) : undefined;
-			viewMetricsCommand(folder, workspaceManager);
-		}));
-		registerSelectionCommands(context, treeProvider);
-		registerRefreshTree(context, treeProvider);
-	}
-	// Register ingest remote repo command once globally
-	registerIngestRemoteRepo(context);
+	// Per-folder registrations are delegated to registerFolderCommands above.
+	// Register global commands and any remaining central registrations now.
+	try { registerAllCommands(context, treeProviders, workspaceManager, workspaceFolders); } catch (e) { /* ignore */ }
 
 	// Settings command
 	context.subscriptions.push(vscode.commands.registerCommand('codebaseDigest.openSettings', () => {
@@ -647,34 +630,31 @@ try { console.log('[codebase-digest] activate() called'); } catch (e) { try { co
 	vscode.workspace.onDidChangeWorkspaceFolders((e) => {
 		// Handle added folders: create bundles, providers, register view and commands
 		if (e.added && e.added.length > 0) {
-			for (const folder of e.added) {
-				try {
-					// Ensure workspace manager creates a bundle for this folder
-					workspaceManager.addFolder(folder);
-					const services = workspaceManager.getBundleForFolder(folder);
-					if (!services) { continue; }
-					// Create and store a new tree provider
-					const treeProvider = new CodebaseDigestTreeProvider(folder, services);
-					treeProviders.set(folder.uri.fsPath, treeProvider);
-					// Ensure the provider's disposable (watcher/timers) is disposed on extension deactivation
-					try { context.subscriptions.push({ dispose: () => { try { const tpRec = treeProvider as unknown as Record<string, unknown>; if (tpRec && typeof tpRec['dispose'] === 'function') { try { (tpRec['dispose'] as () => void)(); } catch (e) {} } } catch (e) {} } }); } catch (e) {}
-					// Initial scan
-					treeProvider.refresh();
-					// Register sidebar view for this provider
+				for (const folder of e.added) {
 					try {
-						const { registerCodebaseView } = require('./providers/codebasePanel');
-						if (typeof registerCodebaseView === 'function') {
-							registerCodebaseView(context, context.extensionUri, treeProvider);
-						}
-					} catch (err) { /* ignore */ }
-					// Register per-folder commands and toggles
-					registerToggles(context, treeProvider);
-					registerCommands(context, treeProvider, { workspaceManager });
-					registerSelectionCommands(context, treeProvider);
-					registerRefreshTree(context, treeProvider);
-				} catch (err) {
-					try { console.error('[codebase-digest] error adding workspace folder', folder.uri.fsPath, err); } catch (e) { /* ignore */ }
-				}
+						// Ensure workspace manager creates a bundle for this folder
+						workspaceManager.addFolder(folder);
+						const services = workspaceManager.getBundleForFolder(folder);
+						if (!services) { continue; }
+						// Create and store a new tree provider
+						const treeProvider = new CodebaseDigestTreeProvider(folder, services);
+						treeProviders.set(folder.uri.fsPath, treeProvider);
+						// Ensure the provider's disposable (watcher/timers) is disposed on extension deactivation
+						try { context.subscriptions.push({ dispose: () => { try { const tpRec = treeProvider as unknown as Record<string, unknown>; if (tpRec && typeof tpRec['dispose'] === 'function') { try { (tpRec['dispose'] as () => void)(); } catch (e) {} } } catch (e) {} } }); } catch (e) {}
+						// Initial scan
+						treeProvider.refresh();
+						// Register sidebar view for this provider
+						try {
+							const { registerCodebaseView } = require('./providers/codebasePanel');
+							if (typeof registerCodebaseView === 'function') {
+								registerCodebaseView(context, context.extensionUri, treeProvider);
+							}
+						} catch (err) { /* ignore */ }
+						// Register per-folder commands and toggles via centralized helper
+						try { registerFolderCommands(context, treeProvider, workspaceManager, workspaceFolders); } catch (e) { /* ignore */ }
+					} catch (err) {
+						try { console.error('[codebase-digest] error adding workspace folder', folder.uri.fsPath, err); } catch (e) { /* ignore */ }
+					}
 			}
 		}
 		// Handle removed folders: dispose providers, remove bundles, and unregister per-folder resources
