@@ -867,7 +867,7 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
                 includeMetadata: true,
                 includeTree: true,
                 includeSummary: true,
-                includeFileContents: false, // package.json default
+                includeFileContents: true, // restored default for backwards compatibility
                 useStreamingRead: true,
 
                 // Token estimation and model

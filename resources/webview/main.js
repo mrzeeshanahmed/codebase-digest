@@ -599,6 +599,20 @@ function renderTree(state, newExpandedSet) {
 
 const debouncedRenderFileList = debounce(renderFileList, 80);
 
+// Model → context metadata map. Prefer this authoritative mapping when formatting
+// model options in the settings UI. Values are numeric context lengths (tokens)
+// where known. Keep missing entries omitted so fallback parsing still applies.
+const MODEL_CONTEXT_MAP = Object.freeze({
+    'o200k': 200000,
+    'gpt-4o-mini-16k': 16000,
+    'gpt-4o-mini-8k': 8000,
+    // add explicit entries for other common models when known
+    // 'gpt-4o': 0, // unknown default
+    // 'gpt-3.5': 0,
+    // 'claude-3.5': 0,
+    // 'o1': 0,
+});
+
 // Lightweight message router: forward a few key message types to the UI functions
 window.addEventListener('message', event => {
     const msg = event.data;
@@ -1535,6 +1549,11 @@ function populateSettings(settings) {
             }
 
             const enriched = existingOptions.map(o => {
+                // Prefer explicit metadata map when present
+                const metaValue = (o.value && MODEL_CONTEXT_MAP[o.value]) ? MODEL_CONTEXT_MAP[o.value] : null;
+                if (metaValue) {
+                    return Object.assign({}, o, { contextRaw: String(metaValue), contextValue: Number(metaValue) });
+                }
                 const byVal = parseContext(o.value);
                 const byText = parseContext(o.text);
                 const ctx = byVal || byText || null;
