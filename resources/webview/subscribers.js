@@ -9,6 +9,62 @@
 
   function safe(fn) { return function () { try { return fn.apply(null, arguments); } catch (e) { console.warn('subscriber safe handler error', e); } }; }
 
+  // Render helper: given a serialized tree payload from the host, render the
+  // sidebar. Prefer using the global renderTree helper when available so
+  // DOM building stays centralized; otherwise perform a minimal fallback.
+  function renderSidebarFromTreeData(treeData, selectedPaths) {
+    try {
+      const fileListRoot = document.getElementById('file-list');
+      // If there's no root element, nothing to render
+      if (!fileListRoot) { return; }
+      // If no tree data or empty, show friendly empty message
+      const isEmpty = !treeData || (typeof treeData === 'object' && Object.keys(treeData).length === 0);
+      if (isEmpty) {
+        while (fileListRoot.firstChild) { fileListRoot.removeChild(fileListRoot.firstChild); }
+        const msg = document.createElement('div');
+        msg.className = 'file-row-message';
+        msg.textContent = 'No files to display.';
+        fileListRoot.appendChild(msg);
+        return;
+      }
+
+      // If the main webview exposes renderTree, delegate to it so we keep one
+      // canonical tree rendering implementation.
+      if (typeof renderTree === 'function') {
+        try {
+          const state = { fileTree: treeData, selectedPaths: Array.isArray(selectedPaths) ? selectedPaths.slice() : [] };
+          // expandedSet is maintained by the main UI; pass through if present
+          return renderTree(state, (typeof expandedSet !== 'undefined') ? expandedSet : null);
+        } catch (e) { /* fallthrough to fallback rendering */ }
+      }
+
+      // Fallback naive renderer: build a simple flat list of leaves for minimal UX
+      try {
+        while (fileListRoot.firstChild) { fileListRoot.removeChild(fileListRoot.firstChild); }
+        const stack = [{ node: treeData, prefix: '' }];
+        while (stack.length) {
+          const item = stack.pop();
+          const node = item.node || {};
+          const prefix = item.prefix || '';
+          for (const k of Object.keys(node).sort()) {
+            const n = node[k];
+            const relPath = (n && n.relPath) || (n && n.path) || (prefix + k);
+            if (n && n.__isFile) {
+              const li = document.createElement('div');
+              li.className = 'file-row file-item';
+              li.textContent = relPath;
+              if (Array.isArray(selectedPaths) && selectedPaths.indexOf(relPath) !== -1) { li.classList.add('selected'); }
+              fileListRoot.appendChild(li);
+            } else {
+              // push children to stack with updated prefix
+              stack.push({ node: n || {}, prefix: relPath + '/' });
+            }
+          }
+        }
+      } catch (e) { console.warn('fallback sidebar render failed', e); }
+    } catch (e) { console.warn('renderSidebarFromTreeData failed', e); }
+  }
+
   // Subscribe once store exists; if not present yet, poll briefly
   function init() {
     const s = ensureStore();
@@ -22,6 +78,11 @@
         // fileTree / aligned / selectedPaths -> renderTree
         if (st.fileTree !== last.fileTree || st.selectedPaths !== last.selectedPaths || st.aligned !== last.aligned) {
           try { if (typeof renderTree === 'function') { renderTree((st && st.aligned) || st, typeof expandedSet !== 'undefined' ? expandedSet : null); } } catch (e) {}
+        }
+
+        // treeData -> render sidebar (host-provided serialized snapshot)
+        if (st.treeData !== last.treeData) {
+          try { renderSidebarFromTreeData(st.treeData, st.selectedPaths); } catch (e) { console.warn('treeData subscriber failed', e); }
         }
 
         // previewDelta -> renderPreviewDelta

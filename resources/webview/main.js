@@ -112,6 +112,18 @@ store.subscribe((st) => {
         pendingPersistedSelection = st.pendingPersistedSelection || null;
         pendingPersistedFocusIndex = typeof st.pendingPersistedFocusIndex !== 'undefined' ? st.pendingPersistedFocusIndex : undefined;
     } catch (e) {}
+    // If the host provided a serialized tree snapshot, prefer applying that to the fileTree
+    try {
+        if (typeof st.treeData !== 'undefined' && st.treeData !== null) {
+            // If the user is currently interacting with the UI, defer applying incoming trees
+            if (userInteracting) {
+                pendingIncomingTree = st.treeData;
+                pendingIncomingSelectedPaths = Array.isArray(st.selectedPaths) ? st.selectedPaths.slice() : null;
+            } else {
+                try { if (store.setFileTree) { store.setFileTree(st.treeData, Array.isArray(st.selectedPaths) ? st.selectedPaths.slice() : []); } } catch (e) { /* swallow */ }
+            }
+        }
+    } catch (e) {}
     // Rerender file list whenever fileTree or selectedPaths changes.
     try {
         debouncedRenderFileList();
@@ -953,6 +965,96 @@ window.onload = function() {
         nodes.cancelWriteBtn = document.getElementById('btn-cancel-write');
         nodes.pauseBtn = document.getElementById('btn-pause-resume');
     } catch (e) { /* ignore cache wiring errors */ }
+
+    // Sidebar button wiring: explicit listeners for common top-level actions
+    try {
+        const btnRefresh = document.getElementById('btn-refresh');
+        if (btnRefresh) {
+            btnRefresh.addEventListener('click', (ev) => {
+                try { ev.preventDefault(); ev.stopPropagation(); } catch (e) {}
+                // Use postAction so payload is sanitized and includes folderPath
+                try { postAction('refresh'); } catch (e) { console.warn('btn-refresh postAction failed', e); }
+            });
+        }
+
+        // Primary generate button (may appear in multiple places); prefer data-action selector
+        const genBtn = document.querySelector('[data-action="generateDigest"]');
+        if (genBtn) {
+            genBtn.addEventListener('click', (ev) => {
+                try { ev.preventDefault(); ev.stopPropagation(); } catch (e) {}
+                const payload = {};
+                if (overrideDisableRedaction) {
+                    payload.overrides = { showRedacted: true };
+                    pendingOverrideUsed = true;
+                }
+                try { postAction('generateDigest', payload); } catch (e) { console.warn('generateDigest postAction failed', e); }
+            });
+        }
+        // Explicit toolbar listeners for selection/expand controls (ensure immediate UI feedback)
+        try {
+            const toolbarSelectAll = document.querySelector('[data-action="selectAll"]');
+            if (toolbarSelectAll) {
+                toolbarSelectAll.addEventListener('click', (ev) => {
+                    try { ev.preventDefault(); ev.stopPropagation(); } catch (e) {}
+                    try {
+                        const fileCheckboxes = document.querySelectorAll('#file-list li.file-item .file-checkbox');
+                        const filePaths = Array.from(fileCheckboxes).map(cb => {
+                            try { const a = cb.getAttribute && cb.getAttribute('data-path'); return a ? decodeFromDataAttribute(a) : null; } catch (e) { return null; }
+                        }).filter(Boolean);
+                        // Optimistically update local store for immediate feedback
+                        try { store.setSelection && store.setSelection(filePaths); } catch (e) {}
+                        postAction('setSelection', { relPaths: filePaths });
+                    } catch (e) { /* swallow */ }
+                });
+            }
+            const toolbarClear = document.querySelector('[data-action="clearSelection"]');
+            if (toolbarClear) {
+                toolbarClear.addEventListener('click', (ev) => {
+                    try { ev.preventDefault(); ev.stopPropagation(); } catch (e) {}
+                    try { store.clearSelection && store.clearSelection(); } catch (e) {}
+                    postAction('setSelection', { relPaths: [] });
+                });
+            }
+            const toolbarExpandAll = document.querySelector('[data-action="expandAll"]');
+            if (toolbarExpandAll) {
+                toolbarExpandAll.addEventListener('click', (ev) => {
+                    try { ev.preventDefault(); ev.stopPropagation(); } catch (e) {}
+                    try {
+                        const folderItems = document.querySelectorAll('#file-list li.folder-item');
+                        folderItems.forEach(fi => {
+                            try {
+                                const pathAttr = fi.getAttribute && fi.getAttribute('data-path');
+                                const decodedPath = pathAttr ? decodeFromDataAttribute(pathAttr) : null;
+                                fi.classList.add('expanded');
+                                if (decodedPath) { expandedSet.add(decodedPath); }
+                            } catch (e) { /* ignore per-node errors */ }
+                        });
+                        try { store.setExpandedPaths && store.setExpandedPaths(Array.from(expandedSet)); } catch (e) {}
+                    } catch (e) { /* swallow DOM errors */ }
+                    postAction('expandAll');
+                });
+            }
+            const toolbarCollapseAll = document.querySelector('[data-action="collapseAll"]');
+            if (toolbarCollapseAll) {
+                toolbarCollapseAll.addEventListener('click', (ev) => {
+                    try { ev.preventDefault(); ev.stopPropagation(); } catch (e) {}
+                    try {
+                        const folderItems = document.querySelectorAll('#file-list li.folder-item');
+                        folderItems.forEach(fi => {
+                            try {
+                                const pathAttr = fi.getAttribute && fi.getAttribute('data-path');
+                                const decodedPath = pathAttr ? decodeFromDataAttribute(pathAttr) : null;
+                                fi.classList.remove('expanded');
+                                if (decodedPath) { expandedSet.delete(decodedPath); }
+                            } catch (e) { /* ignore per-node errors */ }
+                        });
+                        try { store.setExpandedPaths && store.setExpandedPaths(Array.from(expandedSet)); } catch (e) {}
+                    } catch (e) { /* swallow DOM errors */ }
+                    postAction('collapseAll');
+                });
+            }
+        } catch (e) { /* swallow wiring errors */ }
+    } catch (e) { /* swallow wiring errors */ }
 
     // Attach light-weight interaction listeners to detect when the user is manipulating
     // the file list. Use capture-phase pointer events so we catch interactions early

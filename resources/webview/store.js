@@ -75,6 +75,7 @@
   const store = createStore((set, get) => ({
     // State
     fileTree: {},
+    treeData: null,
     selectedPaths: [],
     expandedPaths: [],
     paused: false,
@@ -94,6 +95,10 @@
       fileTree: tree || {},
       selectedPaths: Array.isArray(selectedPaths) ? selectedPaths.slice() : get().selectedPaths || []
     })),
+
+    // Update the tree data used by the sidebar; keep it separate from fileTree
+    // so we can manage a compact serializable representation if needed.
+    setTreeData: (data) => set(() => ({ treeData: typeof data === 'undefined' ? null : data })),
 
     setSelection: (paths) => set(() => ({ selectedPaths: Array.isArray(paths) ? paths.slice() : [] })),
 

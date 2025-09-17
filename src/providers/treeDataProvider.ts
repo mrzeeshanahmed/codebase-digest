@@ -9,12 +9,13 @@ import { DirectoryCache } from './directoryCache';
 import { computePreviewState } from './previewState';
 import { ExpandState, MAX_EXPAND_DEPTH } from './expandState';
 import { formatSize, formatTooltip, createTreeIcon, ContextValues } from './treeHelpers';
-import { emitProgress } from './eventBus';
+import { emitProgress, emitState } from './eventBus';
 import { debounce } from '../utils/debounce';
 import { getMutex } from '../utils/asyncLock';
 import { minimatch } from 'minimatch';
 import * as path from 'path';
 import { ConfigurationService } from '../services/configurationService';
+import { WebviewCommands } from '../types/webview';
 
 export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileNode>, vscode.Disposable {
     private expandState: ExpandState;
@@ -584,6 +585,11 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
             if (this.previewUpdater) {
                 this.previewUpdater();
             }
+            // Broadcast the new preview/state to any listening webviews
+            try {
+                const preview = this.getPreviewData();
+                try { emitState({ state: preview, folderPath: this.workspaceRoot }); } catch (e) { /* ignore */ }
+            } catch (e) { /* ignore */ }
             // End progress
             emitProgress({ op: 'scan', mode: 'end', determinate: false, message: 'Scan complete' });
         });

@@ -63,6 +63,49 @@ export function emitProgress(e: ProgressEvent) {
     }
 }
 
+// Simple state event bus used to broadcast serialized UI state (preview/tree)
+const stateListeners: Array<(e: { state: unknown; folderPath?: string }) => void> = [];
+
+export function onState(cb: (e: { state: unknown; folderPath?: string }) => void): Unsubscribe {
+    if (stateListeners.length >= MAX_LISTENERS) {
+        const reason = '[eventBus] state listener limit reached, rejecting new listener';
+        try { console.warn(reason); } catch {}
+        const noop: Unsubscribe = (() => { /* no-op */ }) as Unsubscribe;
+        noop.failed = true;
+        noop.reason = reason;
+        return noop;
+    }
+    stateListeners.push(cb);
+    let removed = false;
+    const unsub: Unsubscribe = (() => {
+        if (removed) { return; }
+        removed = true;
+        const idx = stateListeners.indexOf(cb);
+        if (idx >= 0) { stateListeners.splice(idx, 1); }
+    }) as Unsubscribe;
+    return unsub;
+}
+
+export function emitState(e: { state: unknown; folderPath?: string }) {
+    const snapshot = stateListeners.slice();
+    for (const cb of snapshot) {
+        try {
+            cb(e);
+        } catch (err) {
+            try {
+                let msg = '';
+                if (err && typeof err === 'object' && err !== null) {
+                    const rec = err as Record<string, unknown>;
+                    msg = String(rec.stack || rec.message || JSON.stringify(rec));
+                } else {
+                    msg = String(err);
+                }
+                diagnostics.error('emitState listener threw', msg);
+            } catch {}
+        }
+    }
+}
+
 export function clearListeners() {
     listeners.length = 0;
 }

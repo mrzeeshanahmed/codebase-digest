@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { CodebaseDigestTreeProvider } from './treeDataProvider';
 import { onProgress } from './eventBus';
+import { onState } from './eventBus';
 import { setWebviewHtml, wireWebviewMessages } from './webviewHelpers';
 import { ConfigurationService } from '../services/configurationService';
 import { Diagnostics } from '../utils/diagnostics';
@@ -103,6 +104,20 @@ export class CodebaseDigestPanel {
     wireWebviewMessages(this.panel.webview, this.treeProvider, this.folderPath, async (changes: Record<string, unknown>) => {
             await this.applyConfigChanges(changes);
     }, () => this.postPreviewState(), this.context);
+        // Listen for arbitrary commands coming from the webview (sidebar/panel)
+        // e.g., a message with type 'refreshTree' should trigger the corresponding VS Code command
+        const panelMsgDisp = this.panel.webview.onDidReceiveMessage((msg: any) => {
+            try {
+                if (!msg) { return; }
+                const t = (msg && (msg.type || msg.actionType || msg.command)) ? (msg.type || msg.actionType || msg.command) : undefined;
+                if (!t) { return; }
+                // Map webview-level command names to VS Code commands
+                if (t === (WebviewCommands && (WebviewCommands as any).refreshTree) || t === 'refreshTree') {
+                    try { vscode.commands.executeCommand('codebaseDigest.refreshTree'); } catch (err) { try { diagnostics.warn('executeCommand refreshTree failed', err); } catch {} }
+                }
+            } catch (e) { /* swallow */ }
+        });
+        this.panel.onDidDispose(() => { try { panelMsgDisp.dispose(); } catch (e) { /* ignore */ } });
         this.panel.onDidDispose(() => {
             this.panel = undefined;
             panels.delete(this.folderPath);
@@ -122,6 +137,23 @@ export class CodebaseDigestPanel {
                 this.panel.webview.postMessage(payload);
             } catch (err) { try { diagnostics.warn('postMessage progress failed', err); } catch {} }
         }
+    });
+    // Forward state events (full preview/state payloads) to panels and sidebar views
+    const disposeState = onState(payload => {
+        try {
+            // Post to panel if present and folder matches (or not provided)
+            if (this.panel && this.panel.webview && typeof this.panel.webview.postMessage === 'function') {
+                try { this.panel.webview.postMessage({ type: WebviewCommands.state, state: payload.state }); } catch (e) { try { diagnostics.warn('post state to panel failed', e); } catch {} }
+            }
+            // Post to any active sidebar views matching folderPath
+            for (const [vw, vwFolder] of activeViews.entries()) {
+                try {
+                    if (!payload.folderPath || payload.folderPath === vwFolder) {
+                        vw.webview.postMessage({ type: WebviewCommands.state, state: payload.state });
+                    }
+                } catch (e) { /* ignore per-view errors */ }
+            }
+        } catch (e) { /* swallow */ }
     });
     // Post an immediate preview delta when scans start or end so chips update promptly
     const scanProgressDisp = onProgress((ev: unknown) => {
@@ -148,6 +180,7 @@ export class CodebaseDigestPanel {
     this.panel.onDidDispose(() => { try { if (this.previewInterval) { try { clearInterval(this.previewInterval as unknown as ReturnType<typeof setInterval>); } catch {} this.previewInterval = undefined; } } catch (e) { try { diagnostics.warn('clearing previewInterval failed', e); } catch {} } });
     this.panel.onDidDispose(() => { try { disposeProgress(); } catch (e) { try { diagnostics.warn('disposeProgress failed', e); } catch {} } });
     this.panel.onDidDispose(() => { try { scanProgressDisp(); } catch (e) { try { diagnostics.warn('scanProgressDisp failed', e); } catch {} } });
+    this.panel.onDidDispose(() => { try { disposeState(); } catch (e) { try { diagnostics.warn('disposeState failed', e); } catch {} } });
     }
 
         private async postConfig() {
@@ -280,7 +313,7 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                 const thresholdsDefault = { maxFiles: 25000, maxTotalSizeBytes: 536870912, tokenLimit: 32000 };
                 const thresholds = (snapshot as any).thresholds || {};
                 const payload = {
-                    type: 'config',
+                    type: WebviewCommands.config,
                     folderPath: folder,
                     settings: {
                         respectGitignore: snapshot.respectGitignore,
@@ -329,7 +362,7 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                 // After applying changes, read back a validated snapshot and post that to the webview
                 try {
                     const snapshot = ConfigurationService.getWorkspaceConfig(vscode.Uri.file(folder));
-                    webviewView.webview.postMessage({ type: 'config', folderPath: folder, settings: {
+                    webviewView.webview.postMessage({ type: WebviewCommands.config, folderPath: folder, settings: {
                         respectGitignore: snapshot.respectGitignore,
                         presets: (snapshot as any).presets || [],
                         filterPresets: (snapshot as any).filterPresets || [],
@@ -350,10 +383,22 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                 try {
                     const preview = treeProvider.getPreviewData();
                     try { console.debug('[codebase-digest] resolveWebviewView posting state (onGetState):', preview && typeof preview.totalFiles === 'number' ? { totalFiles: preview.totalFiles, selectedCount: preview.selectedCount } : preview); } catch (e) {}
-                    const statePayload: StatePayload = { type: 'state', state: preview };
+                    const statePayload: StatePayload = { type: WebviewCommands.state, state: preview };
                     webviewView.webview.postMessage(statePayload);
                 } catch (e) { /* ignore */ }
             }, context);
+                // Listen for commands coming from the sidebar webview instance
+                const sidebarMsgDisp = webviewView.webview.onDidReceiveMessage((msg: any) => {
+                    try {
+                        if (!msg) { return; }
+                        const t = (msg && (msg.type || msg.actionType || msg.command)) ? (msg.type || msg.actionType || msg.command) : undefined;
+                        if (!t) { return; }
+                        if (t === (WebviewCommands && (WebviewCommands as any).refreshTree) || t === 'refreshTree') {
+                            try { vscode.commands.executeCommand('codebaseDigest.refreshTree'); } catch (err) { try { diagnostics.warn('executeCommand refreshTree failed', err); } catch {} }
+                        }
+                    } catch (e) { /* ignore */ }
+                });
+                webviewView.onDidDispose(() => { try { sidebarMsgDisp.dispose(); } catch (e) { /* ignore */ } });
 
             // Forward progress events to the sidebar webview with light throttling to avoid UI jank
             ((): void => {
@@ -366,7 +411,7 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                         const rawOp = (ev && typeof ev === 'object') ? (ev as Record<string, unknown>)['op'] : undefined;
                         const rawMode = (ev && typeof ev === 'object') ? (ev as Record<string, unknown>)['mode'] : undefined;
                         const evt = { op: typeof rawOp === 'string' ? rawOp : undefined, mode: typeof rawMode === 'string' ? rawMode : undefined };
-                        const payload: ProgressEventPayload = { type: 'progress', event: evt };
+                        const payload: ProgressEventPayload = { type: WebviewCommands.progress, event: evt };
                         webviewView.webview.postMessage(payload);
                     } catch (e) { try { console.warn('codebasePanel: post progress failed', e); } catch {} }
                 };
@@ -504,8 +549,8 @@ export function broadcastGenerationResult(result: any, folderPath?: string) {
                 if (!inferred || panelFolder === inferred || key === inferred) {
                     try {
                         const p = pub.panel;
-                        if (p && p.webview && typeof p.webview.postMessage === 'function') {
-                            p.webview.postMessage({ type: 'generationResult', result });
+                            if (p && p.webview && typeof p.webview.postMessage === 'function') {
+                            p.webview.postMessage({ type: WebviewCommands.generationResult, result });
                         }
                     } catch (e) { /* ignore */ }
                 }
@@ -514,8 +559,8 @@ export function broadcastGenerationResult(result: any, folderPath?: string) {
     // Post to active sidebar views (filter by inferred when provided)
     for (const [vw, vwFolder] of activeViews.entries()) {
         try {
-            if (!inferred || vwFolder === inferred) {
-                vw.webview.postMessage({ type: 'generationResult', result });
+                if (!inferred || vwFolder === inferred) {
+                vw.webview.postMessage({ type: WebviewCommands.generationResult, result });
             }
         } catch (e) { /* ignore */ }
     }
@@ -531,8 +576,8 @@ export function broadcastPreviewDelta(delta: any, folderPath?: string) {
                     const panelFolder = typeof pub.folderPath === 'string' ? pub.folderPath : key;
                     if (!folderPath || key === folderPath || panelFolder === folderPath) {
                         const p = pub.panel;
-                        if (p && p.webview && typeof p.webview.postMessage === 'function') {
-                            p.webview.postMessage({ type: 'previewDelta', delta });
+                            if (p && p.webview && typeof p.webview.postMessage === 'function') {
+                            p.webview.postMessage({ type: WebviewCommands.previewDelta, delta });
                         }
                     }
                 } catch (e) { /* ignore */ }
@@ -542,8 +587,8 @@ export function broadcastPreviewDelta(delta: any, folderPath?: string) {
         // Post to active sidebar views, filtered by folderPath when provided
         for (const [vw, vwFolder] of activeViews.entries()) {
             try {
-                if (!folderPath || vwFolder === folderPath) {
-                    vw.webview.postMessage({ type: 'previewDelta', delta });
+                    if (!folderPath || vwFolder === folderPath) {
+                    vw.webview.postMessage({ type: WebviewCommands.previewDelta, delta });
                 }
             } catch (e) { /* ignore */ }
         }

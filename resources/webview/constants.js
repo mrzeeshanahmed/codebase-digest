@@ -16,7 +16,9 @@
     remoteRepoLoaded: 'remoteRepoLoaded',
     generationResult: 'generationResult',
     restoredState: 'restoredState',
-    config: 'config'
+    config: 'config',
+    diagnostic: 'diagnostic',
+    test: 'test'
   });
 
   try { window.COMMANDS = COMMANDS; } catch (e) { /* ignore */ }

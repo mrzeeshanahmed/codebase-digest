@@ -91,3 +91,25 @@
     } catch (e) { console.warn('registerHandler failed', e); }
   };
 })();
+// Eager-load specific handlers so they are included in bundles or environments
+// that don't load handler scripts independently. This is defensive — handlers
+// will still register themselves via window.__registerHandler when executed.
+(function () {
+  'use strict';
+  if (typeof window === 'undefined') { return; }
+  try {
+    // CommonJS style (Node/webpack)
+    if (typeof require === 'function') {
+      try { require('./handlers/treeDataHandler.js'); } catch (e) { try { require('./handlers/treeDataHandler'); } catch (ex) {} }
+    }
+  } catch (e) {}
+  // Note: avoid using the `import` keyword in runtime checks because some
+  // JS parsers treat it as a module-only syntax and will error during parse.
+  // We rely on CommonJS require() and importScripts() where available.
+  try {
+    // Worker-style importScripts (for environments that support it)
+    if (typeof importScripts === 'function') {
+      try { importScripts('handlers/treeDataHandler.js'); } catch (e) { /* ignore */ }
+    }
+  } catch (e) {}
+})();

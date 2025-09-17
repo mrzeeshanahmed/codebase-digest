@@ -20,7 +20,17 @@
     try {
       const s = msg && msg.state ? msg.state : {};
       // Pure state update only: push incoming state into the store
-      try { if (window.store && typeof window.store.setState === 'function') { window.store.setState(s); } } catch (e) { console.warn('stateHandler: store.setState failed', e); }
+      try {
+        if (window.store && typeof window.store.setState === 'function') { window.store.setState(s); }
+        // Also set the treeData if present on the snapshot for sidebar rendering
+        try {
+          const tree = s && (s.fileTree || s.tree || s.fileTree === null ? s.fileTree : null);
+          if (typeof window.store.setTreeData === 'function') {
+            // Prefer explicit fileTree when provided, otherwise pass the whole state
+            window.store.setTreeData(s.fileTree || s);
+          }
+        } catch (e) { /* ignore tree set errors */ }
+      } catch (e) { console.warn('stateHandler: store.setState failed', e); }
 
       // Update pause button if present
       try {

@@ -571,7 +571,7 @@ export async function processWebviewMessage(msg: WebviewMessage, webview: vscode
                     try {
                         await safeExecuteCommand('codebaseDigest.toggleExpand', targetFolder, msg.relPath);
                     } catch (err) {
-                        try { webview.postMessage({ type: 'diagnostic', level: 'error', message: `toggleExpand failed: ${stringifyError(err)}` }); } catch (e) { try { console.warn('webviewHelpers: post diagnostic failed', stringifyError(e)); } catch {} }
+                        try { webview.postMessage({ type: WebviewCommands.diagnostic, level: 'error', message: `toggleExpand failed: ${stringifyError(err)}` }); } catch (e) { try { console.warn('webviewHelpers: post diagnostic failed', stringifyError(e)); } catch {} }
                         try { vscode.window.showErrorMessage(`toggleExpand failed: ${stringifyError(err)}`); } catch (e) { /* swallow */ }
                         try { console.warn('webviewHelpers: toggleExpand failed', stringifyError(err)); } catch (e) { /* swallow */ }
                     }
