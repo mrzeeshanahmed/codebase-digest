@@ -382,9 +382,11 @@ details.collapsible-section > summary > h3 { display: inline-block; }
 }
 
 .file-tree-icon {
+	display: inline-block; /* ensure width/height apply and element has a clickable box */
 	width: 16px;
 	height: 16px;
 	margin-right: 6px;
+	vertical-align: middle;
 	background-size: contain;
 	background-repeat: no-repeat;
 	background-position: center;
@@ -398,6 +400,14 @@ details.collapsible-section > summary > h3 { display: inline-block; }
 
 .folder-item > ul { display: none; }
 .folder-item.expanded > ul { display: block; }
+
+/* Constrain the file tree container so it doesn't grow beyond the viewport
+   and becomes scrollable when content overflows. Adjust max-height as needed. */
+.file-tree-container {
+	overflow: auto;
+	flex-grow: 1;
+	max-height: 60vh; /* Use viewport-relative height to scale with view */
+}
 
 /* Sidebar and tree overflow containment */
 .sidebar {

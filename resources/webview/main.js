@@ -35,6 +35,15 @@ let paused = false;
 // Track expanded folder paths: canonical array lives in `store`; keep a Set locally and sync
 let expandedSet = new Set();
 
+// User interaction guard: when the user is interacting with the file list (clicking,
+// keyboard navigation, etc.) we temporarily suspend applying incoming fileTree updates
+// to avoid jarring re-renders that collapse the tree. Incoming updates are queued
+// and applied after a short idle period.
+let userInteracting = false;
+let interactionTimeout = null;
+let pendingIncomingTree = null;
+let pendingIncomingSelectedPaths = null;
+
 // Zustand-like store for centralizing file tree + selection state in the webview.
 // We expose a small action surface so UI code and message handlers can call
 // intentful actions rather than mutating transient variables directly.
@@ -521,20 +530,57 @@ function renderFileList(state) {
                 const expanded = expandedSet.has(relPath);
                 if (expanded) { li.classList.add('expanded'); } else { li.classList.remove('expanded'); }
 
-                // Clicking the name/icon of a folder toggles its expanded state and re-renders
+                // Clicking the folder icon toggles its expanded state and re-renders.
+                // Attach the handler to the icon only so clicks on the label/text don't toggle expansion.
                 const toggleExpand = (e) => {
-                    try { if (e && typeof e.stopPropagation === 'function') { e.stopPropagation(); } } catch (ex) {}
                     try {
-                        if (expandedSet.has(relPath)) { expandedSet.delete(relPath); li.classList.remove('expanded'); }
-                        else { expandedSet.add(relPath); li.classList.add('expanded'); }
+                        if (expandedSet.has(relPath)) {
+                            expandedSet.delete(relPath);
+                            li.classList.remove('expanded');
+                        } else {
+                            expandedSet.add(relPath);
+                            li.classList.add('expanded');
+                        }
                         // persist array form into store
-                        try { store.setExpandedPaths && store.setExpandedPaths(Array.from(expandedSet)); } catch (e) {}
+                        if (store.setExpandedPaths) { try { store.setExpandedPaths(Array.from(expandedSet)); } catch (ex) { /* swallow */ } }
                         // Re-render using aligned state if available
-                        try { const st = store.getState ? store.getState() : null; renderTree((st && st.aligned) || st, expandedSet); } catch (e) {}
-                    } catch (e) { logWarn('toggleExpand failed', e); }
+                        try { const st = store.getState ? store.getState() : null; renderTree((st && st.aligned) || st, expandedSet); } catch (ex) { /* swallow */ }
+                    } catch (err) { logWarn('toggleExpand failed', err); }
                 };
-                name.addEventListener('click', toggleExpand);
-                icon.addEventListener('click', toggleExpand);
+
+                // Provide keyboard access and semantics on the icon only
+                try {
+                    icon.setAttribute('role', 'button');
+                    icon.setAttribute('tabindex', '0');
+                    try { icon.setAttribute('aria-expanded', String(expanded)); } catch (e) {}
+                } catch (e) {}
+
+                // Attach a capture-phase listener on the label that only reacts when
+                // the click target is the icon (icon remains inside the label per requirement).
+                // Using capture ensures we can prevent the default label -> checkbox activation
+                // before the browser toggles the checkbox.
+                try {
+                    label.addEventListener('click', (ev) => {
+                        try {
+                            if (ev && ev.target && (ev.target === icon || icon.contains(ev.target))) {
+                                try { ev.preventDefault(); ev.stopPropagation(); } catch (e) {}
+                                toggleExpand(ev);
+                                try { icon.setAttribute('aria-expanded', String(expandedSet.has(relPath))); } catch (e) {}
+                            }
+                        } catch (e) { /* swallow per-node errors */ }
+                    }, true);
+                } catch (e) { /* swallow */ }
+
+                // Keep keyboard activation on the icon for accessibility
+                icon.addEventListener('keydown', (ev) => {
+                    try {
+                        if (ev.key === 'Enter' || ev.key === ' ') {
+                            try { ev.preventDefault(); ev.stopPropagation(); } catch (e) {}
+                            toggleExpand(ev);
+                            try { icon.setAttribute('aria-expanded', String(expandedSet.has(relPath))); } catch (e) {}
+                        }
+                    } catch (e) { /* swallow */ }
+                });
             }
 
             label.appendChild(checkbox);
@@ -694,22 +740,41 @@ window.addEventListener('message', event => {
         try {
             const presets = (msg.state && msg.state.filterPresets) || (msg.state && msg.state.presets) || [];
             const first = Array.isArray(presets) && presets.length > 0 ? String(presets[0]) : null;
-            if (first && lastAppliedPresetForTree !== first) {
+                if (first && lastAppliedPresetForTree !== first) {
                 try { togglePresetSelectionUI(first); } catch (e) {}
                 try { postAction('applyPreset', { preset: first }); } catch (e) {}
+                // Optimistic UI: attempt a local aligned render using the current store
+                try {
+                    const st = store.getState ? store.getState() : null;
+                    const files = st && st.fileTree ? st.fileTree : {};
+                    if (typeof applyPreset === 'function') {
+                        try {
+                            const aligned = applyPreset(first, files);
+                            try { store.setState && store.setState({ aligned }); } catch (e) {}
+                            try { renderTree(aligned, expandedSet); } catch (e) {}
+                        } catch (e) { /* swallow */ }
+                    }
+                } catch (e) { /* swallow */ }
                 lastAppliedPresetForTree = first;
             }
         } catch (e) {}
     } else if (msg.type === 'previewDelta') {
         // Update the chips
         renderPreviewDelta(msg.delta);
-        if (msg.delta && msg.delta.fileTree) {
-                try { store.setFileTree && store.setFileTree(msg.delta.fileTree, Array.isArray(msg.delta.selectedPaths) ? msg.delta.selectedPaths : []); } catch (e) {}
-                // Ensure the tree is rendered immediately after the store is populated so
-                // the UI populates on initial scan completion without requiring user action.
+                if (msg.delta && msg.delta.fileTree) {
                 try {
-                    const st = store.getState ? store.getState() : null;
-                    try { renderTree((st && st.aligned) || st, expandedSet); } catch (e) {}
+                    const incomingTree = msg.delta.fileTree;
+                    const incomingSelection = Array.isArray(msg.delta.selectedPaths) ? msg.delta.selectedPaths : [];
+                    if (userInteracting) {
+                        // defer applying the incoming tree until user is idle to avoid collapsing
+                        pendingIncomingTree = incomingTree;
+                        pendingIncomingSelectedPaths = incomingSelection;
+                    } else {
+                        try { store.setFileTree && store.setFileTree(incomingTree, incomingSelection); } catch (e) {}
+                        // Ensure the tree is rendered immediately after the store is populated so
+                        // the UI populates on initial scan completion without requiring user action.
+                        try { const st = store.getState ? store.getState() : null; renderTree((st && st.aligned) || st, expandedSet); } catch (e) {}
+                    }
                 } catch (e) { /* swallow to avoid breaking message handler */ }
                 // If previewDelta supplies preset metadata, apply once per new tree
                 try {
@@ -718,6 +783,18 @@ window.addEventListener('message', event => {
                     if (first && lastAppliedPresetForTree !== first) {
                         try { togglePresetSelectionUI(first); } catch (e) {}
                         try { postAction('applyPreset', { preset: first }); } catch (e) {}
+                        // Optimistic UI update: apply preset locally and re-render immediately
+                        try {
+                            const st = store.getState ? store.getState() : null;
+                            const files = st && st.fileTree ? st.fileTree : {};
+                            if (typeof applyPreset === 'function') {
+                                try {
+                                    const aligned = applyPreset(first, files);
+                                    try { store.setState && store.setState({ aligned }); } catch (e) {}
+                                    try { renderTree(aligned, expandedSet); } catch (e) {}
+                                } catch (e) { /* swallow */ }
+                            }
+                        } catch (e) { /* swallow */ }
                         lastAppliedPresetForTree = first;
                     }
                 } catch (e) { /* swallow */ }
@@ -1115,6 +1192,36 @@ window.onload = function() {
         nodes.cancelWriteBtn = document.getElementById('btn-cancel-write');
         nodes.pauseBtn = document.getElementById('btn-pause-resume');
     } catch (e) { /* ignore cache wiring errors */ }
+
+    // Attach light-weight interaction listeners to detect when the user is manipulating
+    // the file list. Use capture-phase pointer events so we catch interactions early
+    // before the label/checkbox default behaviours occur.
+    try {
+        const listRoot = nodes.fileListRoot || document.getElementById('file-list');
+        const markInteraction = () => {
+            try {
+                userInteracting = true;
+                if (interactionTimeout) { clearTimeout(interactionTimeout); interactionTimeout = null; }
+                // after 700ms of inactivity, consider interaction finished and flush pending update
+                interactionTimeout = setTimeout(() => {
+                    try {
+                        userInteracting = false;
+                        interactionTimeout = null;
+                        if (pendingIncomingTree) {
+                            try { store.setFileTree && store.setFileTree(pendingIncomingTree, pendingIncomingSelectedPaths || []); } catch (e) {}
+                            try { const st = store.getState ? store.getState() : null; renderTree((st && st.aligned) || st, expandedSet); } catch (e) {}
+                            pendingIncomingTree = null; pendingIncomingSelectedPaths = null;
+                        }
+                    } catch (e) { /* swallow */ }
+                }, 700);
+            } catch (e) { /* swallow */ }
+        };
+        if (listRoot) {
+            listRoot.addEventListener('pointerdown', markInteraction, { capture: true });
+            listRoot.addEventListener('focusin', markInteraction, { capture: true });
+            listRoot.addEventListener('keydown', markInteraction, { capture: true });
+        }
+    } catch (e) { /* swallow */ }
 
     // Delegate toolbar clicks to buttons with data-action attributes (simpler aria-friendly wiring)
     const toolbar = nodes.toolbar || document.getElementById('toolbar');

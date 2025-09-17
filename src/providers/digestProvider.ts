@@ -215,7 +215,9 @@ export async function generateDigest(
         ...config,
         ...overrides,
         tokenModel,
-        tokenDivisorOverrides
+        tokenDivisorOverrides,
+        // Ensure includeTree is explicitly forwarded from runtimeConfig or saved config
+        includeTree: (runtimeConfig && typeof (runtimeConfig as any).includeTree === 'boolean') ? (runtimeConfig as any).includeTree : (typeof config.includeTree === 'boolean' ? config.includeTree : true),
     }, [], runtimeConfig.outputFormat || config.outputFormat);
     } catch (err: any) {
         // If generation was canceled via the event bus, ensure partial artifacts are removed and inform the user
