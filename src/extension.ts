@@ -596,17 +596,19 @@ try { console.log('[codebase-digest] activate() called'); } catch (e) { try { co
 	}
 
 	// Helper to flash status bar for digest completion
-	let digestFlashTimeout: NodeJS.Timeout | undefined;
+	let digestFlashTimeout: ReturnType<typeof setTimeout> | undefined;
 	function flashDigestReady(folderPath?: string) {
 		if (digestFlashTimeout) {
 			clearTimeout(digestFlashTimeout);
 			digestFlashTimeout = undefined;
 		}
 		statusBar.text = '$(rocket) Digest ready';
-		digestFlashTimeout = setTimeout(() => {
-			updateCounts(getFolderPath(folderPath));
-			digestFlashTimeout = undefined;
-		}, 2000);
+		const __cbd_digest_flash_to = setTimeout(() => {
+				updateCounts(getFolderPath(folderPath));
+				digestFlashTimeout = undefined;
+			}, 2000);
+		try { if (__cbd_digest_flash_to && typeof (__cbd_digest_flash_to as any).unref === 'function') { try { (__cbd_digest_flash_to as any).unref(); } catch (e) {} } } catch (e) {}
+		digestFlashTimeout = __cbd_digest_flash_to as unknown as ReturnType<typeof setTimeout>;
 	}
 	for (const [folderPath, treeProvider] of treeProviders.entries()) {
 		// Narrow to a small runtime-friendly shape instead of casting to Record<string, unknown>

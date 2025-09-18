@@ -72,6 +72,8 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
     // While a full workspace scan is in progress, coalesce directory hydration
     // requests here so many watcher events don't queue up many expensive scans.
     private pendingHydrations: Set<string> = new Set();
+    // Timer used to schedule a deferred full refresh when backlog is huge
+    private pendingFullRefreshTimer?: ReturnType<typeof setTimeout> | null;
     private selectionManager: SelectionManager;
     // Optional metrics service injected via services bundle (opaque to provider)
     private metrics?: unknown;
@@ -184,6 +186,7 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
                     try { this.debounceTimers.delete(key); } catch (e) { /* swallow */ }
                 }
             }, 250);
+            try { if (t && typeof (t as any).unref === 'function') { try { (t as any).unref(); } catch (e) {} } } catch (e) {}
             this.debounceTimers.set(key, t as ReturnType<typeof setTimeout>);
         };
         // Create a small debounced refresh so rapid watcher storms don't trigger
@@ -527,9 +530,23 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
                         logTelemetry({ event: 'backlog_too_large', backlog, maxPending, batchSize, batchDelay, ts: Date.now() });
                         // Schedule a deferred full refresh to allow the UI to breathe
                         // and to let further watcher events be coalesced into the next scan.
-                        setTimeout(() => {
-                            try { if (this.debouncedRefresh) { this.debouncedRefresh(); } } catch (e) { /* swallow */ }
-                        }, 50);
+                        // Schedule a short deferred full refresh. Track the timer so
+                        // it can be cleared if the provider is disposed before it fires.
+                        try {
+                            this.pendingFullRefreshTimer = setTimeout(() => {
+                                try { if (this.debouncedRefresh) { this.debouncedRefresh(); } } catch (e) { /* swallow */ }
+                                // Clear reference after run
+                                try { this.pendingFullRefreshTimer = null; } catch (e) { /* ignore */ }
+                            }, 50);
+                            try { if (this.pendingFullRefreshTimer && typeof (this.pendingFullRefreshTimer as any).unref === 'function') { try { (this.pendingFullRefreshTimer as any).unref(); } catch (e) {} } } catch (e) {}
+                        } catch (e) { /* swallow scheduling errors */ }
+        // Clear any scheduled full-refresh timer
+        try {
+            if (this.pendingFullRefreshTimer) {
+                try { clearTimeout(this.pendingFullRefreshTimer); } catch (e) { /* ignore */ }
+                this.pendingFullRefreshTimer = null;
+            }
+        } catch (e) { /* ignore */ }
                         try { this.diagnostics && this.diagnostics.warn ? this.diagnostics.warn(`pendingHydrations backlog too large (${backlog}), scheduling full refresh (maxPending=${maxPending})`) : console.warn(`pendingHydrations backlog too large (${backlog}), scheduling full refresh (maxPending=${maxPending})`); } catch {}
                     } catch (e) { /* swallow scheduling errors */ }
                 } else {
@@ -591,7 +608,7 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
                 try { emitState({ state: preview, folderPath: this.workspaceRoot }); } catch (e) { /* ignore */ }
             } catch (e) { /* ignore */ }
             // End progress
-            emitProgress({ op: 'scan', mode: 'end', determinate: false, message: 'Scan complete' });
+                // multiple overlapping scans overwrite `scanToken` or instance state.
         });
     }
 

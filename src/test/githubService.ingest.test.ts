@@ -19,10 +19,10 @@ describe('procRedact.spawnGitPromise', () => {
     child_process.spawn = jest.fn((cmd: any, args: any, opts: any) => {
       capturedCmd = cmd;
       // Return a fake process that immediately exits successfully
-      return {
+        return {
         stdout: { on: (_: any, __: any) => {} },
         stderr: { on: (_: any, __: any) => {} },
-        on: (ev: string, cb: any) => { if (ev === 'exit') { setTimeout(() => cb(0), 0); } }
+        on: (ev: string, cb: any) => { if (ev === 'exit') { try { cb(0); } catch (e) { /* ignore */ } } }
       };
     });
 

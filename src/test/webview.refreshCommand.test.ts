@@ -49,8 +49,8 @@ describe('codebasePanel webview command forwarding', () => {
         webview: {
           postMessage: jest.fn(),
           onDidReceiveMessage: (cb: (m: any) => void) => { handler = cb; return { dispose: () => {} }; },
-          asWebviewUri: (u: vscode.Uri) => vscode.Uri.parse('vscode-resource:' + u.path),
-          cspSource: 'vscode-resource:'
+          asWebviewUri: (u: vscode.Uri) => vscode.Uri.parse('https://mock' + u.path),
+          cspSource: 'https://mock'
         },
         // resolveWebviewView expects the view to expose onDidDispose
         onDidDispose: (cb: () => void) => { return { dispose: () => {} }; }

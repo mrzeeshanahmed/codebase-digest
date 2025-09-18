@@ -5,6 +5,7 @@ import { onProgress } from './eventBus';
 import { onState } from './eventBus';
 import { setWebviewHtml, wireWebviewMessages } from './webviewHelpers';
 import { ConfigurationService } from '../services/configurationService';
+import { debounce } from '../utils/debounce';
 import { Diagnostics } from '../utils/diagnostics';
 import { WebviewCommands, WebviewCommand } from '../types/webview';
 const diagnostics = new Diagnostics('debug', 'Code Ingest');
@@ -126,6 +127,12 @@ export class CodebaseDigestPanel {
     // Wire preview updates: post compact deltas to keep stats live without full re-render
     const debouncedPostDelta = debounce(() => this.postPreviewDelta(), 200);
     this.treeProvider.setPreviewUpdater(() => debouncedPostDelta());
+    // Ensure we cancel the debounced updater when the panel is disposed to
+    // avoid leaving a pending timeout that retains closures.
+    this.panel.onDidDispose(() => {
+        try { if ((debouncedPostDelta as any) && typeof (debouncedPostDelta as any).cancel === 'function') { try { (debouncedPostDelta as any).cancel(); } catch (e) { } } } catch (e) { }
+        try { this.treeProvider.setPreviewUpdater(() => {}); } catch (e) { }
+    });
     // Forward progress events to the webview
     const disposeProgress = onProgress(e => {
                 if (this.panel) {
@@ -176,7 +183,9 @@ export class CodebaseDigestPanel {
         }
     } catch (e) { try { diagnostics.warn('getting previewNow failed', e); } catch {} }
     // Periodic heartbeat to refresh stats every 5s
-    this.previewInterval = setInterval(() => this.postPreviewDelta(), 5000);
+    const __cbd_preview_interval = setInterval(() => this.postPreviewDelta(), 5000);
+    try { if (__cbd_preview_interval && typeof (__cbd_preview_interval as any).unref === 'function') { try { (__cbd_preview_interval as any).unref(); } catch (e) {} } } catch (e) {}
+    this.previewInterval = __cbd_preview_interval as unknown as ReturnType<typeof setInterval>;
     this.panel.onDidDispose(() => { try { if (this.previewInterval) { try { clearInterval(this.previewInterval as unknown as ReturnType<typeof setInterval>); } catch {} this.previewInterval = undefined; } } catch (e) { try { diagnostics.warn('clearing previewInterval failed', e); } catch {} } });
     this.panel.onDidDispose(() => { try { disposeProgress(); } catch (e) { try { diagnostics.warn('disposeProgress failed', e); } catch {} } });
     this.panel.onDidDispose(() => { try { scanProgressDisp(); } catch (e) { try { diagnostics.warn('scanProgressDisp failed', e); } catch {} } });
@@ -264,17 +273,7 @@ export class CodebaseDigestPanel {
 
 }
 
-function debounce(fn: () => void, ms: number) {
-    // Use ReturnType<typeof setTimeout> so the type adapts to the runtime
-    // (number in browser/webview, Timeout in Node) and avoids referencing
-    // the NodeJS.Timeout symbol directly which can leak node types into
-    // webview-compiled code.
-    let t: ReturnType<typeof setTimeout> | null = null;
-    return () => {
-        if (t) { try { clearTimeout(t as unknown as ReturnType<typeof setTimeout>); } catch {} }
-        t = setTimeout(() => { t = null; fn(); }, ms) as unknown as ReturnType<typeof setTimeout>;
-    };
-}
+// Use shared debounce helper from ../utils/debounce.ts
 
 export function registerCodebasePanel(context: vscode.ExtensionContext, extensionUri: vscode.Uri, treeProvider: CodebaseDigestTreeProvider) {
     const folderPath = (treeProvider && typeof (treeProvider as unknown as Record<string, unknown>)['workspaceRoot'] === 'string') ? String((treeProvider as unknown as Record<string, unknown>)['workspaceRoot']) : '';
@@ -424,12 +423,13 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                     }
                     // schedule the latest event to be sent after remaining interval
                     lastEvent = ev;
-                    if (!pending) {
+                        if (!pending) {
                         const delay = Math.max(0, ms - (now - lastSent));
                         pending = setTimeout(() => {
                             pending = null;
                             if (lastEvent) { lastSent = Date.now(); send(lastEvent); lastEvent = null; }
                         }, delay);
+                        try { if (pending && typeof (pending as any).unref === 'function') { try { (pending as any).unref(); } catch (e) {} } } catch (e) {}
                     }
                 });
                 // Ensure disposal when the view is closed
@@ -487,7 +487,7 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
             let sidebarInterval: ReturnType<typeof setInterval> | undefined;
             const startSidebarInterval = () => {
                 if (sidebarInterval) { try { clearInterval(sidebarInterval as unknown as ReturnType<typeof setInterval>); } catch {} sidebarInterval = undefined; }
-                sidebarInterval = setInterval(() => {
+                const __cbd_sidebar_interval = setInterval(() => {
                     try {
                         const preview = treeProvider.getPreviewData();
                         const delta: PreviewDeltaPayload['delta'] = {
@@ -503,6 +503,8 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                         webviewView.webview.postMessage(payload);
                     } catch (e) { /* ignore */ }
                 }, 5000);
+                try { if (__cbd_sidebar_interval && typeof (__cbd_sidebar_interval as any).unref === 'function') { try { (__cbd_sidebar_interval as any).unref(); } catch (e) {} } } catch (e) {}
+                sidebarInterval = __cbd_sidebar_interval as unknown as ReturnType<typeof setInterval>;
             };
             // Register disposal handler first so it is guaranteed to run if the view
             // is disposed very quickly after being resolved. This prevents the

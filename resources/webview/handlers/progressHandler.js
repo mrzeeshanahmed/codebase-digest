@@ -14,17 +14,35 @@
    *
    * @param {{type?:string, event?:{op?:string, mode?:string, percent?:number}}} msg
    */
-  var progressHandler = function (msg) {
+  function progressHandler(msg) {
     try {
+      if (!msg) { return; }
       const e = msg && msg.event ? msg.event : null;
-      try { if (window.store && typeof window.store.setLoading === 'function' && e && e.op) { window.store.setLoading(e.op, e.mode !== 'end'); } } catch (err) { console.warn('progressHandler: store.setLoading failed', err); }
-      // Do NOT directly call UI progress impl; subscribers will observe store and update UI.
-      try { if (typeof window.__handleProgress === 'function') { window.__handleProgress(msg.event); } else if (typeof handleProgress === 'function') { handleProgress(msg.event); } } catch (e) { /* ignore UI hook failures */ }
+      try { if (typeof window !== 'undefined' && window.store && typeof window.store.setLoading === 'function' && e && e.op) { window.store.setLoading(e.op, e.mode !== 'end'); } } catch (err) { console.warn('progressHandler: store.setLoading failed', err); }
+  // Prefer store-driven updates. Keep legacy immediate hook as non-essential.
+  // Prefer store-driven updates only. Legacy immediate UI hook removed so
+  // handlers remain side-effect free and the renderer/subscribers react to
+  // store changes to update the DOM. If immediate UI feedback is required,
+  // the uiRenderer should subscribe to store or expose its own API.
     } catch (err) { console.warn('progressHandler error', err); }
-  };
+  }
 
   var cmd = (window.COMMANDS && window.COMMANDS.progress) ? window.COMMANDS.progress : (window.__commandNames && window.__commandNames.progress) ? window.__commandNames.progress : 'progress';
-  if (typeof window.__registerHandler === 'function') { try { window.__registerHandler(cmd, progressHandler); } catch (e) {} }
-  try { if (!window.__registeredHandlers) { window.__registeredHandlers = {}; } window.__registeredHandlers[cmd] = progressHandler; } catch (e) {}
-  try { if (!window.__commandRegistry) { window.__commandRegistry = {}; } window.__commandRegistry[cmd] = progressHandler; } catch (e) {}
+  try {
+    if (typeof window !== 'undefined') {
+      if (typeof window.registerCommand === 'function') {
+        try { window.registerCommand(cmd, progressHandler); } catch (e) { const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/progressHandler.js', command: cmd }); }
+      } else if (typeof window.__registerHandler === 'function') {
+        try { window.__registerHandler(cmd, progressHandler); } catch (e) { const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/progressHandler.js', command: cmd }); }
+      }
+    }
+  } catch (e) { const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/progressHandler.js', command: cmd }); }
+  try {
+    const registry = require('../commandRegistry');
+    if (registry && typeof registry.registerCommand === 'function') {
+      registry.registerCommand(cmd, progressHandler, { allowMultiple: false });
+    }
+  } catch (e) {}
+  
+  module.exports = { progressHandler };
 })();

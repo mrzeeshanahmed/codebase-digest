@@ -17,10 +17,18 @@ describe('OutputWriter streaming and cancel', () => {
     // Spy on vscode.showSaveDialog to return testFile
     const vscode = require('vscode');
     jest.spyOn(vscode.window, 'showSaveDialog').mockResolvedValue({ fsPath: testFile } as any);
-    // Capture writes via a fake stream
+    // Capture writes via a fake stream and trigger cancellation on first write
     let written = '';
+    let firstWrite = true;
     const fakeStream = {
-      write: (chunk: string) => { written += chunk; },
+      write: (chunk: string) => {
+        written += chunk;
+        if (firstWrite) {
+          firstWrite = false;
+          // trigger cancel event synchronously when writing starts
+          emitProgress({ op: 'write', mode: 'cancel' });
+        }
+      },
       end: () => {}
     };
   fsModule = require('fs');
@@ -30,8 +38,7 @@ describe('OutputWriter streaming and cancel', () => {
     // Trigger cancellation shortly after write starts
   const writer = new OutputWriter();
     // Increase output size to exceed streamingThresholdBytes (1024) and trigger streaming/cancellation
-    const largeOutput = 'X'.repeat(2000); // Ensure we exceed streamingThresholdBytes  // Schedule cancel after a short delay to avoid race conditions on slow CI
-  setTimeout(() => emitProgress({ op: 'write', mode: 'cancel' }), 20);
+    const largeOutput = 'X'.repeat(2000); // Ensure we exceed streamingThresholdBytes
 
     await writer.write(largeOutput, { outputWriteLocation: 'file', outputFormat: 'text', streamingThresholdBytes: 1024, chunkSize: 65536 });
     expect(written).toContain('Digest canceled. Output may be incomplete.');

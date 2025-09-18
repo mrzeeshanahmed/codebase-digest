@@ -40,8 +40,8 @@ describe('webviewHelpers asset rewrite', () => {
   it('rewrites single-quoted link/script and ../icons img to webview URIs', () => {
     let assignedHtml = '';
     const fakeWebview: any = {
-      asWebviewUri: (u: vscode.Uri) => vscode.Uri.parse('vscode-resource:' + u.path),
-      cspSource: 'vscode-resource:',
+      asWebviewUri: (u: vscode.Uri) => vscode.Uri.parse('https://mock' + u.path.replace(/\\/g, '/')),
+      cspSource: 'https://mock',
       set html(v: string) { assignedHtml = v; },
       get html() { return assignedHtml; }
     };
@@ -49,10 +49,12 @@ describe('webviewHelpers asset rewrite', () => {
     setWebviewHtml(fakeWebview as any, vscode.Uri.file(tmpRoot));
 
     expect(typeof assignedHtml).toBe('string');
-    // styles.css and main.js should be rewritten to vscode-resource URIs
-    expect(assignedHtml).toMatch(/vscode-resource:.*resources[\\\/]webview[\\\/]styles\.css/);
-    expect(assignedHtml).toMatch(/vscode-resource:.*resources[\\\/]webview[\\\/]main\.js/);
-    // icon.png referenced via ../icons should be rewritten to resources/icons
-    expect(assignedHtml).toMatch(/vscode-resource:.*resources[\\\/]icons[\\\/]icon\.png/);
+  // styles.css and main.js should be rewritten using webview.asWebviewUri
+  expect(assignedHtml).toMatch(/https:\/\/mock.*resources[\\\/]webview[\\\/]styles\.css/);
+  expect(assignedHtml).toMatch(/https:\/\/mock.*resources[\\\/]webview[\\\/]main\.js/);
+  // icon.png referenced via ../icons should be rewritten to resources/icons
+  expect(assignedHtml).toMatch(/https:\/\/mock.*resources[\\\/]icons[\\\/]icon\.png/);
+  // CSP meta should include the webview.cspSource somewhere in the HTML
+  expect(assignedHtml.indexOf(fakeWebview.cspSource) !== -1).toBe(true);
   });
 });

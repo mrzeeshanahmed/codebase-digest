@@ -2,12 +2,11 @@
   'use strict';
   if (typeof window === 'undefined') { return; }
 
-  // Centralized command name constants for the webview.
-  // Keep the keys identical to the runtime message.type values used by the
-  // command registry and handlers. This file intentionally does not attempt
-  // to infer names at runtime; it provides a stable reference for code that
-  // wants to avoid magic strings.
-  var COMMANDS = Object.freeze({
+  // Prefer an existing authoritative map if present (set by commands.js or
+  // injected by the extension during HTML construction). Otherwise, create
+  // a small runtime COMMANDS object to keep code using window.COMMANDS working
+  // in pure-JS builds.
+  var runtime = (typeof window.__commandNames === 'object' && window.__commandNames) ? window.__commandNames : Object.freeze({
     state: 'state',
     previewDelta: 'previewDelta',
     ingestPreview: 'ingestPreview',
@@ -19,8 +18,11 @@
     config: 'config',
     diagnostic: 'diagnostic',
     test: 'test'
+   ,
+   updateTree: 'updateTree',
+   refreshTree: 'refreshTree'
   });
 
-  try { window.COMMANDS = COMMANDS; } catch (e) { /* ignore */ }
-  try { if (typeof module !== 'undefined' && module.exports) { module.exports = COMMANDS; } } catch (e) {}
+  try { window.COMMANDS = runtime; } catch (e) { /* ignore */ }
+  try { if (typeof module !== 'undefined' && module.exports) { module.exports = runtime; } } catch (e) {}
 })();

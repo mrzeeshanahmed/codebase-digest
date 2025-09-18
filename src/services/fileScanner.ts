@@ -114,6 +114,7 @@ export class FileScanner {
                     // Use posix join for pattern tests because include/exclude patterns
                     // are evaluated against posix-style rel paths (forward slashes).
                     const sample1 = dirKey ? path.posix.join(dirKey, '__includetest__') : '__includetest__';
+            try { if (this._progressTimer && typeof (this._progressTimer as any).unref === 'function') { try { (this._progressTimer as any).unref(); } catch (e) {} } } catch (e) {}
                     const sample2 = dirKey ? path.posix.join(dirKey, '__includetest__', 'x') : path.posix.join('__includetest__', 'x');
                     for (const p of includePatterns) {
                         try {
@@ -270,6 +271,7 @@ export class FileScanner {
                     this._progressTimer = null;
                 }
             }, this.progressMinIntervalMs);
+            try { if (this._progressTimer && typeof (this._progressTimer as any).unref === 'function') { try { (this._progressTimer as any).unref(); } catch (e) {} } } catch (e) {}
         } catch (ex) { try { this.diagnostics && this.diagnostics.warn && this.diagnostics.warn('emitProgressDebounced failed', ex); } catch {} }
     }
 

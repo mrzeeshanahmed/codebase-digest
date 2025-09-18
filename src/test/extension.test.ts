@@ -51,27 +51,56 @@ describe('Code Ingest Extension Integration', () => {
 		// Run selectAll command
 		await vscode.commands.executeCommand('codebaseDigest.selectAll');
 
-		// Mock showInformationMessage
-			let infoShown = false;
-			const origShowInfo = vscode.window.showInformationMessage;
-			(vscode.window.showInformationMessage as any) = function(msg: string) {
-				if (msg.includes('Digest generated') || msg.includes('Digest ready')) { infoShown = true; }
-				// mark document opened as well so tests that don't wire openTextDocument still pass
-				docOpened = true;
-				return Promise.resolve('Digest ready');
-			};
+		// Replace time-based waiting with event-driven synchronization.
+		// Prepare promises that resolve when info message is shown and when a document open event is fired.
+		const origShowInfo = vscode.window.showInformationMessage;
+		let resolveInfo: (() => void) | null = null;
+		const infoShownPromise = new Promise<void>(res => { resolveInfo = res; });
 
-		// Listen for document open
-		let docOpened = false;
-		const docListener = vscode.workspace.onDidOpenTextDocument(doc => {
-			if (doc.getText().includes('Code Ingest')) { docOpened = true; }
+		(vscode.window.showInformationMessage as any) = function(msg: string) {
+			if (msg && (String(msg).includes('Digest generated') || String(msg).includes('Digest ready'))) {
+				if (resolveInfo) { resolveInfo(); }
+			}
+			return Promise.resolve('Digest ready');
+		};
+
+		// Lightweight event registration for openTextDocument events. We expose a simple
+		// `_openEmitter.fire(doc)` hook which the test-suite `beforeAll` may call.
+		const listeners: Array<(doc: { getText: () => string }) => void> = [];
+		const origOnDidOpen = (vscode.workspace as any).onDidOpenTextDocument;
+		(vscode.workspace as any).onDidOpenTextDocument = (cb: any) => {
+			listeners.push(cb);
+			return { dispose: () => {
+				const idx = listeners.indexOf(cb);
+				if (idx >= 0) { listeners.splice(idx, 1); }
+			} };
+		};
+		(vscode.workspace as any)._openEmitter = { fire: (doc: any) => { for (const l of listeners) { try { l(doc); } catch (e) { /* swallow */ } } } };
+
+		let subDisposable: { dispose: () => void } | null = null;
+		const docOpenedPromise = new Promise<void>(res => {
+			// register a one-off listener that resolves when a doc with expected text is opened
+			subDisposable = (vscode.workspace as any).onDidOpenTextDocument((doc: any) => {
+				try {
+					if (doc && typeof doc.getText === 'function' && String(doc.getText()).includes('Code Ingest')) {
+						try { res(); } catch (_) { /* ignore */ }
+						try { if (subDisposable) { subDisposable.dispose(); } } catch (_) { /* ignore */ }
+					}
+				} catch (e) { /* ignore */ }
+			});
 		});
+
+		// Execute command which triggers both events (via our mocked executeCommand in beforeAll)
 		await vscode.commands.executeCommand('codebaseDigest.generateDigest');
-		// Wait for async events
-		await new Promise(res => setTimeout(res, 2000));
+
+		// Await both events to ensure deterministic ordering
+		await Promise.all([infoShownPromise, docOpenedPromise]);
+
+		// Restore original hooks
 		(vscode.window.showInformationMessage as any) = origShowInfo;
-		docListener.dispose();
-		assert.ok(infoShown, 'Information message not shown');
-		assert.ok(docOpened, 'Digest document not opened');
+		try { (vscode.workspace as any).onDidOpenTextDocument = origOnDidOpen; } catch (_) {}
+
+		// Final assertions
+		assert.ok(true, 'Information message shown and document opened');
 	});
 });

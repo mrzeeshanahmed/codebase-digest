@@ -24,8 +24,8 @@ describe('CodebaseDigestPanel HTML builder', () => {
     // Fake webview that captures assigned html and reports asWebviewUri and cspSource
     let assignedHtml = '';
     const fakeWebview: any = {
-      asWebviewUri: (u: vscode.Uri) => vscode.Uri.parse('vscode-resource:' + u.path),
-      cspSource: 'vscode-resource:',
+  asWebviewUri: (u: vscode.Uri) => vscode.Uri.parse('https://mock' + u.path),
+  cspSource: 'https://mock',
     };
 
     // Call internal setHtml via the public reveal flow by creating a temporary fake panel.webview
@@ -39,8 +39,8 @@ describe('CodebaseDigestPanel HTML builder', () => {
     expect((assignedHtml.match(/Content-Security-Policy/g) || []).length).toBe(1);
     expect(assignedHtml).toContain(fakeWebview.cspSource);
   // Accept both forward and back slashes in paths (Windows paths may use backslashes)
-  expect(assignedHtml).toMatch(/vscode-resource:.*resources[\\\/]webview[\\\/]styles\.css/);
-  expect(assignedHtml).toMatch(/vscode-resource:.*resources[\\\/]webview[\\\/]main\.js/);
+  expect(assignedHtml).toMatch(/https:\/\/mock.*resources[\\\/]webview[\\\/]styles\.css/);
+  expect(assignedHtml).toMatch(/https:\/\/mock.*resources[\\\/]webview[\\\/]main\.js/);
   });
 });
 
@@ -81,8 +81,8 @@ describe('View registration and WebviewView HTML', () => {
     const fakeExtUri = vscode.Uri.file(require('path').join(__dirname, '..', '..'));
     let assignedHtml = '';
     const fakeWebview: any = {
-      asWebviewUri: (u: vscode.Uri) => vscode.Uri.parse('vscode-resource:' + u.path),
-      cspSource: 'vscode-resource:',
+  asWebviewUri: (u: vscode.Uri) => vscode.Uri.parse('https://mock' + u.path),
+  cspSource: 'https://mock',
       set html(v: string) { assignedHtml = v; },
       get html() { return assignedHtml; }
     };
@@ -93,8 +93,8 @@ describe('View registration and WebviewView HTML', () => {
     expect(typeof assignedHtml).toBe('string');
     expect((assignedHtml.match(/Content-Security-Policy/g) || []).length).toBe(1);
     expect(assignedHtml).toContain(fakeWebview.cspSource);
-    expect(assignedHtml).toMatch(/vscode-resource:.*resources[\\\/]webview[\\\/]styles\.css/);
-    expect(assignedHtml).toMatch(/vscode-resource:.*resources[\\\/]webview[\\\/]main\.js/);
+  expect(assignedHtml).toMatch(/https:\/\/mock.*resources[\\\/]webview[\\\/]styles\.css/);
+  expect(assignedHtml).toMatch(/https:\/\/mock.*resources[\\\/]webview[\\\/]main\.js/);
   });
 
   it('applyPreset action updates workspace config and triggers refresh', async () => {
@@ -104,7 +104,7 @@ describe('View registration and WebviewView HTML', () => {
     const fakeWebview: any = {
       postMessage: (m: any) => { posted.push(m); return true; },
       onDidReceiveMessage: (cb: (m: any) => void) => { handler = cb; return { dispose: () => {} }; },
-      cspSource: 'vscode-resource:'
+  cspSource: 'https://mock'
     };
 
     // Mock configuration object with mutable state for filterPresets
@@ -183,7 +183,7 @@ describe('View registration and WebviewView HTML', () => {
     const fakeWebview: any = {
       postMessage: (m: any) => { posted.push(m); return true; },
       onDidReceiveMessage: (cb: (m: any) => void) => { handler = cb; return { dispose: () => {} }; },
-      cspSource: 'vscode-resource:'
+  cspSource: 'https://mock'
     };
 
     // Config has legacy keys set

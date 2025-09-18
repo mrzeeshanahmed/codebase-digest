@@ -33,19 +33,18 @@ describe('FileScanner integration (moved)', () => {
       '/root/b.md': 15,
       '/root/subdir/c.txt': 5
     };
-  // Replace fs.promises.readdir via require to ensure writability in CI/Node builds
-  const fsPromises = require('fs/promises');
-  readdirSpy = jest.spyOn(fsPromises, 'readdir' as any).mockImplementation(async (...args: any[]) => {
-  const dirStr = args[0].toString();
-  const items = (files as any)[dirStr] || [];
-  // Return Dirent-like objects with methods used by FileScanner
-  return items.map((it: any) => ({
-    name: it.name,
-    isDirectory: () => !!it.isDirectory,
-    isFile: () => !!it.isFile,
-    isSymbolicLink: () => !!it.isSymlink,
-  }));
-    });
+  // Mock fs.promises APIs using jest.spyOn on the imported module
+  readdirSpy = jest.spyOn(fs as any, 'readdir').mockImplementation(async (...args: any[]) => {
+    const dirStr = args[0].toString();
+    const items = (files as any)[dirStr] || [];
+    // Return Dirent-like objects with methods used by FileScanner
+    return items.map((it: any) => ({
+      name: it.name,
+      isDirectory: () => !!it.isDirectory,
+      isFile: () => !!it.isFile,
+      isSymbolicLink: () => !!it.isSymlink,
+    }));
+  });
     function makeStats(type: 'file' | 'dir' | 'symlink', size: number) {
       return {
         isDirectory: () => type === 'dir',
@@ -89,7 +88,7 @@ describe('FileScanner integration (moved)', () => {
         blocksBigInt: BigInt(0),
       } as any;
     }
-  statSpy = jest.spyOn(fsPromises, 'stat' as any).mockImplementation(async (...args: any[]) => {
+  statSpy = jest.spyOn(fs as any, 'stat').mockImplementation(async (...args: any[]) => {
       const fileStr = args[0].toString();
       if (fileStr.endsWith('subdir')) {
         return makeStats('dir', 0);
@@ -100,7 +99,7 @@ describe('FileScanner integration (moved)', () => {
   return makeStats('file', (sizes as any)[fileStr] || 0);
     });
   // lstat used by scanRoot post-scan inclusion checks
-  lstatSpy = jest.spyOn(fsPromises, 'lstat' as any).mockImplementation(async (...args: any[]) => {
+  lstatSpy = jest.spyOn(fs as any, 'lstat').mockImplementation(async (...args: any[]) => {
       const p = args[0].toString();
       if (p.endsWith('subdir')) { return makeStats('dir', 0); }
       if (p.endsWith('link')) { return makeStats('symlink', 0); }

@@ -94,7 +94,8 @@ describe('Concurrency', () => {
         const files = Array.from({ length: 100 }, (_, i) => ({ relPath: `f${i}.js`, name: `f${i}.js`, type: 'file', isSelected: true, depth: 0 }));
         const results: string[] = [];
         await Promise.all(files.map(async f => {
-            await new Promise(res => setTimeout(res, Math.random() * 10));
+            // Yield to the microtask queue to simulate async concurrency without timing-based flakiness
+            await new Promise<void>(res => { if (typeof queueMicrotask === 'function') { queueMicrotask(() => res()); } else { Promise.resolve().then(() => res()); } });
             results.push(f.relPath);
         }));
         expect(results.sort()).toEqual(files.map(f => f.relPath).sort());

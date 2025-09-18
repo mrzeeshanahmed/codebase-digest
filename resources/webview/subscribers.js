@@ -1,6 +1,58 @@
 ;(function () {
   'use strict';
   if (typeof window === 'undefined') { return; }
+  // Ensure the common lifecycle tracker exists so subscribers can register timers/observers
+  try {
+    if (!window.__cbd_lifecycle) {
+      (function lifecycleTracker(){
+        try {
+          const timers = new Set();
+          const observers = new Set();
+          const registerTimer = (t) => { try { if (t) { timers.add(t); } } catch (e) {} };
+          const unregisterTimer = (t) => { try { if (t) { timers.delete(t); } } catch (e) {} };
+          const registerObserver = (o) => { try { if (o) { observers.add(o); } } catch (e) {} };
+          const unregisterObserver = (o) => { try { if (o) { observers.delete(o); } } catch (e) {} };
+          const cleanup = () => {
+            try { for (const t of Array.from(timers)) { try { clearTimeout(t); } catch (e) {} try { clearInterval(t); } catch (e) {} try { if (typeof t.unref === 'function') { t.unref(); } } catch (e) {} } } catch (e) {}
+            try { for (const o of Array.from(observers)) { try { if (o && typeof o.disconnect === 'function') { o.disconnect(); } } catch (e) {} } } catch (e) {}
+            try { timers.clear(); observers.clear(); } catch (e) {}
+          };
+          window.__cbd_lifecycle = Object.assign({}, { registerTimer, unregisterTimer, registerObserver, unregisterObserver, cleanup });
+          try { window.addEventListener && window.addEventListener('unload', cleanup); } catch (e) {}
+        } catch (e) {}
+      })();
+    }
+  } catch (e) {}
+
+  // Helpers to register/unregister timers and observers with lifecycle tracker
+  function _registerTimerHandle(t) {
+    try {
+      if (typeof window !== 'undefined' && window.__cbd_lifecycle && typeof window.__cbd_lifecycle.registerTimer === 'function') {
+        window.__cbd_lifecycle.registerTimer(t);
+      }
+    } catch (e) {}
+  }
+  function _unregisterTimerHandle(t) {
+    try {
+      if (typeof window !== 'undefined' && window.__cbd_lifecycle && typeof window.__cbd_lifecycle.unregisterTimer === 'function') {
+        window.__cbd_lifecycle.unregisterTimer(t);
+      }
+    } catch (e) {}
+  }
+  function _registerObserver(o) {
+    try {
+      if (typeof window !== 'undefined' && window.__cbd_lifecycle && typeof window.__cbd_lifecycle.registerObserver === 'function') {
+        window.__cbd_lifecycle.registerObserver(o);
+      }
+    } catch (e) {}
+  }
+  function _unregisterObserver(o) {
+    try {
+      if (typeof window !== 'undefined' && window.__cbd_lifecycle && typeof window.__cbd_lifecycle.unregisterObserver === 'function') {
+        window.__cbd_lifecycle.unregisterObserver(o);
+      }
+    } catch (e) {}
+  }
 
   // Guard until store is present
   function ensureStore() {
@@ -9,15 +61,21 @@
 
   function safe(fn) { return function () { try { return fn.apply(null, arguments); } catch (e) { console.warn('subscriber safe handler error', e); } }; }
 
-  // Render helper: given a serialized tree payload from the host, render the
-  // sidebar. Prefer using the global renderTree helper when available so
-  // DOM building stays centralized; otherwise perform a minimal fallback.
+  // Render helper: prefer centralized `window.__UI_RENDERER__` when present.
+  // If not available, fall back to a minimal, safe DOM renderer.
   function renderSidebarFromTreeData(treeData, selectedPaths) {
     try {
-      const fileListRoot = document.getElementById('file-list');
-      // If there's no root element, nothing to render
+      // If a central uiRenderer exists, delegate entirely to it.
+      if (typeof window !== 'undefined' && window.__UI_RENDERER__ && typeof window.__UI_RENDERER__.renderFileList === 'function') {
+        try {
+          const state = { fileTree: treeData, selectedPaths: Array.isArray(selectedPaths) ? selectedPaths.slice() : [] };
+          return window.__UI_RENDERER__.renderFileList(state);
+        } catch (e) { /* fallthrough to fallback below */ }
+      }
+
+      // Minimal fallback: safe, DOM-light rendering
+      const fileListRoot = (typeof document !== 'undefined') ? document.getElementById('file-list') : null;
       if (!fileListRoot) { return; }
-      // If no tree data or empty, show friendly empty message
       const isEmpty = !treeData || (typeof treeData === 'object' && Object.keys(treeData).length === 0);
       if (isEmpty) {
         while (fileListRoot.firstChild) { fileListRoot.removeChild(fileListRoot.firstChild); }
@@ -28,47 +86,33 @@
         return;
       }
 
-      // If the main webview exposes renderTree, delegate to it so we keep one
-      // canonical tree rendering implementation.
-      if (typeof renderTree === 'function') {
-        try {
-          const state = { fileTree: treeData, selectedPaths: Array.isArray(selectedPaths) ? selectedPaths.slice() : [] };
-          // expandedSet is maintained by the main UI; pass through if present
-          return renderTree(state, (typeof expandedSet !== 'undefined') ? expandedSet : null);
-        } catch (e) { /* fallthrough to fallback rendering */ }
-      }
-
-      // Fallback naive renderer: build a simple flat list of leaves for minimal UX
-      try {
-        while (fileListRoot.firstChild) { fileListRoot.removeChild(fileListRoot.firstChild); }
-        const stack = [{ node: treeData, prefix: '' }];
-        while (stack.length) {
-          const item = stack.pop();
-          const node = item.node || {};
-          const prefix = item.prefix || '';
-          for (const k of Object.keys(node).sort()) {
-            const n = node[k];
-            const relPath = (n && n.relPath) || (n && n.path) || (prefix + k);
-            if (n && n.__isFile) {
-              const li = document.createElement('div');
-              li.className = 'file-row file-item';
-              li.textContent = relPath;
-              if (Array.isArray(selectedPaths) && selectedPaths.indexOf(relPath) !== -1) { li.classList.add('selected'); }
-              fileListRoot.appendChild(li);
-            } else {
-              // push children to stack with updated prefix
-              stack.push({ node: n || {}, prefix: relPath + '/' });
-            }
+      while (fileListRoot.firstChild) { fileListRoot.removeChild(fileListRoot.firstChild); }
+      const stack = [{ node: treeData, prefix: '' }];
+      while (stack.length) {
+        const item = stack.pop();
+        const node = item.node || {};
+        const prefix = item.prefix || '';
+        for (const k of Object.keys(node).sort()) {
+          const n = node[k];
+          const relPath = (n && n.relPath) || (n && n.path) || (prefix + k);
+          if (n && n.__isFile) {
+            const li = document.createElement('div');
+            li.className = 'file-row file-item';
+            li.textContent = relPath;
+            if (Array.isArray(selectedPaths) && selectedPaths.indexOf(relPath) !== -1) { li.classList.add('selected'); }
+            fileListRoot.appendChild(li);
+          } else {
+            stack.push({ node: n || {}, prefix: relPath + '/' });
           }
         }
-      } catch (e) { console.warn('fallback sidebar render failed', e); }
+      }
     } catch (e) { console.warn('renderSidebarFromTreeData failed', e); }
   }
 
   // Subscribe once store exists; if not present yet, poll briefly
   function init() {
     const s = ensureStore();
-    if (!s) { setTimeout(init, 120); return; }
+  if (!s) { var __to = setTimeout(init, 120); _registerTimerHandle(__to); if (__to && typeof __to.unref === 'function') { try { __to.unref(); } catch (e) {} } return; }
 
     // Keep last seen values to diff changes
     let last = Object.assign({}, s.getState());
@@ -85,34 +129,51 @@
           try { renderSidebarFromTreeData(st.treeData, st.selectedPaths); } catch (e) { console.warn('treeData subscriber failed', e); }
         }
 
-        // previewDelta -> renderPreviewDelta
-        if (st.previewDelta !== last.previewDelta) {
-          try { if (typeof renderPreviewDelta === 'function') { renderPreviewDelta(st.previewDelta); } } catch (e) {}
-        }
-
-        // preview -> ingest preview area
-        if (st.preview !== last.preview) {
-          try {
-            const payload = st.preview || {};
-            const previewRoot = (typeof nodes !== 'undefined' && nodes.ingestPreviewRoot) ? nodes.ingestPreviewRoot : document.getElementById('ingest-preview');
-            const textEl = (typeof nodes !== 'undefined' && nodes.ingestPreviewText) ? nodes.ingestPreviewText : document.getElementById('ingest-preview-text');
-            const spinner = (typeof nodes !== 'undefined' && nodes.ingestSpinner) ? nodes.ingestSpinner : document.getElementById('ingest-spinner');
-            if (previewRoot) { try { previewRoot.classList.remove('loading'); } catch (e) {} }
-            if (spinner) { try { spinner.hidden = true; spinner.setAttribute('aria-hidden', 'true'); } catch (e) {} }
-            if (textEl) {
-              const p = payload && payload.preview;
-              if (p) { textEl.textContent = (p.summary || '') + '\n\n' + (p.tree || ''); }
-              else if (payload && payload.output) { textEl.textContent = String(payload.output).slice(0, 2000); }
-              else { textEl.textContent = 'No preview available'; }
+            // previewDelta -> renderPreviewDelta (let uiRenderer handle preview/progress if present)
+            if (st.previewDelta !== last.previewDelta) {
+              try {
+                if (typeof window !== 'undefined' && window.__UI_RENDERER__ && typeof window.__UI_RENDERER__.renderPreviewDelta === 'function') {
+                  try { window.__UI_RENDERER__.renderPreviewDelta(st.previewDelta); } catch (e) {}
+                } else {
+                  try { if (typeof renderPreviewDelta === 'function') { renderPreviewDelta(st.previewDelta); } } catch (e) {}
+                }
+              } catch (e) {}
             }
-          } catch (e) {}
-        }
+
+            // preview -> ingest preview area (defer to uiRenderer when present)
+            if (st.preview !== last.preview) {
+              try {
+                if (typeof window !== 'undefined' && window.__UI_RENDERER__ && typeof window.__UI_RENDERER__.renderPreview === 'function') {
+                  try { window.__UI_RENDERER__.renderPreview(st.preview); } catch (e) {}
+                } else {
+                  try {
+                    const payload = st.preview || {};
+                    const n = (typeof window !== 'undefined' && window.__CBD_NODES__) ? window.__CBD_NODES__ : null;
+                    const previewRoot = (n && typeof n.getIngestPreviewRoot === 'function') ? n.getIngestPreviewRoot() : document.getElementById('ingest-preview');
+                    const textEl = (n && typeof n.getIngestPreviewText === 'function') ? n.getIngestPreviewText() : document.getElementById('ingest-preview-text');
+                    const spinner = (n && typeof n.getIngestSpinner === 'function') ? n.getIngestSpinner() : document.getElementById('ingest-spinner');
+                    if (previewRoot) { try { previewRoot.classList.remove('loading'); } catch (e) {} }
+                    if (spinner) { try { spinner.hidden = true; spinner.setAttribute('aria-hidden', 'true'); } catch (e) {} }
+                    if (textEl) {
+                      const p = payload && payload.preview;
+                      if (p) { textEl.textContent = (p.summary || '') + '\n\n' + (p.tree || ''); }
+                      else if (payload && payload.output) { textEl.textContent = String(payload.output).slice(0, 2000); }
+                      else { textEl.textContent = 'No preview available'; }
+                    }
+                  } catch (e) {}
+                }
+              } catch (e) {}
+            }
 
         // errors -> show toasts
         if (st.errors !== last.errors) {
           try {
             const errs = Array.isArray(st.errors) ? st.errors.slice() : [];
-            errs.forEach(err => { try { showToast && showToast(String(err), 'error', 6000); } catch (e) {} });
+            errs.forEach(err => { try {
+              if (typeof window !== 'undefined' && window.__UI_RENDERER__ && typeof window.__UI_RENDERER__.showToast === 'function') {
+                window.__UI_RENDERER__.showToast(String(err), 'error', 6000);
+              } else { showToast && showToast(String(err), 'error', 6000); }
+            } catch (e) {} });
           } catch (e) {}
         }
 
@@ -120,15 +181,19 @@
         if (st.loading !== last.loading) {
           try {
             const load = st.loading || {};
-            // simple mapping: show/hide progress container
-            const container = nodes.progressContainer || document.getElementById('progress-container');
-            const bar = nodes.progressBar || document.getElementById('progress-bar');
-            if (load && Object.keys(load).length > 0) {
-              try { if (container) { container.classList.remove('hidden'); } } catch (e) {}
-              // If percent present, update bar
-              try { if (bar && typeof load.percent === 'number') { bar.style.width = (load.percent || 0) + '%'; bar.setAttribute('aria-valuenow', String(Math.round(load.percent || 0))); } } catch (e) {}
+            if (typeof window !== 'undefined' && window.__UI_RENDERER__ && typeof window.__UI_RENDERER__.renderProgress === 'function') {
+              try { window.__UI_RENDERER__.renderProgress(load); } catch (e) {}
             } else {
-              try { if (container) { container.classList.add('hidden'); } } catch (e) {}
+              // simple mapping: show/hide progress container
+              const container = nodes.progressContainer || document.getElementById('progress-container');
+              const bar = nodes.progressBar || document.getElementById('progress-bar');
+              if (load && Object.keys(load).length > 0) {
+                try { if (container) { container.classList.remove('hidden'); } } catch (e) {}
+                // If percent present, update bar
+                try { if (bar && typeof load.percent === 'number') { bar.style.width = (load.percent || 0) + '%'; bar.setAttribute('aria-valuenow', String(Math.round(load.percent || 0))); } } catch (e) {}
+              } else {
+                try { if (container) { container.classList.add('hidden'); } } catch (e) {}
+              }
             }
           } catch (e) {}
         }
@@ -138,7 +203,14 @@
           try {
             const tmp = st.loadedRepoTmpPath || null;
             if (tmp) {
-              try { const textEl = nodes.ingestPreviewText || document.getElementById('ingest-preview-text'); if (textEl) { textEl.textContent = `Repository loaded: ${String(tmp)}`; } } catch (e) {}
+              try {
+                if (typeof window !== 'undefined' && window.__UI_RENDERER__ && typeof window.__UI_RENDERER__.renderPreview === 'function') {
+                  // Let uiRenderer handle the "repository loaded" message in preview area
+                  try { window.__UI_RENDERER__.renderPreview({ preview: { summary: `Repository loaded: ${String(tmp)}` } }); } catch (e) {}
+                } else {
+                  try { const n = (typeof window !== 'undefined' && window.__CBD_NODES__) ? window.__CBD_NODES__ : null; const textEl = (n && typeof n.getIngestPreviewText === 'function') ? n.getIngestPreviewText() : document.getElementById('ingest-preview-text'); if (textEl) { textEl.textContent = `Repository loaded: ${String(tmp)}`; } } catch (e) {}
+                }
+              } catch (e) {}
               try { const loadBtn = document.getElementById('ingest-load-repo'); const startBtn = document.getElementById('ingest-submit'); if (loadBtn) { loadBtn.hidden = true; loadBtn.setAttribute('aria-hidden', 'true'); } if (startBtn) { startBtn.hidden = false; startBtn.removeAttribute('aria-hidden'); startBtn.focus && startBtn.focus(); } } catch (e) {}
             }
           } catch (e) {}

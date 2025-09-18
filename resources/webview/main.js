@@ -1,11 +1,27 @@
-// If a store is provided globally (from store.js), reuse it. Otherwise, define a tiny create()
-// helper as a fallback for older deployments.
+// Initialize VS Code API and the shared store.
+// Prefer an existing webview-provided store (window.store), then try to require the
+// packaged `store.js` module. Only if neither is available, create a minimal
+// fallback compatible with the small subset of the zustand-like API this webview uses.
 const vscode = acquireVsCodeApi();
-if (typeof window !== 'undefined' && window.store) {
-    // prefer the preloaded store; expose getState/setState/subscribe helpers
-    var store = window.store;
-} else {
-    // Minimal vanilla store helper compatible with a tiny subset of zustand's API
+let store;
+(function initStore() {
+    // 1) Prefer window.store when the webview preload has injected it
+    try {
+        if (typeof window !== 'undefined' && window.store) {
+            store = window.store;
+            return;
+        }
+    } catch (e) { /* ignore */ }
+
+    // 2) Try requiring the runtime store module (bundled case)
+    try {
+        if (typeof require === 'function') {
+            const required = require('./store');
+            if (required) { store = required; return; }
+        }
+    } catch (e) { /* ignore require failures */ }
+
+    // 3) Fallback: minimal vanilla store helper compatible with a tiny subset of zustand's API
     function create(fn) {
         let state = {};
         const listeners = new Set();
@@ -20,7 +36,73 @@ if (typeof window !== 'undefined' && window.store) {
         return Object.assign(api || {}, { setState: (patch) => set(patch), getState, subscribe });
     }
 
-    // local store will be created below (kept as before)
+    // create a local store instance with the minimal action surface required by this file
+    store = create((set) => ({
+        // core state
+        fileTree: {},
+        selectedPaths: [],
+        expandedPaths: [],
+        paused: false,
+        pendingPersistedSelection: null,
+        pendingPersistedFocusIndex: undefined,
+        // actions: intentful APIs for updating state
+        setState: (patch) => set((s) => Object.assign({}, s, patch)),
+        setFileTree: (tree, selectedPaths) => set((s) => Object.assign({}, s, { fileTree: tree || {}, selectedPaths: Array.isArray(selectedPaths) ? selectedPaths.slice() : (s.selectedPaths || []) })),
+        setSelection: (paths) => set(() => ({ selectedPaths: Array.isArray(paths) ? paths.slice() : [] })),
+        clearSelection: () => set(() => ({ selectedPaths: [] })),
+        // collectLeaves is declared below and referenced here to avoid inlining
+        selectAllFiles: () => set((s) => ({ selectedPaths: collectLeaves(s.fileTree) })),
+        togglePause: (p) => set(() => ({ paused: typeof p === 'undefined' ? !(store.getState().paused) : !!p })),
+        setExpandedPaths: (arr) => set(() => ({ expandedPaths: Array.isArray(arr) ? arr.slice() : [] })),
+        setPendingPersistedSelection: (sel, idx) => set(() => ({ pendingPersistedSelection: sel || null, pendingPersistedFocusIndex: typeof idx === 'number' ? idx : undefined }))
+    }));
+
+    // expose fallback store on window for compatibility with other modules expecting it
+    try { if (typeof window !== 'undefined' && !window.store) { window.store = store; } } catch (e) {}
+})();
+// Small lifecycle tracker: track timers and observers so tests and unload handlers
+// can clear them and avoid lingering handles. Exposes minimal API on window.__cbd_lifecycle
+;(function lifecycleTracker(){
+    try {
+        const timers = new Set();
+        const observers = new Set();
+        const registerTimer = (t) => { try { if (t) { timers.add(t); } } catch (e) {} };
+        const unregisterTimer = (t) => { try { if (t) { timers.delete(t); } } catch (e) {} };
+        const registerObserver = (o) => { try { if (o) { observers.add(o); } } catch (e) {} };
+        const unregisterObserver = (o) => { try { if (o) { observers.delete(o); } } catch (e) {} };
+        const cleanup = () => {
+            try {
+                for (const t of Array.from(timers)) {
+                    try { clearTimeout(t); } catch (e) {}
+                    try { clearInterval(t); } catch (e) {}
+                    try { if (typeof t.unref === 'function') { t.unref(); } } catch (e) {}
+                }
+            } catch (e) {}
+            try {
+                for (const o of Array.from(observers)) {
+                    try { if (o && typeof o.disconnect === 'function') { o.disconnect(); } } catch (e) {}
+                }
+            } catch (e) {}
+            try { timers.clear(); observers.clear(); } catch (e) {}
+        };
+        try { if (typeof window !== 'undefined') { window.__cbd_lifecycle = Object.assign(window.__cbd_lifecycle || {}, { registerTimer, unregisterTimer, registerObserver, unregisterObserver, cleanup }); window.addEventListener && window.addEventListener('unload', cleanup); } } catch (e) {}
+    } catch (e) {}
+})();
+// Small helpers to register/unregister timers with the lifecycle tracker.
+// Keeps calls short and defensive (used throughout this file after setTimeout/setInterval creations).
+function _registerTimerHandle(t) {
+    try {
+        if (typeof window !== 'undefined' && window.__cbd_lifecycle && typeof window.__cbd_lifecycle.registerTimer === 'function') {
+            window.__cbd_lifecycle.registerTimer(t);
+        }
+    } catch (e) {}
+}
+function _unregisterTimerHandle(t) {
+    try {
+        if (typeof window !== 'undefined' && window.__cbd_lifecycle && typeof window.__cbd_lifecycle.unregisterTimer === 'function') {
+            window.__cbd_lifecycle.unregisterTimer(t);
+        }
+    } catch (e) {}
 }
 // track the current folder path (populated from incoming state/config)
 let currentFolderPath = null;
@@ -52,28 +134,7 @@ let interactionTimeout = null;
 let pendingIncomingTree = null;
 let pendingIncomingSelectedPaths = null;
 
-// Zustand-like store for centralizing file tree + selection state in the webview.
-// We expose a small action surface so UI code and message handlers can call
-// intentful actions rather than mutating transient variables directly.
-const store = create((set) => ({
-    // core state
-    fileTree: {},
-    selectedPaths: [],
-    expandedPaths: [],
-    paused: false,
-    pendingPersistedSelection: null,
-    pendingPersistedFocusIndex: undefined,
-    // actions: intentful APIs for updating state
-    setState: (patch) => set((s) => Object.assign({}, s, patch)),
-    setFileTree: (tree, selectedPaths) => set((s) => Object.assign({}, s, { fileTree: tree || {}, selectedPaths: Array.isArray(selectedPaths) ? selectedPaths.slice() : (s.selectedPaths || []) })),
-    setSelection: (paths) => set(() => ({ selectedPaths: Array.isArray(paths) ? paths.slice() : [] })),
-    clearSelection: () => set(() => ({ selectedPaths: [] })),
-    // collectLeaves is declared below and referenced here to avoid inlining
-    selectAllFiles: () => set((s) => ({ selectedPaths: collectLeaves(s.fileTree) })),
-    togglePause: (p) => set(() => ({ paused: typeof p === 'undefined' ? !(store.getState().paused) : !!p })),
-    setExpandedPaths: (arr) => set(() => ({ expandedPaths: Array.isArray(arr) ? arr.slice() : [] })),
-    setPendingPersistedSelection: (sel, idx) => set(() => ({ pendingPersistedSelection: sel || null, pendingPersistedFocusIndex: typeof idx === 'number' ? idx : undefined }))
-}));
+
 
 // Helper used by the store action selectAllFiles to collect leaf file paths
 function collectLeaves(node, prefix = '') {
@@ -126,7 +187,14 @@ store.subscribe((st) => {
     } catch (e) {}
     // Rerender file list whenever fileTree or selectedPaths changes.
     try {
-        debouncedRenderFileList();
+        // Prefer a debounced renderer exposed by the centralized uiRenderer when present
+        // (keeps a single rendering path for tests). Fall back to the local debounced
+        // implementation when absent.
+        try {
+            const r = (typeof window !== 'undefined' && window.__UI_RENDERER__);
+            if (r && typeof r.debouncedRender === 'function') { try { r.debouncedRender(); } catch (e) { debouncedRenderFileList(); } }
+            else { debouncedRenderFileList(); }
+        } catch (e) { debouncedRenderFileList(); }
     } catch (e) {}
 });
 
@@ -152,8 +220,33 @@ const nodes = {
 };
 
 function node(id) {
+    try {
+        // Prefer centralized nodes module if present (lazy, test-friendly)
+        const impl = (typeof window !== 'undefined' && window.__CBD_NODES__) ? window.__CBD_NODES__ : null;
+        if (!impl) {
+            try {
+                // attempt to require the runtime nodes helper when bundling
+                const runtime = require('./nodes');
+                if (runtime && typeof runtime.getById === 'function') {
+                    const el = runtime.getById(id);
+                    if (el) { return el; }
+                }
+            } catch (e) {
+                // ignore require failures and fall back to legacy behavior
+            }
+        } else {
+            const getterName = 'get' + id.split('-').map((s) => s.charAt(0).toUpperCase() + s.slice(1)).join('');
+            if (typeof impl[getterName] === 'function') {
+                const el = impl[getterName]();
+                if (el) { return el; }
+            }
+            // generic fallback
+            const byId = impl.getById && impl.getById(id);
+            if (byId) { return byId; }
+        }
+    } catch (e) { /* best-effort */ }
     // return cached node if present, otherwise fall back to live query
-    return nodes[id] || document.getElementById(id);
+    return nodes[id] || (typeof document !== 'undefined' ? document.getElementById(id) : null);
 }
 
 // Centralized lightweight logger for webview diagnostics. Use sparingly to avoid
@@ -318,19 +411,23 @@ function sanitizeSubpath(s) {
 const __focusState = { lastFocused: null };
 function openModal(element) {
     try {
+        const r = (typeof window !== 'undefined' && window.__UI_RENDERER__);
+        if (r && typeof r.openModal === 'function') { try { r.openModal(element); return; } catch (e) { /* fallthrough to local impl */ } }
         __focusState.lastFocused = document.activeElement;
-    element.hidden = false;
-    try { element.removeAttribute('aria-hidden'); } catch (e) {}
+        element.hidden = false;
+        try { element.removeAttribute('aria-hidden'); } catch (e) {}
         // focus first control
-        setTimeout(() => { const first = element.querySelector('input,button,select,textarea,[tabindex]'); if (first && typeof first.focus === 'function') { first.focus(); } }, 0);
+    try { var __cbd_focus_to = setTimeout(() => { try { const first = element.querySelector('input,button,select,textarea,[tabindex]'); if (first && typeof first.focus === 'function') { first.focus(); } } finally { _unregisterTimerHandle(__cbd_focus_to); } }, 0); _registerTimerHandle(__cbd_focus_to); if (__cbd_focus_to && typeof __cbd_focus_to.unref === 'function') { try { __cbd_focus_to.unref(); } catch (e) {} } } catch (e) {}
         // basic trap: capture Tab key and keep focus inside modal
         element.addEventListener('keydown', modalKeyHandler);
     } catch (e) { logWarn('openModal failed', e); }
 }
 function closeModal(element) {
     try {
-    element.hidden = true;
-    try { element.setAttribute('aria-hidden', 'true'); } catch (e) {}
+        const r = (typeof window !== 'undefined' && window.__UI_RENDERER__);
+        if (r && typeof r.closeModal === 'function') { try { r.closeModal(element); return; } catch (e) { /* fallthrough to local impl */ } }
+        element.hidden = true;
+        try { element.setAttribute('aria-hidden', 'true'); } catch (e) {}
         element.removeEventListener('keydown', modalKeyHandler);
         if (__focusState.lastFocused && typeof __focusState.lastFocused.focus === 'function') { __focusState.lastFocused.focus(); }
     } catch (e) { logWarn('closeModal failed', e); }
@@ -379,7 +476,9 @@ function debounce(fn, wait) {
     return function() {
         lastArgs = arguments;
         if (tid) { clearTimeout(tid); }
-        tid = setTimeout(() => { tid = null; fn.apply(this, lastArgs); }, wait);
+    tid = setTimeout(() => { tid = null; fn.apply(this, lastArgs); }, wait);
+    try { if (tid && typeof tid.unref === 'function') { try { tid.unref(); } catch (e) {} } } catch (e) {}
+    try { if (tid && typeof tid.unref === 'function') { try { tid.unref(); } catch (e) {} } } catch (e) {}
     };
 }
 
@@ -416,237 +515,15 @@ function findLiByDataPath(root, path) {
 }
 
 function renderFileList(state) {
-    // If caller doesn't pass a state, read from the centralized store
-    if (!state) {
-        try { state = store.getState(); } catch (e) { state = { fileTree: {}, selectedPaths: [] }; }
-    }
-    const fileListRoot = document.getElementById('file-list');
-    if (!fileListRoot) { return; }
-
-    // Clear previous content without using innerHTML for safety
-    while (fileListRoot.firstChild) { fileListRoot.removeChild(fileListRoot.firstChild); }
-
-    const fileTree = state.fileTree || {};
-    // Use selectedPaths from the state, which is an array of strings
-    const selectedPaths = new Set(state.selectedPaths || []);
-
-    if (Object.keys(fileTree).length === 0) {
-    const msg = document.createElement('div');
-    msg.className = 'file-row-message';
-    msg.textContent = 'No files to display.';
-    fileListRoot.appendChild(msg);
-        return;
-    }
-
-            // This function will be called when a checkbox state changes.
-    const handleSelectionChange = () => {
-        // Only consider checkboxes that are children of leaf file list items to avoid
-        // processing folder-level checkboxes (which are used for tri-state UI only).
-        // This reduces DOM work and prevents accidental double-processing.
-        let checkboxes = fileListRoot.querySelectorAll('li.file-item .file-checkbox');
-        // Fallback for environments where li.file-item may not be present
-        if (!checkboxes || checkboxes.length === 0) {
-            checkboxes = fileListRoot.querySelectorAll('.file-checkbox');
-        }
-        const newSelectedPaths = [];
-        checkboxes.forEach(cb => {
-            if (!cb) { return; }
-            if (cb.checked) {
-                try {
-                    const attr = cb.getAttribute && cb.getAttribute('data-path');
-                    const path = attr ? decodeFromDataAttribute(attr) : null;
-                    if (path) { newSelectedPaths.push(path); }
-                } catch (e) { /* ignore per-node read failures */ }
-            }
-        });
-        postAction('setSelection', { relPaths: newSelectedPaths });
-    };
-
-    // Helper: update ancestor folder checkbox indeterminate/checked state based on descendants
-    function updateAncestorStates(startLi) {
-        try {
-            let current = startLi;
-            while (current) {
-                const parentUl = current.parentElement;
-                if (!parentUl) { break; }
-                const parentLi = parentUl.closest('li.folder-item');
-                if (!parentLi) { break; }
-                // Only consider checkboxes that belong to leaf file items in the descendant subtree
-                // (exclude folder-level checkboxes so folder vs file boxes are not mixed).
-                const descendantCheckboxes = parentLi.querySelectorAll(':scope ul li.file-item .file-checkbox');
-                let total = 0, checked = 0;
-                descendantCheckboxes.forEach(cb => { total++; if (cb.checked) { checked++; } });
-                const parentCb = parentLi.querySelector('input.file-checkbox');
-                if (parentCb) {
-                    if (checked === 0) { parentCb.checked = false; parentCb.indeterminate = false; }
-                    else if (checked === total) { parentCb.checked = true; parentCb.indeterminate = false; }
-                    else { parentCb.checked = false; parentCb.indeterminate = true; }
-                }
-                current = parentLi;
-            }
-    } catch (e) { logWarn('updateAncestorStates DOM traversal failed', e); }
-    }
-
-    // Recursive function to build the tree HTML and attach listeners
-    function createTreeHtml(node, pathPrefix = '') {
-        const ul = document.createElement('ul');
-        ul.className = 'file-tree-ul';
-
-        const entries = Object.keys(node).sort((a, b) => {
-            const aIsFile = node[a].__isFile;
-            const bIsFile = node[b].__isFile;
-            if (aIsFile && !bIsFile) { return 1; }
-            if (!aIsFile && bIsFile) { return -1; }
-            return a.localeCompare(b);
-        });
-
-        for (const key of entries) {
-            const currentNode = node[key];
-            const isFile = !!currentNode.__isFile;
-            // Prefer explicit relPath when available (nodes commonly expose relPath),
-            // fall back to path or constructed prefix so existing callers keep working.
-            const relPath = currentNode.relPath || currentNode.path || `${pathPrefix}${key}`;
-
-            const li = document.createElement('li');
-            li.className = isFile ? 'file-tree-li file-item' : 'file-tree-li folder-item';
-            li.setAttribute('data-path', encodeForDataAttribute(relPath));
-
-            const label = document.createElement('label');
-            label.className = 'file-tree-label';
-
-            const checkbox = document.createElement('input');
-            checkbox.type = 'checkbox';
-            checkbox.className = 'file-checkbox';
-            checkbox.checked = selectedPaths.has(relPath);
-            checkbox.setAttribute('data-path', encodeForDataAttribute(relPath));
-
-            // *** ADDING CHECKBOX INTERACTIVITY ***
-            checkbox.addEventListener('change', () => {
-                const isChecked = checkbox.checked;
-                // If a folder is checked/unchecked, apply the same state to all children
-                if (!isFile) {
-                    // Only target leaf file checkboxes in the child subtree (exclude folder-level checkboxes)
-                    const descendantCheckboxes = li.querySelectorAll(':scope ul li.file-item .file-checkbox');
-                    descendantCheckboxes.forEach(descCb => {
-                        descCb.checked = isChecked;
-                        try { descCb.indeterminate = false; } catch (e) { logWarn('setting indeterminate failed', e); }
-                    });
-                }
-                // Update ancestor folders once after any change (folder or leaf)
-                try { updateAncestorStates(li); } catch (e) {}
-                handleSelectionChange();
-            });
-            
-            const icon = document.createElement('span');
-            icon.className = 'file-tree-icon';
-
-            const name = document.createElement('span');
-            name.className = 'file-tree-name';
-            name.textContent = key;
-            
-            // *** ADDING EXPAND/COLLAPSE INTERACTIVITY ***
-            if (!isFile) {
-                // Determine expanded state from expandedSet
-                const expanded = expandedSet.has(relPath);
-                if (expanded) { li.classList.add('expanded'); } else { li.classList.remove('expanded'); }
-
-                // Clicking the folder icon toggles its expanded state and re-renders.
-                // Attach the handler to the icon only so clicks on the label/text don't toggle expansion.
-                const toggleExpand = (e) => {
-                    try {
-                        if (expandedSet.has(relPath)) {
-                            expandedSet.delete(relPath);
-                            li.classList.remove('expanded');
-                        } else {
-                            expandedSet.add(relPath);
-                            li.classList.add('expanded');
-                        }
-                        // persist array form into store
-                        if (store.setExpandedPaths) { try { store.setExpandedPaths(Array.from(expandedSet)); } catch (ex) { /* swallow */ } }
-                        // Re-render using aligned state if available
-                        try { const st = store.getState ? store.getState() : null; renderTree((st && st.aligned) || st, expandedSet); } catch (ex) { /* swallow */ }
-                    } catch (err) { logWarn('toggleExpand failed', err); }
-                };
-
-                // Provide keyboard access and semantics on the icon only
-                try {
-                    icon.setAttribute('role', 'button');
-                    icon.setAttribute('tabindex', '0');
-                    try { icon.setAttribute('aria-expanded', String(expanded)); } catch (e) {}
-                } catch (e) {}
-
-                // Attach a capture-phase listener on the label that only reacts when
-                // the click target is the icon (icon remains inside the label per requirement).
-                // Using capture ensures we can prevent the default label -> checkbox activation
-                // before the browser toggles the checkbox.
-                try {
-                    label.addEventListener('click', (ev) => {
-                        try {
-                            if (ev && ev.target && (ev.target === icon || icon.contains(ev.target))) {
-                                try { ev.preventDefault(); ev.stopPropagation(); } catch (e) {}
-                                toggleExpand(ev);
-                                try { icon.setAttribute('aria-expanded', String(expandedSet.has(relPath))); } catch (e) {}
-                            }
-                        } catch (e) { /* swallow per-node errors */ }
-                    }, true);
-                } catch (e) { /* swallow */ }
-
-                // Keep keyboard activation on the icon for accessibility
-                icon.addEventListener('keydown', (ev) => {
-                    try {
-                        if (ev.key === 'Enter' || ev.key === ' ') {
-                            try { ev.preventDefault(); ev.stopPropagation(); } catch (e) {}
-                            toggleExpand(ev);
-                            try { icon.setAttribute('aria-expanded', String(expandedSet.has(relPath))); } catch (e) {}
-                        }
-                    } catch (e) { /* swallow */ }
-                });
-            }
-
-            label.appendChild(checkbox);
-            label.appendChild(icon);
-            label.appendChild(name);
-            li.appendChild(label);
-
-            if (!isFile) {
-                li.appendChild(createTreeHtml(currentNode, `${relPath}/`));
-            }
-            ul.appendChild(li);
-        }
-        return ul;
-    }
-
-    fileListRoot.appendChild(createTreeHtml(fileTree));
-    // After rendering, reapply previously stored expanded state so folders the user opened
-    // remain expanded across debounced re-renders.
-                try {
-                    if (expandedSet.size > 0) {
-                        expandedSet.forEach(p => {
-                            try {
-                                const li = findLiByDataPath(fileListRoot, p);
-                                if (li) { li.classList.add('expanded'); }
-                            } catch (e) { logWarn('createTreeHtml per-node handler failed', e); }
-                        });
-                    }
-                } catch (e) { logWarn('renderFileList restore expandedSet failed', e); }
-    // After initial render, ensure folder checkboxes reflect tri-state based on current selections
+    // Prefer centralized uiRenderer's implementation to avoid duplicate DOM wiring.
     try {
-        const folderItems = fileListRoot.querySelectorAll('li.folder-item');
-        folderItems.forEach(fi => {
-            try {
-                // Only consider descendant leaf file-checkboxes in the subtree (exclude the parent's own checkbox)
-                const descendantCheckboxes = fi.querySelectorAll(':scope ul li.file-item .file-checkbox');
-                let total = 0, checked = 0;
-                descendantCheckboxes.forEach(cb => { total++; if (cb.checked) { checked++; } });
-                const parentCb = fi.querySelector('input.file-checkbox');
-                if (parentCb) {
-                    if (checked === 0) { parentCb.checked = false; parentCb.indeterminate = false; }
-                    else if (checked === total) { parentCb.checked = true; parentCb.indeterminate = false; }
-                    else { parentCb.checked = false; parentCb.indeterminate = true; }
-                }
-            } catch (e) { logWarn('renderFileList folder tri-state calculation failed for a folder', e); }
-        });
-    } catch (e) {}
+        const r = (typeof window !== 'undefined' && window.__UI_RENDERER__);
+        if (r && typeof r.renderFileList === 'function') { try { r.renderFileList(state); return; } catch (err) { logWarn('uiRenderer.renderFileList failed', err); } }
+    } catch (e) { /* swallow */ }
+    // Minimal fallback: do nothing (renderer-less environments should rely on legacy bundle or tests)
+    try {
+        const root = document.getElementById('file-list'); if (root) { while (root.firstChild) { root.removeChild(root.firstChild); } }
+    } catch (e) { /* swallow */ }
 }
 
 // Replace direct calls with debounced version in callers
@@ -659,8 +536,15 @@ function renderTree(state, newExpandedSet) {
             else { /* ignore */ }
         }
     } catch (e) { logWarn('renderTree update expandedSet failed', e); }
-    // Call render synchronously for immediate feedback
-    try { renderFileList(state); } catch (e) { logWarn('renderTree renderFileList failed', e); }
+    // Call render synchronously for immediate feedback. Prefer centralized ui renderer
+    // when available; fall back to local renderFileList implementation.
+    try {
+        const r = (typeof window !== 'undefined' && window.__UI_RENDERER__);
+        if (r && typeof r.renderTree === 'function') {
+            try { r.renderTree(state, newExpandedSet); return; } catch (err) { logWarn('uiRenderer.renderTree failed', err); }
+        }
+        renderFileList(state);
+    } catch (e) { logWarn('renderTree renderFileList failed', e); }
 }
 
 const debouncedRenderFileList = debounce(renderFileList, 80);
@@ -707,6 +591,11 @@ window.addEventListener('message', event => {
 });
 
 function renderPreviewDelta(delta) {
+    try {
+        const r = (typeof window !== 'undefined' && window.__UI_RENDERER__);
+        if (r && typeof r.renderPreviewDelta === 'function') { try { r.renderPreviewDelta(delta); return; } catch (e) { logWarn('uiRenderer.renderPreviewDelta failed', e); } }
+    } catch (e) {}
+    // Fallback to legacy implementation when uiRenderer not present or fails
     const statsTarget = nodes.stats || document.getElementById('stats');
     const chipsTarget = nodes.chips || document.getElementById('status-chips');
     if (statsTarget === null && chipsTarget === null) { return; }
@@ -806,6 +695,10 @@ const progressContainer = () => nodes.progressContainer || document.getElementBy
 const progressBar = () => nodes.progressBar || document.getElementById('progress-bar');
 function handleProgress(e) {
     if (!e) { return; }
+    try {
+        const r = (typeof window !== 'undefined' && window.__UI_RENDERER__);
+        if (r && typeof r.renderProgress === 'function') { try { r.renderProgress(e); return; } catch (ex) { logWarn('uiRenderer.renderProgress failed', ex); } }
+    } catch (ex) {}
     const container = progressContainer();
     const bar = progressBar();
     if (!container || !bar) { return; }
@@ -854,7 +747,7 @@ function handleProgress(e) {
         bar.setAttribute('aria-valuenow', '100');
     try { bar.setAttribute('aria-valuetext', 'Complete'); } catch (ex) {}
     try { const s = document.getElementById('progress-status'); if (s) { s.textContent = 'Complete'; } } catch (ex) {}
-        setTimeout(() => { bar.style.width = '0%'; }, 600);
+    try { var __cbd_bar_to = setTimeout(() => { try { bar.style.width = '0%'; } finally { _unregisterTimerHandle(__cbd_bar_to); } }, 600); _registerTimerHandle(__cbd_bar_to); if (__cbd_bar_to && typeof __cbd_bar_to.unref === 'function') { try { __cbd_bar_to.unref(); } catch (e) {} } } catch (e) {}
         showToast(e.message || (e.op + ' finished'), 'success');
     // hide cancel affordance when write ends
     try { if (e.op === 'write') { const cw = nodes.cancelWriteBtn || document.getElementById('btn-cancel-write'); if (cw) { cw.hidden = true; cw.setAttribute('aria-hidden', 'true'); } } } catch (ex) {}
@@ -868,6 +761,10 @@ function handleProgress(e) {
 // Pause/Resume UI wiring
 const pauseBtn = () => nodes.pauseBtn || document.getElementById('btn-pause-resume');
 function updatePauseButton() {
+    try {
+        const r = (typeof window !== 'undefined' && window.__UI_RENDERER__);
+        if (r && typeof r.updatePauseButton === 'function') { try { r.updatePauseButton(paused); return; } catch (ex) { logWarn('uiRenderer.updatePauseButton failed', ex); } }
+    } catch (ex) {}
     const b = pauseBtn();
     if (!b) { return; }
     // Update text, pressed state and CSS class for accessibility and styling
@@ -891,6 +788,10 @@ function updatePauseButton() {
 // Listen for scan progress stats to update small status area
 function handleScanStats(e) {
     if (!e || e.op !== 'scan') { return; }
+    try {
+        const r = (typeof window !== 'undefined' && window.__UI_RENDERER__);
+        if (r && typeof r.renderScanStats === 'function') { try { r.renderScanStats(e); return; } catch (err) { logWarn('uiRenderer.renderScanStats failed', err); } }
+    } catch (err) { /* swallow */ }
     const statsEl = nodes.stats || document.getElementById('stats');
     if (!statsEl) { return; }
     const parts = [];
@@ -903,7 +804,7 @@ function handleScanStats(e) {
     if (progressStats) {
         const pParts = [];
         if (typeof e.totalFiles === 'number') { pParts.push(`${e.totalFiles} files`); }
-    if (typeof e.totalSize === 'number') { pParts.push(formatBytes(e.totalSize)); }
+        if (typeof e.totalSize === 'number') { pParts.push(formatBytes(e.totalSize)); }
         if (typeof e.tokenEstimate === 'number') { pParts.push(`~${Math.round(e.tokenEstimate)} tokens`); }
         progressStats.textContent = pParts.join(' · ');
     }
@@ -919,14 +820,18 @@ function handleProgressWrapper(e) {
 window.__handleProgress = handleProgressWrapper;
 
 function showToast(msg, kind='info', ttl=4000) {
+    try {
+        const r = (typeof window !== 'undefined' && window.__UI_RENDERER__);
+        if (r && typeof r.showToast === 'function') { try { r.showToast(msg, kind, ttl); return; } catch (ex) { logWarn('uiRenderer.showToast failed', ex); } }
+    } catch (ex) {}
     const root = document.getElementById('toast-root');
     if (!root) { return; }
     const t = document.createElement('div');
     t.className = `toast ${kind}`;
     const m = document.createElement('div'); m.className = 'msg'; m.textContent = msg; t.appendChild(m);
     root.appendChild(t);
-    setTimeout(() => { t.style.opacity = '0'; t.style.transform = 'translateY(6px)'; }, ttl - 300);
-    setTimeout(() => { t.remove(); }, ttl);
+    try { var __cbd_toa = setTimeout(() => { t.style.opacity = '0'; t.style.transform = 'translateY(6px)'; _unregisterTimerHandle(__cbd_toa); }, ttl - 300); _registerTimerHandle(__cbd_toa); if (__cbd_toa && typeof __cbd_toa.unref === 'function') { try { __cbd_toa.unref(); } catch (e) {} } } catch (e) {}
+    try { var __cbd_tob = setTimeout(() => { try { t.remove(); } finally { _unregisterTimerHandle(__cbd_tob); } }, ttl); _registerTimerHandle(__cbd_tob); if (__cbd_tob && typeof __cbd_tob.unref === 'function') { try { __cbd_tob.unref(); } catch (e) {} } } catch (e) {}
 }
 
 // Request initial state
@@ -941,29 +846,33 @@ window.onload = function() {
             if (retries > 5) { return; }
             try { console.debug && console.debug('[codebase-digest][webview] retrying getState attempt', retries); } catch (e) {}
             vscode.postMessage({ type: 'getState' });
-            setTimeout(retryGetState, 400 * retries);
+            try { var __cbd_retry_inner_to = setTimeout(retryGetState, 400 * retries); _registerTimerHandle(__cbd_retry_inner_to); if (__cbd_retry_inner_to && typeof __cbd_retry_inner_to.unref === 'function') { try { __cbd_retry_inner_to.unref(); } catch (e) {} } } catch (e) {}
         } catch (e) { /* swallow */ }
     };
-    setTimeout(() => { retryGetState(); }, 300);
-    // Populate node cache for frequently used elements
+    var __cbd_retry_to = setTimeout(() => { try { retryGetState(); } finally { _unregisterTimerHandle(__cbd_retry_to); } }, 300); _registerTimerHandle(__cbd_retry_to); if (__cbd_retry_to && typeof __cbd_retry_to.unref === 'function') { try { __cbd_retry_to.unref(); } catch (e) {} }
+    // Populate node cache for frequently used elements. When a centralized
+    // uiRenderer is present we prefer it and avoid duplicating DOM wiring here.
     try {
-        nodes.toolbar = document.getElementById('toolbar');
-        nodes.settings = document.getElementById('settings');
-        nodes.presetBtn = document.getElementById('preset-btn');
-        nodes.presetMenu = document.getElementById('preset-menu');
-        nodes.toastRoot = document.getElementById('toast-root');
-        nodes.ingestPreviewRoot = document.getElementById('ingest-preview');
-        nodes.ingestSpinner = document.getElementById('ingest-spinner');
-        nodes.ingestPreviewText = document.getElementById('ingest-preview-text');
-        nodes.fileListRoot = document.getElementById('file-list');
-        nodes.asciiTree = document.getElementById('ascii-tree');
-        nodes.chartContainer = document.getElementById('chart-container');
-        nodes.stats = document.getElementById('stats');
-        nodes.chips = document.getElementById('status-chips');
-        nodes.progressContainer = document.getElementById('progress-container');
-        nodes.progressBar = document.getElementById('progress-bar');
-        nodes.cancelWriteBtn = document.getElementById('btn-cancel-write');
-        nodes.pauseBtn = document.getElementById('btn-pause-resume');
+        const hasRenderer = (typeof window !== 'undefined' && window.__UI_RENDERER__);
+        if (!hasRenderer) {
+            nodes.toolbar = document.getElementById('toolbar');
+            nodes.settings = document.getElementById('settings');
+            nodes.presetBtn = document.getElementById('preset-btn');
+            nodes.presetMenu = document.getElementById('preset-menu');
+            nodes.toastRoot = document.getElementById('toast-root');
+            nodes.ingestPreviewRoot = document.getElementById('ingest-preview');
+            nodes.ingestSpinner = document.getElementById('ingest-spinner');
+            nodes.ingestPreviewText = document.getElementById('ingest-preview-text');
+            nodes.fileListRoot = document.getElementById('file-list');
+            nodes.asciiTree = document.getElementById('ascii-tree');
+            nodes.chartContainer = document.getElementById('chart-container');
+            nodes.stats = document.getElementById('stats');
+            nodes.chips = document.getElementById('status-chips');
+            nodes.progressContainer = document.getElementById('progress-container');
+            nodes.progressBar = document.getElementById('progress-bar');
+            nodes.cancelWriteBtn = document.getElementById('btn-cancel-write');
+            nodes.pauseBtn = document.getElementById('btn-pause-resume');
+        }
     } catch (e) { /* ignore cache wiring errors */ }
 
     // Sidebar button wiring: explicit listeners for common top-level actions
@@ -990,70 +899,9 @@ window.onload = function() {
                 try { postAction('generateDigest', payload); } catch (e) { console.warn('generateDigest postAction failed', e); }
             });
         }
-        // Explicit toolbar listeners for selection/expand controls (ensure immediate UI feedback)
-        try {
-            const toolbarSelectAll = document.querySelector('[data-action="selectAll"]');
-            if (toolbarSelectAll) {
-                toolbarSelectAll.addEventListener('click', (ev) => {
-                    try { ev.preventDefault(); ev.stopPropagation(); } catch (e) {}
-                    try {
-                        const fileCheckboxes = document.querySelectorAll('#file-list li.file-item .file-checkbox');
-                        const filePaths = Array.from(fileCheckboxes).map(cb => {
-                            try { const a = cb.getAttribute && cb.getAttribute('data-path'); return a ? decodeFromDataAttribute(a) : null; } catch (e) { return null; }
-                        }).filter(Boolean);
-                        // Optimistically update local store for immediate feedback
-                        try { store.setSelection && store.setSelection(filePaths); } catch (e) {}
-                        postAction('setSelection', { relPaths: filePaths });
-                    } catch (e) { /* swallow */ }
-                });
-            }
-            const toolbarClear = document.querySelector('[data-action="clearSelection"]');
-            if (toolbarClear) {
-                toolbarClear.addEventListener('click', (ev) => {
-                    try { ev.preventDefault(); ev.stopPropagation(); } catch (e) {}
-                    try { store.clearSelection && store.clearSelection(); } catch (e) {}
-                    postAction('setSelection', { relPaths: [] });
-                });
-            }
-            const toolbarExpandAll = document.querySelector('[data-action="expandAll"]');
-            if (toolbarExpandAll) {
-                toolbarExpandAll.addEventListener('click', (ev) => {
-                    try { ev.preventDefault(); ev.stopPropagation(); } catch (e) {}
-                    try {
-                        const folderItems = document.querySelectorAll('#file-list li.folder-item');
-                        folderItems.forEach(fi => {
-                            try {
-                                const pathAttr = fi.getAttribute && fi.getAttribute('data-path');
-                                const decodedPath = pathAttr ? decodeFromDataAttribute(pathAttr) : null;
-                                fi.classList.add('expanded');
-                                if (decodedPath) { expandedSet.add(decodedPath); }
-                            } catch (e) { /* ignore per-node errors */ }
-                        });
-                        try { store.setExpandedPaths && store.setExpandedPaths(Array.from(expandedSet)); } catch (e) {}
-                    } catch (e) { /* swallow DOM errors */ }
-                    postAction('expandAll');
-                });
-            }
-            const toolbarCollapseAll = document.querySelector('[data-action="collapseAll"]');
-            if (toolbarCollapseAll) {
-                toolbarCollapseAll.addEventListener('click', (ev) => {
-                    try { ev.preventDefault(); ev.stopPropagation(); } catch (e) {}
-                    try {
-                        const folderItems = document.querySelectorAll('#file-list li.folder-item');
-                        folderItems.forEach(fi => {
-                            try {
-                                const pathAttr = fi.getAttribute && fi.getAttribute('data-path');
-                                const decodedPath = pathAttr ? decodeFromDataAttribute(pathAttr) : null;
-                                fi.classList.remove('expanded');
-                                if (decodedPath) { expandedSet.delete(decodedPath); }
-                            } catch (e) { /* ignore per-node errors */ }
-                        });
-                        try { store.setExpandedPaths && store.setExpandedPaths(Array.from(expandedSet)); } catch (e) {}
-                    } catch (e) { /* swallow DOM errors */ }
-                    postAction('collapseAll');
-                });
-            }
-        } catch (e) { /* swallow wiring errors */ }
+        // Toolbar controls are handled by the delegated data-action listeners below.
+        // Prefer centralized data-action handling which uses store-first operations and
+        // uiRenderer when available. Retain this lightweight comment as guidance.
     } catch (e) { /* swallow wiring errors */ }
 
     // Attach light-weight interaction listeners to detect when the user is manipulating
@@ -1064,7 +912,7 @@ window.onload = function() {
         const markInteraction = () => {
             try {
                 userInteracting = true;
-                if (interactionTimeout) { clearTimeout(interactionTimeout); interactionTimeout = null; }
+                if (interactionTimeout) { try { clearTimeout(interactionTimeout); } catch (e) {} try { _unregisterTimerHandle(interactionTimeout); } catch (e) {} interactionTimeout = null; }
                 // after 700ms of inactivity, consider interaction finished and flush pending update
                 interactionTimeout = setTimeout(() => {
                     try {
@@ -1077,6 +925,8 @@ window.onload = function() {
                         }
                     } catch (e) { /* swallow */ }
                 }, 700);
+                _registerTimerHandle(interactionTimeout);
+                try { if (interactionTimeout && typeof interactionTimeout.unref === 'function') { try { interactionTimeout.unref(); } catch (e) {} } } catch (e) {}
             } catch (e) { /* swallow */ }
         };
         if (listRoot) {
@@ -1105,6 +955,19 @@ window.onload = function() {
             // handle parameterized actions like applyPreset
             if (action === 'applyPreset') {
                 const preset = btn.getAttribute('data-preset');
+                // Prefer renderer-provided applyPreset to centralize DOM updates and keep
+                // a single UI mutation surface. If the renderer doesn't expose it, fall
+                // back to the existing optimistic UI and local apply logic.
+                try {
+                    const r = (typeof window !== 'undefined' && window.__UI_RENDERER__);
+                    if (r && typeof r.applyPreset === 'function') {
+                        try { r.applyPreset(preset); } catch (err) { logWarn('uiRenderer.applyPreset failed', err); }
+                        // Notify host so it can persist/apply the preset globally
+                        sendCmd('applyPreset', { preset });
+                        return;
+                    }
+                } catch (e) { /* swallow renderer probe errors */ }
+
                 // Optimistically update local UI and aligned state for immediate feedback
                 try { togglePresetSelectionUI(preset); } catch (e) {}
                 try {
@@ -1127,39 +990,83 @@ window.onload = function() {
                 return;
             }
 
-            // Select all / clear selection operate on the rendered tree DOM
+            // Select all / clear selection operate on the rendered tree DOM (prefer store)
             if (action === 'selectAll' || action === 'clearSelection') {
                 const shouldSelect = action === 'selectAll';
                 try {
-                    // Only include file (leaf) items — selector targets checkboxes that are children of li.file-item
+                    // Prefer a renderer-provided action to centralize DOM updates
+                    const r = (typeof window !== 'undefined' && window.__UI_RENDERER__);
+                    if (r && typeof r[shouldSelect ? 'selectAll' : 'clearSelection'] === 'function') {
+                        try { r[shouldSelect ? 'selectAll' : 'clearSelection'](); return; } catch (err) { logWarn('uiRenderer selectAll/clearSelection failed', err); }
+                    }
+                    // Prefer store-backed operations: compute selection from store.fileTree when possible
+                    const st = store.getState ? store.getState() : null;
+                    if (shouldSelect && st && st.fileTree) {
+                        try {
+                            const all = collectLeaves(st.fileTree);
+                            try { store.setSelection && store.setSelection(all); } catch (e) {}
+                            postAction('setSelection', { relPaths: all });
+                            return;
+                        } catch (e) { /* fallback to DOM */ }
+                    }
+                    // Clear selection via store when possible
+                    if (!shouldSelect) {
+                        try { store.clearSelection && store.clearSelection(); } catch (e) {}
+                        postAction('setSelection', { relPaths: [] });
+                        return;
+                    }
+                    // Fallback: compute list via DOM traversal (legacy behaviour)
                     const fileCheckboxes = document.querySelectorAll('#file-list li.file-item .file-checkbox');
                     const filePaths = Array.from(fileCheckboxes).map(cb => {
                         try { const a = cb.getAttribute && cb.getAttribute('data-path'); return a ? decodeFromDataAttribute(a) : null; } catch (e) { return null; }
                     }).filter(Boolean);
-                    postAction('setSelection', { relPaths: shouldSelect ? filePaths : [] });
+                    try { store.setSelection && store.setSelection(filePaths); } catch (e) {}
+                    postAction('setSelection', { relPaths: filePaths });
                 } catch (e) { /* swallow DOM errors */ }
                 return;
             }
-            // Expand/Collapse all operate on the rendered tree DOM immediately for instant feedback
+            // Expand/Collapse all operate on the rendered tree DOM immediately for instant feedback (prefer store)
             if (action === 'expandAll' || action === 'collapseAll') {
                 const shouldExpand = action === 'expandAll';
                 try {
-                    const folderItems = document.querySelectorAll('#file-list li.folder-item');
-                    folderItems.forEach(fi => {
+                    // Prefer a renderer method to centralize the expand/collapse DOM changes
+                    const r = (typeof window !== 'undefined' && window.__UI_RENDERER__);
+                    if (r && typeof r[shouldExpand ? 'expandAll' : 'collapseAll'] === 'function') {
+                        try { r[shouldExpand ? 'expandAll' : 'collapseAll'](); return; } catch (err) { logWarn('uiRenderer expandAll/collapseAll failed', err); }
+                    }
+                    // Prefer to compute expanded paths from the store's fileTree
+                    const st = store.getState ? store.getState() : null;
+                    if (st && st.fileTree) {
+                        const allFolders = [];
+                        // gather folder paths by walking the tree
+                        function walkFolders(node, prefix = '') {
+                            for (const k of Object.keys(node || {})) {
+                                const n = node[k];
+                                const rel = n && n.relPath ? n.relPath : (n && n.path ? n.path : `${prefix}${k}`);
+                                if (n && n.__isFile) { continue; }
+                                allFolders.push(rel);
+                                walkFolders(n, `${rel}/`);
+                            }
+                        }
+                        walkFolders(st.fileTree, '');
                         try {
-                            const pathAttr = fi.getAttribute && fi.getAttribute('data-path');
-                            const decodedPath = pathAttr ? decodeFromDataAttribute(pathAttr) : null;
-                            if (shouldExpand) {
-                                        fi.classList.add('expanded');
-                                        if (decodedPath) { try { expandedSet.add(decodedPath); } catch (e) {} }
-                                    } else {
-                                        fi.classList.remove('expanded');
-                                        if (decodedPath) { try { expandedSet.delete(decodedPath); } catch (e) {} }
-                                    }
-                        } catch (e) { /* ignore per-node errors */ }
-                    });
-                    // persist expandedPaths to store after batch update
-                    try { store.setExpandedPaths && store.setExpandedPaths(Array.from(expandedSet)); } catch (e) {}
+                            if (shouldExpand) { allFolders.forEach(p => expandedSet.add(p)); }
+                            else { allFolders.forEach(p => expandedSet.delete(p)); }
+                            try { store.setExpandedPaths && store.setExpandedPaths(Array.from(expandedSet)); } catch (e) {}
+                        } catch (e) {}
+                    } else {
+                        // Fallback: operate on the DOM
+                        const folderItems = document.querySelectorAll('#file-list li.folder-item');
+                        folderItems.forEach(fi => {
+                            try {
+                                const pathAttr = fi.getAttribute && fi.getAttribute('data-path');
+                                const decodedPath = pathAttr ? decodeFromDataAttribute(pathAttr) : null;
+                                if (shouldExpand) { fi.classList.add('expanded'); if (decodedPath) { expandedSet.add(decodedPath); } }
+                                else { fi.classList.remove('expanded'); if (decodedPath) { expandedSet.delete(decodedPath); } }
+                            } catch (e) { /* ignore per-node errors */ }
+                        });
+                        try { store.setExpandedPaths && store.setExpandedPaths(Array.from(expandedSet)); } catch (e) {}
+                    }
                 } catch (e) { /* swallow DOM errors */ }
                 // Also notify the host so provider/tree state stays in sync
                 postAction(action);
@@ -1179,13 +1086,13 @@ window.onload = function() {
                 // Request latest config from the extension for the settings UI
                 postAction('configRequest');
                 // focus first input in settings for keyboard users
-                try { setTimeout(() => { const first = settingsEl && settingsEl.querySelector ? settingsEl.querySelector('input,select,textarea,button') : null; if (first && typeof first.focus === 'function') { first.focus(); } }, 0); } catch (e) {}
+                try { var __cbd_settings_focus_to = setTimeout(() => { const first = settingsEl && settingsEl.querySelector ? settingsEl.querySelector('input,select,textarea,button') : null; if (first && typeof first.focus === 'function') { first.focus(); } }, 0); if (__cbd_settings_focus_to && typeof __cbd_settings_focus_to.unref === 'function') { try { __cbd_settings_focus_to.unref(); } catch (e) {} } } catch (e) {}
                 return;
             }
             if (action === 'ingestRemote') {
                 const m = document.getElementById('ingestModal');
                 if (m) { openModal(m); }
-                try { setTimeout(() => { const repo = document.getElementById('ingest-repo'); if (repo && typeof repo.focus === 'function') { repo.focus(); } }, 0); } catch (e) {}
+                try { var __cbd_ingest_focus_to = setTimeout(() => { const repo = document.getElementById('ingest-repo'); if (repo && typeof repo.focus === 'function') { repo.focus(); } }, 0); if (__cbd_ingest_focus_to && typeof __cbd_ingest_focus_to.unref === 'function') { try { __cbd_ingest_focus_to.unref(); } catch (e) {} } } catch (e) {}
                 return;
             }
             // One-shot toggle button is not part of data-action; handle explicit button
@@ -1251,7 +1158,7 @@ window.onload = function() {
                 ev.preventDefault(); ev.stopPropagation();
                 const m = document.getElementById('ingestModal');
                 if (m) { openModal(m); }
-                try { setTimeout(() => { const repo = document.getElementById('ingest-repo'); if (repo && typeof repo.focus === 'function') { repo.focus(); } }, 0); } catch (e) {}
+                try { var __cbd_ingest_focus_to2 = setTimeout(() => { const repo = document.getElementById('ingest-repo'); if (repo && typeof repo.focus === 'function') { repo.focus(); } }, 0); if (__cbd_ingest_focus_to2 && typeof __cbd_ingest_focus_to2.unref === 'function') { try { __cbd_ingest_focus_to2.unref(); } catch (e) {} } } catch (e) {}
             });
         }
     
@@ -1265,7 +1172,7 @@ window.onload = function() {
                 // Request latest config from the extension for the settings UI
                 postAction('configRequest');
                 // focus first input in settings for keyboard users
-                try { setTimeout(() => { const first = settingsEl && settingsEl.querySelector ? settingsEl.querySelector('input,select,textarea,button') : null; if (first && typeof first.focus === 'function') { first.focus(); } }, 0); } catch (e) {}
+                try { var __cbd_settings_focus_to2 = setTimeout(() => { const first = settingsEl && settingsEl.querySelector ? settingsEl.querySelector('input,select,textarea,button') : null; if (first && typeof first.focus === 'function') { first.focus(); } }, 0); if (__cbd_settings_focus_to2 && typeof __cbd_settings_focus_to2.unref === 'function') { try { __cbd_settings_focus_to2.unref(); } catch (e) {} } } catch (e) {}
             });
         }
     } catch (e) { /* swallow header wiring errors */ }
@@ -1293,92 +1200,110 @@ window.onload = function() {
             showToast('Canceling write...', 'info', 2000);
         });
     }
-    // Preset popup wiring: keep the popup markup but wire it to postAction('applyPreset', { preset })
-    // Toggle handlers for the preset menu button and menu items
-    const presetBtn = document.getElementById('preset-btn');
-    const presetMenu = document.getElementById('preset-menu');
-    function openPresetMenu() {
-        if (!presetBtn || !presetMenu) { return; }
-        presetBtn.setAttribute('aria-expanded', 'true');
-        presetMenu.removeAttribute('hidden');
-        presetMenu.setAttribute('aria-hidden', 'false');
-        // focus first option for keyboard users
-        const first = presetMenu.querySelector('[role="option"]');
-        if (first) { try { first.setAttribute('tabindex', '0'); first.focus(); } catch (e) {} }
-        // capture outside clicks to close
-        setTimeout(() => { window.addEventListener('click', onWindowClickForPreset); }, 0);
-    }
-    function closePresetMenu() {
-        if (!presetBtn || !presetMenu) { return; }
-        presetBtn.setAttribute('aria-expanded', 'false');
-        presetMenu.setAttribute('aria-hidden', 'true');
-        presetMenu.setAttribute('hidden', '');
-        window.removeEventListener('click', onWindowClickForPreset);
-        // return focus to the button
-        try {
-            // Reset option tabindex to -1 so keyboard navigation doesn't trap focus
-            const options = presetMenu.querySelectorAll('[role="option"]');
-            options.forEach(o => { try { o.setAttribute('tabindex', '-1'); } catch (e) {} });
-        } catch (e) {}
-        if (typeof presetBtn.focus === 'function') { presetBtn.focus(); }
-    }
-    function togglePresetMenu() {
-        if (!presetBtn || !presetMenu) { return; }
-        const expanded = presetBtn.getAttribute('aria-expanded') === 'true';
-        if (expanded) { closePresetMenu(); } else { openPresetMenu(); }
-    }
-    function onWindowClickForPreset(ev) {
-        const tgt = ev.target;
-        if (!presetMenu || !presetBtn) { return; }
-        if (tgt === presetBtn || presetBtn.contains && presetBtn.contains(tgt)) { return; }
-        if (presetMenu.contains && presetMenu.contains(tgt)) { return; }
-        closePresetMenu();
-    }
-    if (nodes.presetBtn) {
-        nodes.presetBtn.addEventListener('click', (e) => { e.stopPropagation(); togglePresetMenu(); });
-        // close on Escape when the button has focus
-        nodes.presetBtn.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closePresetMenu(); } });
-    }
-    if (nodes.presetMenu) {
-        // Use a small delegation for option clicks to avoid per-item wiring
-        nodes.presetMenu.addEventListener('click', (ev) => {
-            const it = ev.target && ev.target.closest ? ev.target.closest('[role="option"][data-preset]') : null;
-            if (!it) { return; }
-            ev.preventDefault(); ev.stopPropagation();
-            const preset = it.getAttribute('data-preset');
-            if (preset) {
-                try { togglePresetSelectionUI(preset); } catch (e) {}
-                try { store.setState && store.setState({ currentPreset: preset }); } catch (e) {}
-                try {
-                    const st = store.getState ? store.getState() : {};
-                    const files = st && st.fileTree ? st.fileTree : {};
-                    if (typeof applyPreset === 'function') {
-                        try {
-                            const aligned = applyPreset(preset, files);
-                            try { store.setState && store.setState({ aligned }); } catch (e) {}
-                            try { renderTree(aligned, expandedSet); } catch (e) {}
-                        } catch (e) {}
-                    }
-                } catch (e) {}
-                postAction('applyPreset', { preset });
+    // Preset popup wiring: prefer uiRenderer when available (it wires menu behaviors)
+    try {
+        const r = (typeof window !== 'undefined' && window.__UI_RENDERER__);
+        // If the renderer exposes a preset wiring helper, prefer it so the UI
+        // behavior is centralized. Otherwise, fall back to the inline wiring.
+        if (r && typeof r.wirePresetMenu === 'function') {
+            try { r.wirePresetMenu(); }
+            catch (err) { logWarn('uiRenderer.wirePresetMenu failed', err); }
+        } else {
+            // Toggle handlers for the preset menu button and menu items (fallback)
+            const presetBtn = document.getElementById('preset-btn');
+            const presetMenu = document.getElementById('preset-menu');
+            function openPresetMenu() {
+                if (!presetBtn || !presetMenu) { return; }
+                presetBtn.setAttribute('aria-expanded', 'true');
+                presetMenu.removeAttribute('hidden');
+                presetMenu.setAttribute('aria-hidden', 'false');
+                const first = presetMenu.querySelector('[role="option"]');
+                if (first) { try { first.setAttribute('tabindex', '0'); first.focus(); } catch (e) {} }
+                var __cbd_preset_click_to = setTimeout(() => { try { window.addEventListener('click', onWindowClickForPreset); } finally { _unregisterTimerHandle(__cbd_preset_click_to); } }, 0); _registerTimerHandle(__cbd_preset_click_to); if (__cbd_preset_click_to && typeof __cbd_preset_click_to.unref === 'function') { try { __cbd_preset_click_to.unref(); } catch (e) {} }
             }
-            closePresetMenu();
-        });
-        // Keyboard navigation: Enter/Space to activate, Arrow keys to move focus
-        nodes.presetMenu.addEventListener('keydown', (ev) => {
-            const options = Array.from(nodes.presetMenu.querySelectorAll('[role="option"]'));
-            const current = ev.target && ev.target.closest ? ev.target.closest('[role="option"]') : null;
-            const idx = current ? options.indexOf(current) : -1;
-            if (ev.key === 'Enter' || ev.key === ' ') {
-                ev.preventDefault(); if (current) { current.click(); }
-            } else if (ev.key === 'ArrowDown' || ev.key === 'ArrowRight') {
-                ev.preventDefault(); const next = options[Math.min(options.length - 1, Math.max(0, idx + 1))]; if (next) { try { options.forEach(o => o.setAttribute('tabindex', '-1')); next.setAttribute('tabindex', '0'); next.focus(); } catch (e) {} }
-            } else if (ev.key === 'ArrowUp' || ev.key === 'ArrowLeft') {
-                ev.preventDefault(); const prev = options[Math.max(0, idx - 1)]; if (prev) { try { options.forEach(o => o.setAttribute('tabindex', '-1')); prev.setAttribute('tabindex', '0'); prev.focus(); } catch (e) {} }
-            } else if (ev.key === 'Escape') { closePresetMenu(); }
-        });
-    }
+            function closePresetMenu() {
+                if (!presetBtn || !presetMenu) { return; }
+                presetBtn.setAttribute('aria-expanded', 'false');
+                presetMenu.setAttribute('aria-hidden', 'true');
+                presetMenu.setAttribute('hidden', '');
+                window.removeEventListener('click', onWindowClickForPreset);
+                try {
+                    const options = presetMenu.querySelectorAll('[role="option"]');
+                    options.forEach(o => { try { o.setAttribute('tabindex', '-1'); } catch (e) {} });
+                } catch (e) {}
+                if (typeof presetBtn.focus === 'function') { presetBtn.focus(); }
+            }
+            function togglePresetMenu() {
+                if (!presetBtn || !presetMenu) { return; }
+                const expanded = presetBtn.getAttribute('aria-expanded') === 'true';
+                if (expanded) { closePresetMenu(); } else { openPresetMenu(); }
+            }
+            function onWindowClickForPreset(ev) {
+                const tgt = ev.target;
+                if (!presetMenu || !presetBtn) { return; }
+                if (tgt === presetBtn || presetBtn.contains && presetBtn.contains(tgt)) { return; }
+                if (presetMenu.contains && presetMenu.contains(tgt)) { return; }
+                closePresetMenu();
+            }
+            if (nodes.presetBtn) {
+                nodes.presetBtn.addEventListener('click', (e) => { e.stopPropagation(); togglePresetMenu(); });
+                nodes.presetBtn.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closePresetMenu(); } });
+            }
+            if (nodes.presetMenu) {
+                nodes.presetMenu.addEventListener('click', (ev) => {
+                    const it = ev.target && ev.target.closest ? ev.target.closest('[role="option"][data-preset]') : null;
+                    if (!it) { return; }
+                    ev.preventDefault(); ev.stopPropagation();
+                    const preset = it.getAttribute('data-preset');
+                    if (preset) {
+                        try { togglePresetSelectionUI(preset); } catch (e) {}
+                        try { store.setState && store.setState({ currentPreset: preset }); } catch (e) {}
+                        try {
+                            const st = store.getState ? store.getState() : {};
+                            const files = st && st.fileTree ? st.fileTree : {};
+                            if (typeof applyPreset === 'function') {
+                                try {
+                                    const aligned = applyPreset(preset, files);
+                                    try { store.setState && store.setState({ aligned }); } catch (e) {}
+                                    try { renderTree(aligned, expandedSet); } catch (e) {}
+                                } catch (e) {}
+                            }
+                        } catch (e) {}
+                        postAction('applyPreset', { preset });
+                    }
+                    closePresetMenu();
+                });
+                nodes.presetMenu.addEventListener('keydown', (ev) => {
+                    const options = Array.from(nodes.presetMenu.querySelectorAll('[role="option"]'));
+                    const current = ev.target && ev.target.closest ? ev.target.closest('[role="option"]') : null;
+                    const idx = current ? options.indexOf(current) : -1;
+                    if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); if (current) { current.click(); } }
+                    else if (ev.key === 'ArrowDown' || ev.key === 'ArrowRight') { ev.preventDefault(); const next = options[Math.min(options.length - 1, Math.max(0, idx + 1))]; if (next) { try { options.forEach(o => o.setAttribute('tabindex', '-1')); next.setAttribute('tabindex', '0'); next.focus(); } catch (e) {} } }
+                    else if (ev.key === 'ArrowUp' || ev.key === 'ArrowLeft') { ev.preventDefault(); const prev = options[Math.max(0, idx - 1)]; if (prev) { try { options.forEach(o => o.setAttribute('tabindex', '-1')); prev.setAttribute('tabindex', '0'); prev.focus(); } catch (e) {} } }
+                    else if (ev.key === 'Escape') { closePresetMenu(); }
+                });
+            }
+        }
+    } catch (e) { /* swallow preset wiring errors */ }
     document.getElementById('ingest-cancel')?.addEventListener('click', () => { const m = document.getElementById('ingestModal'); if (m) { closeModal(m); } });
+    // Helper to update ingest preview UI; prefers uiRenderer when present and falls back to local DOM updates
+    function setIngestPreviewState({ loading = false, text = null } = {}) {
+        try {
+            const r = (typeof window !== 'undefined' && window.__UI_RENDERER__);
+            if (r && typeof r.setIngestPreviewState === 'function') { try { r.setIngestPreviewState({ loading, text }); return; } catch (e) { /* fallthrough */ } }
+        } catch (e) {}
+        try {
+            if (loading) {
+                if (nodes.ingestPreviewRoot) { nodes.ingestPreviewRoot.classList.add('loading'); }
+                if (nodes.ingestSpinner) { nodes.ingestSpinner.hidden = false; nodes.ingestSpinner.removeAttribute('aria-hidden'); }
+                if (nodes.ingestPreviewText && typeof text === 'string') { nodes.ingestPreviewText.textContent = text; nodes.ingestPreviewText.classList.add('loading-placeholder'); }
+            } else {
+                if (nodes.ingestPreviewRoot) { nodes.ingestPreviewRoot.classList.remove('loading'); }
+                if (nodes.ingestSpinner) { nodes.ingestSpinner.hidden = true; nodes.ingestSpinner.setAttribute('aria-hidden', 'true'); }
+                if (nodes.ingestPreviewText && typeof text === 'string') { nodes.ingestPreviewText.textContent = text; nodes.ingestPreviewText.classList.remove('loading-placeholder'); }
+            }
+        } catch (e) { /* swallow UI errors */ }
+    }
     // Two-stage ingest flow: Load repo first, then start ingest on the loaded repo
     document.getElementById('ingest-load-repo')?.addEventListener('click', () => {
         const repoRaw = (document.getElementById('ingest-repo') || {}).value || '';
@@ -1422,10 +1347,8 @@ window.onload = function() {
                 showToast('Invalid repo format; ' + hint, 'error');
                 return;
             }
-        // show cloning state
-        if (nodes.ingestPreviewRoot) { nodes.ingestPreviewRoot.classList.add('loading'); }
-        if (nodes.ingestSpinner) { nodes.ingestSpinner.hidden = false; nodes.ingestSpinner.removeAttribute('aria-hidden'); }
-        if (nodes.ingestPreviewText) { nodes.ingestPreviewText.textContent = 'Cloning repository...'; nodes.ingestPreviewText.classList.add('loading-placeholder'); }
+    // show cloning state (delegate to renderer when available)
+    setIngestPreviewState({ loading: true, text: 'Cloning repository...' });
         // Client-side sanitize the fields as a defence-in-depth measure before sending
         const sanitizedRepo = sanitizeRepoInput(normalized);
         const sanitizedRef = sanitizeRefName(refRaw);
@@ -1458,10 +1381,8 @@ window.onload = function() {
             if (!loadedRepoTmpPath) { showToast('No loaded repository available. Click Load Repo first.', 'error'); return; }
             // send ingestLoadedRepo with the temporary path
             postAction('ingestLoadedRepo', { tmpPath: loadedRepoTmpPath });
-            // set loading state
-            if (nodes.ingestPreviewRoot) { nodes.ingestPreviewRoot.classList.add('loading'); }
-            if (nodes.ingestSpinner) { nodes.ingestSpinner.hidden = false; nodes.ingestSpinner.removeAttribute('aria-hidden'); }
-            if (nodes.ingestPreviewText) { nodes.ingestPreviewText.textContent = 'Starting ingest...'; nodes.ingestPreviewText.classList.add('loading-placeholder'); }
+            // set loading state (delegate to renderer when available)
+            setIngestPreviewState({ loading: true, text: 'Starting ingest...' });
     });
     // also wire the top-right close buttons for the two modals
     document.getElementById('ingest-close')?.addEventListener('click', () => { const m = document.getElementById('ingestModal'); if (m) { closeModal(m); } });
@@ -1484,9 +1405,24 @@ window.onload = function() {
             } catch (e) { /* swallow */ }
         }
     });
+
+        // Forward selection events emitted by the uiRenderer to the host
+        try {
+            window.addEventListener('cbd:setSelection', (ev) => {
+                try {
+                    const detail = ev && ev.detail ? ev.detail : null;
+                    if (!detail || !Array.isArray(detail.relPaths)) { return; }
+                    postAction('setSelection', { relPaths: detail.relPaths });
+                } catch (e) { /* swallow */ }
+            });
+        } catch (e) { /* swallow */ }
 };
 
 function populateSettings(settings) {
+    try {
+        const r = (typeof window !== 'undefined' && window.__UI_RENDERER__);
+        if (r && typeof r.populateSettings === 'function') { try { r.populateSettings(settings); return; } catch (e) { /* fallthrough to local impl */ } }
+    } catch (e) {}
     const form = document.getElementById('settingsForm');
     if (!form) { return; }
     const getEl = (name) => form.querySelector(`[name="${name}"]`);
@@ -1645,6 +1581,8 @@ function populateSettings(settings) {
 // This is intentionally idempotent and defensive: calling with null clears selection.
 function togglePresetSelectionUI(presetName) {
     try {
+        const r = (typeof window !== 'undefined' && window.__UI_RENDERER__);
+        if (r && typeof r.togglePresetSelectionUI === 'function') { try { r.togglePresetSelectionUI(presetName); return; } catch (e) { /* fallthrough */ } }
         // Clear any previously marked items
         const buttons = document.querySelectorAll('[data-action="applyPreset"], [role="option"][data-preset]');
         buttons.forEach(b => {
@@ -1659,6 +1597,10 @@ function togglePresetSelectionUI(presetName) {
 }
 
 function populateRedactionFields(settings) {
+    try {
+        const r = (typeof window !== 'undefined' && window.__UI_RENDERER__);
+        if (r && typeof r.populateRedactionFields === 'function') { try { r.populateRedactionFields(settings); return; } catch (e) { /* fallthrough */ } }
+    } catch (e) {}
     const form = document.getElementById('settingsForm');
     if (!form) { return; }
     const getEl = (name) => form.querySelector(`[name="${name}"]`);

@@ -6,15 +6,15 @@
    * Handle `previewDelta` messages from the extension host.
    *
    * Expected message shape:
-   * {
-   *   type: 'previewDelta',
-   *   delta: {
-   *     // optional fileTree object to replace current tree
-   *     fileTree?: Object,
-   *     // optional array of selectedPaths to apply with the tree
-   *     selectedPaths?: string[],
-   *     // quick preview properties such as tokenEstimate, selectedCount, etc.
-   *   }
+  try {
+    if (typeof window !== 'undefined') {
+      if (typeof window.registerCommand === 'function') {
+        try { window.registerCommand(cmd, previewDeltaHandler); } catch (e) { const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/previewDeltaHandler.js', command: cmd }); }
+      } else if (typeof window.__registerHandler === 'function') {
+        try { window.__registerHandler(cmd, previewDeltaHandler); } catch (e) { const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/previewDeltaHandler.js', command: cmd }); }
+      }
+    }
+  } catch (e) { const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/previewDeltaHandler.js', command: cmd }); }
    * }
    *
    * Side effects:
@@ -30,59 +30,48 @@
    *
    * @param {{type?:string, delta?:Object}} msg
    */
-  var previewDeltaHandler = function (msg) {
+
+var previewDeltaHandler = function (msg) {
+  try {
+    if (!msg || !msg.delta) { return; }
+    // Primary behavior: write to the store so subscribers handle UI updates
     try {
-      const d = msg && msg.delta ? msg.delta : {};
-  // invocation
-
-      // Update fileTree first (if present) so subscribers that depend on tree
-      // state observe the latest structure before preview is set.
-      if (d && d.fileTree && window.store && window.store.setFileTree) {
-        try { window.store.setFileTree(d.fileTree, Array.isArray(d.selectedPaths) ? d.selectedPaths : []); } catch (e) { console.warn('previewDeltaHandler: setFileTree failed', e); }
-  // after setFileTree
+      if (typeof window !== 'undefined' && window.store) {
+        try { if (typeof window.store.setPreviewDelta === 'function') { window.store.setPreviewDelta(msg.delta); } } catch (e) { console.warn('previewDeltaHandler: setPreviewDelta failed', e); }
+        // If the delta carries a new fileTree or selectedPaths, apply them as well
+        try { if (msg.delta && typeof msg.delta.fileTree !== 'undefined' && typeof window.store.setFileTree === 'function') { window.store.setFileTree(msg.delta.fileTree, msg.delta.selectedPaths); } } catch (e) { console.warn('previewDeltaHandler: setFileTree failed', e); }
+        try { if (msg.delta && Array.isArray(msg.delta.selectedPaths) && typeof window.store.setSelection === 'function') { window.store.setSelection(msg.delta.selectedPaths); } } catch (e) { /* ignore */ }
       }
+    } catch (e) { console.warn('previewDeltaHandler: store apply failed', e); }
 
-      // Push delta to store so subscribers can react to preview changes
-      if (window.store && typeof window.store.setPreviewDelta === 'function') {
-        try { window.store.setPreviewDelta(d); } catch (e) { console.warn('previewDeltaHandler: setPreviewDelta failed', e); }
-      }
+    // Ensure any transient loading flag is cleared
+    try { if (typeof window !== 'undefined' && window.store && typeof window.store.setLoading === 'function') { window.store.setLoading(false); } } catch (e) { console.warn('previewDeltaHandler: setLoading failed', e); }
 
-      // If UI helper functions are present in the webview scope, call them
-      // for immediate feedback. Subscribers will also receive the store update.
-      try { if (typeof renderPreviewDelta === 'function') { renderPreviewDelta(d); } } catch (e) { /* ignore UI helper failures */ }
-      try { if (typeof renderTree === 'function') { const st = window.store && window.store.getState ? window.store.getState() : null; renderTree((st && st.aligned) || st, typeof expandedSet !== 'undefined' ? expandedSet : null); } } catch (e) { /* ignore */ }
+  // Do not perform DOM updates here; subscribers/reactive renderer will observe
+  // the store changes and update the UI. Keep this handler side-effect free
+  // besides writing to window.store to improve testability.
+  } catch (e) { console.warn('previewDeltaHandler error', e); }
+};
 
-    } catch (e) { console.warn('previewDeltaHandler error', e); }
-  };
+// canonical command name
+var cmd = (window.COMMANDS && window.COMMANDS.previewDelta) ? window.COMMANDS.previewDelta : (window.__commandNames && window.__commandNames.previewDelta) ? window.__commandNames.previewDelta : 'previewDelta';
 
-  // Register using the standard hook if available
-  // Prefer centralized command names if available, fall back to literal.
-  var cmd = (window.COMMANDS && window.COMMANDS.previewDelta) ? window.COMMANDS.previewDelta : (window.__commandNames && window.__commandNames.previewDelta) ? window.__commandNames.previewDelta : 'previewDelta';
-  if (typeof window.__registerHandler === 'function') {
-    try { window.__registerHandler(cmd, previewDeltaHandler); } catch (e) { /* ignore */ }
+try {
+  if (typeof window !== 'undefined') {
+    if (typeof window.registerCommand === 'function') {
+      try { window.registerCommand(cmd, previewDeltaHandler); } catch (e) { const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/previewDeltaHandler.js', command: cmd }); }
+    } else if (typeof window.__registerHandler === 'function') {
+      try { window.__registerHandler(cmd, previewDeltaHandler); } catch (e) { const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/previewDeltaHandler.js', command: cmd }); }
+    }
   }
+} catch (e) { const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/previewDeltaHandler.js', command: cmd }); }
 
+try {
+  const registry = require('../commandRegistry');
+  if (registry && typeof registry.registerCommand === 'function') {
+    registry.registerCommand(cmd, previewDeltaHandler, { allowMultiple: false });
+  }
+} catch (e) {}
 
-  // Also be friendly to lightweight test harnesses that expect a simple map
-  // on window.__registeredHandlers and to the commandRegistry which uses
-  // window.__commandRegistry.
-    try {
-      if (!window.__registeredHandlers) { window.__registeredHandlers = {}; }
-      try {
-        Object.defineProperty(window.__registeredHandlers, cmd, { value: previewDeltaHandler, writable: false, configurable: true });
-      } catch (e) {
-        window.__registeredHandlers[cmd] = previewDeltaHandler;
-      }
-  // attached to __registeredHandlers
-  } catch (e) { /* ignore */ }
-
-    try {
-      if (!window.__commandRegistry) { window.__commandRegistry = {}; }
-      try {
-        Object.defineProperty(window.__commandRegistry, cmd, { value: previewDeltaHandler, writable: false, configurable: true });
-      } catch (e) {
-        window.__commandRegistry[cmd] = previewDeltaHandler;
-      }
-  // attached to __commandRegistry
-  } catch (e) { /* ignore */ }
+module.exports = { previewDeltaHandler };
 })();

@@ -320,6 +320,7 @@ export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?
                 writeBuffer = '';
                 if (flushTimer) { clearTimeout(flushTimer); flushTimer = undefined; }
             }, flushMs) as unknown as NodeJS.Timeout;
+            try { if (flushTimer && typeof (flushTimer as any).unref === 'function') { try { (flushTimer as any).unref(); } catch (e) {} } } catch (e) {}
         } catch (_) { /* ignore */ }
     };
 

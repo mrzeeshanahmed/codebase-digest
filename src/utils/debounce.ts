@@ -4,11 +4,31 @@
  */
 export function debounce<T extends (...args: any[]) => void>(fn: T, wait: number) {
     let timer: ReturnType<typeof setTimeout> | null = null;
-    return function(this: any, ...args: Parameters<T>) {
-        if (timer) { clearTimeout(timer); }
+    const debounced = function(this: any, ...args: Parameters<T>) {
+        if (timer) {
+            try { clearTimeout(timer); } catch (e) { /* ignore */ }
+        }
         timer = setTimeout(() => {
             timer = null;
             try { fn.apply(this, args); } catch (e) { /* swallow */ }
         }, wait);
-    } as T;
+        // In Node.js timers have an unref() method which lets the process exit
+        // if the timer is the only thing left. Call it when available but
+        // guard so browsers (webview) don't throw.
+        try {
+            if (timer && typeof (timer as any).unref === 'function') {
+                try { (timer as any).unref(); } catch (e) { /* ignore */ }
+            }
+        } catch (e) { /* ignore */ }
+    } as T & { cancel?: () => void };
+
+    // Allow callers (tests / disposers) to cancel a pending invocation.
+    (debounced as any).cancel = () => {
+        if (timer) {
+            try { clearTimeout(timer); } catch (e) { /* ignore */ }
+            timer = null;
+        }
+    };
+
+    return debounced as T;
 }

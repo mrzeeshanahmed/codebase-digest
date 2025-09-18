@@ -1,115 +1,253 @@
-// Lightweight command registry aggregator for webview handlers.
-// Handlers are expected to call window.__registerHandler(type, fn) when loaded.
+/*
+ * Centralized command registry for the webview.
+ *
+ * Provides a deterministic, testable API:
+ * - registerCommand(name, handler, { allowMultiple: false|true })
+ * - unregisterCommand(name, handler?)
+ * - getHandlers(name) -> Array<function>
+ * - dispatch(name, payload) -> handler result(s)
+ * - resetRegistry() -> clear all handlers (useful for tests)
+ *
+ * Backwards compatibility: exposes a non-enumerable read-only
+ * `window.__commandRegistry` proxy and a `window.__registerHandler`
+ * helper that appends handlers.
+ */
 (function () {
   'use strict';
-  // Ensure a shared registry object exists on window so both handler scripts
-  // and the main webview can access the same map regardless of load order.
   if (typeof window === 'undefined') { return; }
 
-  if (!window.__commandRegistry) {
-    // If a canonical COMMANDS map exists, prefer that for registry keys
-    // and expose it as __commandNames for backward compatibility with
-    // handler code that expects window.__commandNames.
-    try {
-      if (window.COMMANDS && !window.__commandNames) { window.__commandNames = window.COMMANDS; }
-    } catch (e) {}
+  const INTERNAL_KEY = '__cbd_command_registry_internal_v1__';
 
-    // Initialize the registry object and pre-populate known command keys
-    const initialRegistry = {};
-    try {
-      const names = window.__commandNames || {};
-      Object.keys(names).forEach(function (k) {
-        try { initialRegistry[names[k]] = initialRegistry[names[k]] || undefined; } catch (e) {}
-      });
-    } catch (e) {}
-
-    Object.defineProperty(window, '__commandRegistry', {
-      value: initialRegistry,
-      writable: true,
-      configurable: true,
-      enumerable: false
-    });
-  }
-
-  // Helper used by handlers to register themselves. Handlers may be loaded
-  // in any order; this function ensures the last registration wins for a key.
-  if (!window.__registerHandler) {
-    window.__registerHandler = function (type, fn) {
-      try {
-        if (!type || typeof fn !== 'function') { return; }
-        window.__commandRegistry[type] = fn;
-      } catch (e) { console.warn('commandRegistry register failed', e); }
+  if (!window[INTERNAL_KEY]) {
+    window[INTERNAL_KEY] = {
+      map: new Map(),
+      knownKeys: typeof window.COMMANDS === 'object' ? Object.assign({}, window.COMMANDS) : (typeof window.__commandNames === 'object' ? Object.assign({}, window.__commandNames) : {})
     };
   }
 
-  // Expose a small API for other modules that want to introspect the registry
-  // or programmatically register handlers. This file intentionally does not
-  // attempt to import handler modules (webview bundling varies); instead it
-  // provides a stable runtime registry surface that handler scripts call.
-  const api = {
-    registry: window.__commandRegistry,
-    register: window.__registerHandler,
-    getHandler: function (type) { return (window.__commandRegistry || {})[type]; }
+  const internal = window[INTERNAL_KEY];
+
+  const logger = {
+    warn: (msg, ...args) => { try { console && console.warn && console.warn('[commandRegistry] ' + msg, ...args); } catch (e) {} },
+    error: (msg, ...args) => { try { console && console.error && console.error('[commandRegistry] ' + msg, ...args); } catch (e) {} }
   };
 
-  // Export for module systems if present (CommonJS/AMD/ESM); otherwise leave global.
+  function ensureHandlersArray(name) {
+    if (!internal.map.has(name)) { internal.map.set(name, []); }
+    return internal.map.get(name);
+  }
+
+  function registerCommand(name, handler, opts) {
+    if (!name || typeof handler !== 'function') { throw new TypeError('registerCommand requires (name, function)'); }
+    const options = Object.assign({ allowMultiple: false }, opts || {});
+    const handlers = ensureHandlersArray(name);
+    if (!options.allowMultiple) {
+      internal.map.set(name, [handler]);
+      // Also populate legacy globals so unbundled/test code can introspect handlers
+      try {
+        if (typeof window !== 'undefined') {
+          try {
+            if (!window.__registeredHandlers) { window.__registeredHandlers = {}; }
+            if (options.nonEnumerable) {
+              try { Object.defineProperty(window.__registeredHandlers, String(name), { value: handler, writable: false, configurable: true, enumerable: false }); }
+              catch (e) { window.__registeredHandlers[String(name)] = handler; }
+            } else {
+              window.__registeredHandlers[String(name)] = handler;
+            }
+          } catch (e) { /* ignore */ }
+          try {
+            if (!window.__commandRegistry) { window.__commandRegistry = {}; }
+            if (options.nonEnumerable) {
+              try { Object.defineProperty(window.__commandRegistry, String(name), { value: handler, writable: false, configurable: true, enumerable: false }); }
+              catch (e) { window.__commandRegistry[String(name)] = handler; }
+            } else {
+              window.__commandRegistry[String(name)] = handler;
+            }
+          } catch (e) { /* ignore */ }
+        }
+      } catch (e) { /* ignore */ }
+      return;
+    }
+    if (!handlers.includes(handler)) { handlers.push(handler); }
+    // For allowMultiple case also populate legacy globals (last-registered wins for legacy lookup)
+    try {
+      if (typeof window !== 'undefined') {
+        try { if (!window.__registeredHandlers) { window.__registeredHandlers = {}; } window.__registeredHandlers[String(name)] = handler; } catch (e) {}
+        try { if (!window.__commandRegistry) { window.__commandRegistry = {}; } window.__commandRegistry[String(name)] = handler; } catch (e) {}
+      }
+    } catch (e) {}
+  }
+
+  function unregisterCommand(name, handler) {
+    if (!name) { return; }
+    if (!internal.map.has(name)) { return; }
+    if (!handler) {
+      internal.map.delete(name);
+      return;
+    }
+    const arr = internal.map.get(name).filter(h => h !== handler);
+    if (arr.length === 0) { internal.map.delete(name); }
+    else { internal.map.set(name, arr); }
+  }
+
+  function getHandlers(name) {
+    if (!name) { return []; }
+    const arr = internal.map.get(name);
+    return Array.isArray(arr) ? arr.slice() : [];
+  }
+
+  function dispatch(name, payload) {
+    if (!name) { throw new TypeError('dispatch requires a command name'); }
+    const handlers = getHandlers(name);
+    if (!handlers || handlers.length === 0) {
+      logger.warn('dispatch called for unknown/unregistered command:', name);
+      return undefined;
+    }
+    const results = [];
+    for (const h of handlers) {
+      try {
+        results.push(h(payload));
+      } catch (e) {
+        logger.error('handler threw for command ' + name + ':', e);
+      }
+    }
+    return results.length === 1 ? results[0] : results;
+  }
+
+  function resetRegistry() {
+    internal.map.clear();
+  }
+
+  // Backing target for legacy proxy so handlers can set properties directly
+  const legacyTarget = {};
+  const legacyProxy = new Proxy(legacyTarget, {
+    get(target, prop) {
+      try {
+        const key = String(prop);
+        // If the target has an explicit own property, return it (allows handlers to set handlers directly)
+        if (Object.prototype.hasOwnProperty.call(target, key)) { return Reflect.get(target, key); }
+        // pre-populate known keys on demand
+        if (internal.knownKeys && internal.knownKeys[key] && !internal.map.has(key)) { ensureHandlersArray(key); }
+        // Return a function that will dispatch to registered handlers when invoked.
+        return function (payload) {
+          try { return dispatch(key, payload); } catch (e) { logger.error('legacy proxy dispatch error for ' + key + ':', e); }
+        };
+      } catch (e) { logger.error('legacy proxy get error', e); return undefined; }
+    },
+    set(target, prop, value) {
+      try {
+        const key = String(prop);
+        // If a function is assigned, treat it as registering a single handler (replace semantics)
+        if (typeof value === 'function') {
+          registerCommand(key, value, { allowMultiple: false });
+          // also keep a reference on the legacy target for introspection
+          return Reflect.set(target, prop, value);
+        }
+        // For non-functions, just store the value on the target
+        return Reflect.set(target, prop, value);
+      } catch (e) { logger.error('legacy proxy set error', e); return false; }
+    },
+    defineProperty(target, prop, descriptor) {
+      try {
+        // If descriptor.value is a function, register it as a handler
+        if (descriptor && typeof descriptor.value === 'function') {
+          registerCommand(String(prop), descriptor.value, { allowMultiple: false });
+        }
+        return Reflect.defineProperty(target, prop, descriptor);
+      } catch (e) { logger.error('legacy proxy defineProperty error', e); return false; }
+    },
+    ownKeys() {
+      return Array.from(new Set([...internal.map.keys(), ...Object.keys(internal.knownKeys || {}), ...Object.getOwnPropertyNames(legacyTarget)]));
+    },
+    getOwnPropertyDescriptor(target, prop) {
+      if (Object.prototype.hasOwnProperty.call(target, prop)) {
+        return Reflect.getOwnPropertyDescriptor(target, prop);
+      }
+      // expose synthetic descriptor so enumeration works
+      return { configurable: true, enumerable: true, value: legacyProxy[prop] };
+    }
+  });
+
+  try {
+    if (!Object.prototype.hasOwnProperty.call(window, '__commandRegistry')) {
+      Object.defineProperty(window, '__commandRegistry', {
+        value: legacyProxy,
+        writable: false,
+        configurable: false,
+        enumerable: false
+      });
+    }
+  } catch (e) { /* continue even if defineProperty fails */ }
+
+  try {
+    if (!Object.prototype.hasOwnProperty.call(window, '__registerHandler')) {
+      Object.defineProperty(window, '__registerHandler', {
+        value: function (type, fn) {
+          try {
+            if (!type || typeof fn !== 'function') { return; }
+            registerCommand(type, fn, { allowMultiple: true });
+          } catch (e) { logger.error('window.__registerHandler failed', e); }
+        },
+        writable: false,
+        configurable: false,
+        enumerable: false
+      });
+    }
+  } catch (e) { /* ignore define failures */ }
+
+  const api = { registerCommand, unregisterCommand, getHandlers, dispatch, resetRegistry };
+
   try { if (typeof module !== 'undefined' && module.exports) { module.exports = api; } } catch (e) {}
   try { if (typeof define === 'function' && define.amd) { define(function () { return api; }); } } catch (e) {}
-  try { if (typeof window !== 'undefined') { window.__commandRegistryApi = api; } } catch (e) {}
-})();
-// Simple command registry for the webview handlers.
-// Handlers register themselves onto window.__commandRegistry by message.type.
-(function () {
-  'use strict';
-  if (typeof window === 'undefined') { return; }
-  // Ensure the registry exists and pre-populate any known keys from
-  // the canonical COMMANDS map (or legacy __commandNames) so handlers have
-  // deterministic keys to attach to even before any registration.
-  window.__commandRegistry = window.__commandRegistry || {};
+
+  // Expose a small, explicit global helper for legacy/unbundled code paths.
+  // Prefer calling the centralized registerCommand but also populate the
+  // lightweight legacy globals used by tests and older bundles. By default
+  // this helper performs plain object inserts for maximum compatibility. If
+  // a caller passes { nonEnumerable: true } we will attempt to define the
+  // property as non-enumerable as a best-effort (fallbacks to plain assign
+  // when defineProperty is unavailable or throws).
   try {
-    var known = (window.COMMANDS || window.__commandNames) || {};
-    Object.keys(known).forEach(function (k) {
-      try { if (!window.__commandRegistry[known[k]]) { window.__commandRegistry[known[k]] = undefined; } } catch (e) {}
-    });
-    // keep backward-compatible alias
-    if (window.COMMANDS && !window.__commandNames) { window.__commandNames = window.COMMANDS; }
-  } catch (e) {}
-  // Utility to register a handler (defensive against accidental overrides)
-  window.__registerHandler = function (type, fn) {
-    try {
-      if (!type || typeof fn !== 'function') { return; }
-      if (window.__commandRegistry[type]) {
-        // do not overwrite an existing handler; allow multiple by wrapping
-        const prev = window.__commandRegistry[type];
-        window.__commandRegistry[type] = function (msg) {
-          try { prev(msg); } catch (e) { console.warn('previous handler failed for', type, e); }
-          try { fn(msg); } catch (e) { console.warn('handler failed for', type, e); }
-        };
-      } else {
-        window.__commandRegistry[type] = fn;
-      }
-    } catch (e) { console.warn('registerHandler failed', e); }
-  };
-})();
-// Eager-load specific handlers so they are included in bundles or environments
-// that don't load handler scripts independently. This is defensive — handlers
-// will still register themselves via window.__registerHandler when executed.
-(function () {
-  'use strict';
-  if (typeof window === 'undefined') { return; }
+    if (typeof window !== 'undefined' && typeof window.registerCommand !== 'function') {
+      window.registerCommand = function (name, fn, opts) {
+        try {
+          // Ensure the canonical internal registry is updated first
+          try { registerCommand(name, fn, opts); } catch (e) { /* swallow */ }
+          const options = opts || {};
+          // Populate __registeredHandlers for tests / introspection
+          try {
+            if (!window.__registeredHandlers) { window.__registeredHandlers = {}; }
+            if (options.nonEnumerable) {
+              try { Object.defineProperty(window.__registeredHandlers, String(name), { value: fn, writable: false, configurable: true, enumerable: false }); }
+              catch (e) { window.__registeredHandlers[String(name)] = fn; }
+            } else {
+              window.__registeredHandlers[String(name)] = fn;
+            }
+          } catch (e) { /* ignore global wiring failures */ }
+
+          // Populate __commandRegistry for legacy consumers (plain assignment by default)
+          try {
+            if (!window.__commandRegistry) { window.__commandRegistry = {}; }
+            if (options.nonEnumerable) {
+              try { Object.defineProperty(window.__commandRegistry, String(name), { value: fn, writable: false, configurable: true, enumerable: false }); }
+              catch (e) { window.__commandRegistry[String(name)] = fn; }
+            } else {
+              window.__commandRegistry[String(name)] = fn;
+            }
+          } catch (e) { /* ignore */ }
+
+        } catch (e) {
+          try { console && console.warn && console.warn('[commandRegistry] window.registerCommand failed', e); } catch (ex) {}
+        }
+      };
+    }
+  } catch (e) { /* ignore exposure failures */ }
+
   try {
-    // CommonJS style (Node/webpack)
     if (typeof require === 'function') {
       try { require('./handlers/treeDataHandler.js'); } catch (e) { try { require('./handlers/treeDataHandler'); } catch (ex) {} }
     }
   } catch (e) {}
-  // Note: avoid using the `import` keyword in runtime checks because some
-  // JS parsers treat it as a module-only syntax and will error during parse.
-  // We rely on CommonJS require() and importScripts() where available.
-  try {
-    // Worker-style importScripts (for environments that support it)
-    if (typeof importScripts === 'function') {
-      try { importScripts('handlers/treeDataHandler.js'); } catch (e) { /* ignore */ }
-    }
-  } catch (e) {}
+  try { if (typeof importScripts === 'function') { try { importScripts('handlers/treeDataHandler.js'); } catch (e) {} } } catch (e) {}
+
 })();

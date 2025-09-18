@@ -1,36 +1,33 @@
-;(function () {
-  'use strict';
-  if (typeof window === 'undefined') { return; }
+"use strict";
 
-  /**
-   * Handle `restoredState` messages which provide persisted UI state to reapply
-   * after a webview restore.
-   *
-   * Expected message shape:
-   * { type: 'restoredState', state: { selectedFiles?: string[], focusIndex?: number } }
-   *
-   * Side effects:
-   * - writes a pending persisted selection into `window.store` via `setPendingPersistedSelection`
-   *   so subscribers may apply the selection once the tree has been hydrated.
-   *
-   * @param {{type?:string, state?:{selectedFiles?:string[], focusIndex?:number}}} msg
-   */
-  var restoredStateHandler = function (msg) {
-    try {
-      const s = msg && msg.state ? msg.state : {};
-      try { if (window.store && typeof window.store.setPendingPersistedSelection === 'function') { window.store.setPendingPersistedSelection(Array.isArray(s.selectedFiles) ? s.selectedFiles.slice() : null, typeof s.focusIndex === 'number' ? s.focusIndex : undefined); } } catch (e) { console.warn('restoredStateHandler: setPendingPersistedSelection failed', e); }
-      if (Array.isArray(s.selectedFiles) && s.selectedFiles.length > 0) {
-        const sel = s.selectedFiles.slice();
-        try { window.store && window.store.setPendingPersistedSelection && window.store.setPendingPersistedSelection(sel, typeof s.focusIndex === 'number' ? s.focusIndex : undefined); } catch (e) {}
-      }
-      if (s.focusIndex !== undefined && typeof s.focusIndex === 'number') {
-        try { window.store && window.store.setPendingPersistedSelection && window.store.setPendingPersistedSelection(null, s.focusIndex); } catch (e) {}
-      }
-    } catch (e) { console.warn('restoredStateHandler error', e); }
-  };
+function restoredStateHandler(msg) {
+  try {
+    const s = msg && msg.state ? msg.state : {};
+  try { if (typeof window !== 'undefined' && window.store && typeof window.store.setPendingPersistedSelection === 'function') { try { window.store.setPendingPersistedSelection(Array.isArray(s.selectedFiles) ? s.selectedFiles.slice() : null, typeof s.focusIndex === 'number' ? s.focusIndex : undefined); } catch (e) { const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/restoredStateHandler.js', function: 'setPendingPersistedSelection' }); } } } catch (e) { const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/restoredStateHandler.js', context: 'initial setPendingPersistedSelection' }); }
+    if (Array.isArray(s.selectedFiles) && s.selectedFiles.length > 0) {
+  const sel = s.selectedFiles.slice();
+  try { if (typeof window !== 'undefined' && window.store && typeof window.store.setPendingPersistedSelection === 'function') { try { window.store.setPendingPersistedSelection(sel, typeof s.focusIndex === 'number' ? s.focusIndex : undefined); } catch (e) { const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/restoredStateHandler.js', function: 'setPendingPersistedSelection (selectedFiles)' }); } } } catch (e) { const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/restoredStateHandler.js', context: 'selectedFiles branch' }); }
+    }
+    if (s.focusIndex !== undefined && typeof s.focusIndex === 'number') {
+  try { if (typeof window !== 'undefined' && window.store && typeof window.store.setPendingPersistedSelection === 'function') { try { window.store.setPendingPersistedSelection(null, s.focusIndex); } catch (e) { const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/restoredStateHandler.js', function: 'setPendingPersistedSelection (focusIndex)' }); } } } catch (e) { const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/restoredStateHandler.js', context: 'focusIndex branch' }); }
+    }
+  } catch (e) { const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/restoredStateHandler.js' }); }
+}
 
-  var cmd = (window.COMMANDS && window.COMMANDS.restoredState) ? window.COMMANDS.restoredState : (window.__commandNames && window.__commandNames.restoredState) ? window.__commandNames.restoredState : 'restoredState';
-  if (typeof window.__registerHandler === 'function') { try { window.__registerHandler(cmd, restoredStateHandler); } catch (e) {} }
-  try { if (!window.__registeredHandlers) { window.__registeredHandlers = {}; } window.__registeredHandlers[cmd] = restoredStateHandler; } catch (e) {}
-  try { if (!window.__commandRegistry) { window.__commandRegistry = {}; } window.__commandRegistry[cmd] = restoredStateHandler; } catch (e) {}
-})();
+const cmd = (typeof window !== 'undefined' && window.COMMANDS && window.COMMANDS.restoredState) ? window.COMMANDS.restoredState : (typeof window !== 'undefined' && window.__commandNames && window.__commandNames.restoredState) ? window.__commandNames.restoredState : 'restoredState';
+
+try {
+  const registry = require('../commandRegistry');
+  if (registry && typeof registry.registerCommand === 'function') {
+    try { registry.registerCommand(cmd, restoredStateHandler, { allowMultiple: false }); } catch (e) { const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/restoredStateHandler.js', command: cmd }); }
+  }
+} catch (e) { const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/restoredStateHandler.js', command: cmd }); }
+
+  try {
+    if (typeof window !== 'undefined') {
+      if (typeof window.registerCommand === 'function') { try { window.registerCommand(cmd, restoredStateHandler); } catch (e) { const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/restoredStateHandler.js', command: cmd }); } }
+      else if (typeof window.__registerHandler === 'function') { try { window.__registerHandler(cmd, restoredStateHandler); } catch (e) { const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/restoredStateHandler.js', command: cmd }); } }
+    }
+  } catch (e) { const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/restoredStateHandler.js', command: cmd }); }
+
+module.exports = { restoredStateHandler };

@@ -2,42 +2,65 @@
 
 (global as any).window = {};
 
-// Setup minimal DOM for the ingest preview text
+// Setup minimal DOM (but handlers should not manipulate DOM directly anymore)
 const { JSDOM } = require('jsdom');
 const dom = new JSDOM('<!doctype html><html><body><div id="ingest-preview"><div id="ingest-preview-text"></div><div id="ingest-spinner"></div></div></body></html>');
 (global as any).document = dom.window.document;
 (global as any).window.document = dom.window.document;
 
-// Provide lightweight nodes map used by handlers and registry surfaces
+// Provide lightweight registry surface for legacy handlers to register into
 (global as any).window.__registeredHandlers = {};
 (global as any).window.__registerHandler = function (type: string, fn: any) {
   (global as any).window.__registeredHandlers[type] = fn;
 };
 
-// Load handler module (it should register itself) after we attach store in beforeEach
-describe('ingestPreviewHandler', () => {
+describe('ingestPreviewHandler (store-centric)', () => {
   let wvStoreLocal: any;
   beforeEach(() => {
+    // reload fresh store instance
     try { delete require.cache[require.resolve('../../resources/webview/store.js')]; } catch (e) {}
     wvStoreLocal = require('../../resources/webview/store.js');
+    // Spy on setState to assert handler uses the store
+    jest.spyOn(wvStoreLocal, 'setState');
     (global as any).window.store = wvStoreLocal;
-    // set nodes map used by handler
+
+    // set nodes map used by handler (should be unused by modern handlers but left for compatibility)
     (global as any).nodes = { ingestPreviewRoot: document.getElementById('ingest-preview'), ingestPreviewText: document.getElementById('ingest-preview-text'), ingestSpinner: document.getElementById('ingest-spinner') };
-    // reset state and DOM
+
+    // reset state
     try { wvStoreLocal.setState({ ingestPreview: null }); } catch (e) {}
-    document.getElementById('ingest-preview-text')!.textContent = '';
+
+    // load handler module (it registers itself via __registerHandler)
     try { delete require.cache[require.resolve('../../resources/webview/handlers/ingestPreviewHandler.js')]; } catch (e) {}
     require('../../resources/webview/handlers/ingestPreviewHandler.js');
   });
 
-  test('handler is registered and updates store and DOM', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+    // reset store subscribers/state if available
+    try { (global as any).window.store && (global as any).window.store.setState({ ingestPreview: null, previewDelta: null }); } catch (e) {}
+  });
+
+  test('handler registers and calls store.setState with preview payload (no direct DOM writes)', () => {
     const handler = (global as any).window.__registeredHandlers['ingestPreview'] || (global as any).window.__commandRegistry && (global as any).window.__commandRegistry['ingestPreview'];
     expect(typeof handler).toBe('function');
+
     const payload = { preview: { summary: 'OK', tree: 'a/b/c' }, output: 'out' };
+
+    // If DOM is present, spy on the ingest-preview-text setter to ensure handler doesn't write to it
+    let textSpy: any = null;
+    try {
+      const textEl = document.getElementById('ingest-preview-text');
+      if (textEl) { textSpy = jest.spyOn(textEl, 'textContent', 'set'); }
+    } catch (e) { /* ignore when no DOM present */ }
+
     handler({ payload });
+
+    // store.setState should be called by the handler
+    expect((global as any).window.store.setState).toHaveBeenCalled();
     const s = (global as any).window.store.getState();
-    expect(s.ingestPreview).toBeDefined();
-    const text = document.getElementById('ingest-preview-text')!.textContent;
-    expect(text).toMatch(/OK/);
+    expect(s.ingestPreview || s.previewDelta).toBeDefined();
+
+    if (textSpy) { expect(textSpy).not.toHaveBeenCalled(); }
   });
 });

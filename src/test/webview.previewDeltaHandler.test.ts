@@ -45,10 +45,14 @@ describe('previewDeltaHandler', () => {
       console.error('previewDelta handler not a function; registry keys:', Object.keys(reg.__registeredHandlers || {}));
     }
     const delta = { tokenEstimate: 123, fileTree: { a: { __isFile: true, path: 'a' } }, selectedPaths: ['a'] };
-    handler({ delta });
+  // invoke handler (should only update the store)
+  handler({ delta });
+
     const s = (global as any).window.store && (global as any).window.store.getState ? (global as any).window.store.getState() : wvStore.getState();
     expect(s.previewDelta).toEqual(delta);
     expect(s.fileTree).toEqual(delta.fileTree);
     expect(Array.isArray(s.selectedPaths) && s.selectedPaths[0] === 'a').toBe(true);
+
+    // the handler should not perform direct DOM writes; the renderer/subscribers handle DOM
   });
 });
