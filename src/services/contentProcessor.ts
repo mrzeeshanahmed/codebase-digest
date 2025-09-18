@@ -1,5 +1,5 @@
 import * as path from 'path';
-import { NotebookProcessor } from './notebookProcessor';
+import { handleNotebook } from '../plugins/notebookPlugin';
 import { FSUtils } from '../utils/fsUtils';
 import { DigestConfig, FileNode } from '../types/interfaces';
 import { internalErrors, interactiveMessages } from '../utils';
@@ -13,98 +13,75 @@ export class ContentProcessor {
      * @returns Promise<{ content: string, isBinary: boolean }>
      */
     async getFileContent(filePath: string, ext: string, cfg: DigestConfig): Promise<{ content: string, isBinary: boolean }> {
-    try {
-            // Notebook handling
-            if (ext === '.ipynb' && cfg.notebookProcess) {
-                // Map DigestConfig to NotebookConfig, including new toggles
-                const notebookCfg = {
-                    includeCodeCells: cfg.notebookIncludeCodeCells ?? cfg.includeFileContents ?? true,
-                    includeMarkdownCells: cfg.notebookIncludeMarkdownCells ?? true,
-                    includeOutputs: cfg.notebookIncludeOutputs ?? true,
-                    outputMaxChars: cfg.notebookOutputMaxChars ?? 10000,
-                    codeFenceLanguage: cfg.notebookCodeFenceLanguage ?? 'python',
-                    notebookIncludeNonTextOutputs: cfg.notebookIncludeNonTextOutputs ?? false,
-                    notebookNonTextOutputMaxBytes: cfg.notebookNonTextOutputMaxBytes ?? 200000,
-                };
-                // Output format and relPath
-                const format = cfg.outputFormat === 'markdown' ? 'markdown' : 'text';
-                const relPath = path.basename(filePath);
-                const nbContent = NotebookProcessor.buildNotebookContent(filePath, notebookCfg, format, relPath);
-                return { content: nbContent, isBinary: false };
+        try {
+            const notebookResult = handleNotebook(filePath, cfg);
+            if (notebookResult) {
+                return notebookResult;
             }
 
-            // Stat for size
             const stat = await FSUtils.safeStat(filePath);
-            // If stat failed (null), treat as a read error instead of
-            // proceeding — this avoids inconsistent behavior where a
-            // subsequent isReadable check may return true but stat info is
-            // not available causing later code to mis-handle the file.
             if (!stat) {
                 throw new internalErrors.FileReadError(filePath, 'Unable to stat file or permission denied');
             }
-            // Validate readability before attempting to read. If unreadable,
-            // throw a typed FileReadError so callers (DigestGenerator) can
-            // aggregate the error into per-file results instead of showing
-            // a popup for every unreadable file.
+
             const readable = await FSUtils.isReadable(filePath);
             if (!readable) {
                 throw new internalErrors.FileReadError(filePath, 'Permission denied or unreadable file');
             }
-            const size = stat.size ?? 0;
 
-            // Binary detection
             const isBinary = await FSUtils.isBinary(filePath);
-            if (isBinary && cfg.binaryFilePolicy) {
-                // Normalize policy string so callers or UI that use 'include'
-                // (labelled "Include Placeholder" in the settings) are treated
-                // the same as the internal 'includePlaceholder' value.
-                let policy = String(cfg.binaryFilePolicy).trim();
-                // Allow legacy/alias 'include' to mean includePlaceholder
-                if (policy.toLowerCase() === 'include') {
-                    policy = 'includePlaceholder';
-                }
-                if (policy === 'skip') {
-                    return { content: '[binary file skipped]', isBinary: true };
-                } else if (policy === 'includePlaceholder') {
-                    const sizeStr = FSUtils.humanFileSize(size);
-                    return { content: `[binary file: ${sizeStr}]`, isBinary: true };
-                } else if (policy === 'includeBase64') {
-                    const base64 = await FSUtils.readFileBase64(filePath);
-                    let fenced = base64;
-                    if (cfg.outputFormat === 'markdown') {
-                        const fenceLang = cfg.base64FenceLanguage || 'base64';
-                        fenced = `\`\`\`${fenceLang}\n${base64}\n\`\`\``;
-                    }
-                    return { content: fenced, isBinary: true };
-                }
+            if (isBinary) {
+                return this._handleBinaryFile(filePath, stat, cfg);
+            } else {
+                return this._handleTextFile(filePath, stat, cfg);
             }
-
-            // Text file reading
-            let content = '';
-            const threshold = cfg.streamingThresholdBytes ?? 1024 * 1024;
-            try {
-                if (cfg.useStreamingRead && size > threshold) {
-                    content = await FSUtils.readTextFile(filePath, true);
-                } else {
-                    content = await FSUtils.readTextFile(filePath, false);
-                }
-            } catch (readErr) {
-                // Wrap and surface to caller
-                    throw new internalErrors.FileReadError(filePath, String(readErr));
-            }
-            return { content, isBinary: false };
         } catch (e) {
-            // Propagate typed FileReadError so the digest generator can
-            // collect it in per-file errors and present an aggregated report.
-            // For any other unexpected error, promote it to a FileReadError
-            // instead of silently swallowing the failure.
             if (e instanceof internalErrors.FileReadError) {
                 throw e;
             }
-            // Ensure we throw a typed FileReadError so callers can distinguish
-            // read failures from other runtime errors and record them.
             throw new internalErrors.FileReadError(filePath, String(e));
         }
+    }
+
+    private async _handleBinaryFile(filePath: string, stat: import('fs').Stats, cfg: DigestConfig): Promise<{ content: string, isBinary: boolean }> {
+        if (cfg.binaryFilePolicy) {
+            let policy = String(cfg.binaryFilePolicy).trim().toLowerCase();
+            if (policy === 'include') {
+                policy = 'includeplaceholder';
+            }
+
+            if (policy === 'skip') {
+                return { content: '[binary file skipped]', isBinary: true };
+            } else if (policy === 'includeplaceholder') {
+                const sizeStr = FSUtils.humanFileSize(stat.size);
+                return { content: `[binary file: ${sizeStr}]`, isBinary: true };
+            } else if (policy === 'includebase64') {
+                const base64 = await FSUtils.readFileBase64(filePath);
+                let fenced = base64;
+                if (cfg.outputFormat === 'markdown') {
+                    const fenceLang = cfg.base64FenceLanguage || 'base64';
+                    fenced = `\`\`\`${fenceLang}\n${base64}\n\`\`\``;
+                }
+                return { content: fenced, isBinary: true };
+            }
+        }
+        // Default policy is to skip
+        return { content: '[binary file skipped]', isBinary: true };
+    }
+
+    private async _handleTextFile(filePath: string, stat: import('fs').Stats, cfg: DigestConfig): Promise<{ content: string, isBinary: boolean }> {
+        let content = '';
+        const threshold = cfg.streamingThresholdBytes ?? 1024 * 1024;
+        try {
+            if (cfg.useStreamingRead && stat.size > threshold) {
+                content = await FSUtils.readTextFile(filePath, true);
+            } else {
+                content = await FSUtils.readTextFile(filePath, false);
+            }
+        } catch (readErr) {
+            throw new internalErrors.FileReadError(filePath, String(readErr));
+        }
+        return { content, isBinary: false };
     }
 
     /**

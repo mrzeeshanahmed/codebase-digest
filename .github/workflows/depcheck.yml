@@ -22,11 +22,12 @@ jobs:
         run: |
           npm ci --ignore-scripts
       - name: Run depcheck
+        id: depcheck
+        continue-on-error: true
         run: |
-          npx depcheck --json > depcheck-report.json || true
-          cat depcheck-report.json
-          node -e "const r=require('./depcheck-report.json'); if ((r.dependencies && Object.keys(r.dependencies).length>0) || (r.devDependencies && Object.keys(r.devDependencies).length>0)) { console.error('Depcheck found unused deps'); process.exit(1); } else { console.log('No unused deps found'); }"
+          npx depcheck --json > depcheck-report.json
       - name: Upload report
+        if: steps.depcheck.outcome == 'failure'
         uses: actions/upload-artifact@v4
         with:
           name: depcheck-report

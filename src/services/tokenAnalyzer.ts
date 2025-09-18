@@ -26,64 +26,69 @@ export class TokenAnalyzer {
      */
     estimate(content: string, model: string, divisorOverrides?: Record<string, number>): number {
         if (!content) { return 0; }
-        // Use plugin if model is 'tiktoken' and plugin is available
+
         if (model === 'tiktoken') {
-            try {
-                // Prefer a synchronous require so callers that run in hot paths
-                // don't need to await an init promise. If optional adapter isn't
-                // present it'll throw and be ignored.
-                const plugins = require('../plugins/index');
-                if (plugins && typeof plugins.getTokenizer === 'function') {
-                    const tokenizer = plugins.getTokenizer('tiktoken');
-                    if (typeof tokenizer === 'function') { return tokenizer(content, {}); }
-                }
-            } catch {}
-        }
-        const divisors = { ...TokenAnalyzer.defaultDivisors, ...(divisorOverrides || {}) };
-        const divisor = divisors[model] || divisors['chars-approx'] || 4;
-
-        // Support comment weighting via a special override key 'commentWeight'
-        // If provided, attempt to heuristically split comments from code and weight comment length accordingly.
-        // Read commentWeight defensively from divisorOverrides without `as any`
-        let commentWeight = 1;
-        try {
-            if (divisorOverrides && typeof divisorOverrides === 'object' && typeof (divisorOverrides as Record<string, unknown>)['commentWeight'] === 'number') {
-                commentWeight = (divisorOverrides as Record<string, number>)['commentWeight'];
-            }
-        } catch (e) { /* swallow */ }
-
-        let effectiveLength = content.length;
-        if (commentWeight !== 1) {
-            try {
-                // Simple heuristics for common comment styles: // single-line, /* */ block, # line
-                // Extract block comments
-                let commentsLen = 0;
-                const blockRe = /\/\*[\s\S]*?\*\//g;
-                let m: RegExpExecArray | null;
-                while ((m = blockRe.exec(content)) !== null) {
-                    commentsLen += m[0].length;
-                }
-                // Extract // line comments
-                const lineRe = /(^|[^:]|^)\/\/.*$/gm; // naive
-                while ((m = lineRe.exec(content)) !== null) {
-                    commentsLen += m[0].replace(/^([^\/]*)\//, '/').length; // approximate
-                }
-                // Extract # comments (python/shell)
-                const hashRe = /(^|\n)\s*#.*$/gm;
-                while ((m = hashRe.exec(content)) !== null) {
-                    commentsLen += m[0].length - (m[1] ? m[1].length : 0);
-                }
-                // Bound commentsLen
-                if (commentsLen < 0) { commentsLen = 0; }
-                if (commentsLen > content.length) { commentsLen = content.length; }
-                const nonCommentLen = content.length - commentsLen;
-                effectiveLength = nonCommentLen + commentWeight * commentsLen;
-            } catch (e) {
-                effectiveLength = content.length;
+            const tiktokenEstimate = this._getTiktokenEstimate(content);
+            if (tiktokenEstimate !== null) {
+                return tiktokenEstimate;
             }
         }
+
+        const divisor = this._getDivisor(model, divisorOverrides);
+        const commentWeight = divisorOverrides?.['commentWeight'] ?? 1;
+
+        const effectiveLength = commentWeight !== 1
+            ? this._getCommentWeightedLength(content, commentWeight)
+            : content.length;
 
         return Math.ceil(effectiveLength / divisor);
+    }
+
+    private _getTiktokenEstimate(content: string): number | null {
+        try {
+            const plugins = require('../plugins/index');
+            if (plugins && typeof plugins.getTokenizer === 'function') {
+                const tokenizer = plugins.getTokenizer('tiktoken');
+                if (typeof tokenizer === 'function') {
+                    return tokenizer(content, {});
+                }
+            }
+        } catch {
+            // tiktoken plugin not available
+        }
+        return null;
+    }
+
+    private _getDivisor(model: string, divisorOverrides?: Record<string, number>): number {
+        const divisors = { ...TokenAnalyzer.defaultDivisors, ...(divisorOverrides || {}) };
+        return divisors[model] || divisors['chars-approx'] || 4;
+    }
+
+    private _getCommentWeightedLength(content: string, commentWeight: number): number {
+        try {
+            let commentsLen = 0;
+            const blockRe = /\/\*[\s\S]*?\*\//g;
+            let m: RegExpExecArray | null;
+            while ((m = blockRe.exec(content)) !== null) {
+                commentsLen += m[0].length;
+            }
+
+            const lineRe = /(^|[^:]|^)\/\/.*$/gm;
+            while ((m = lineRe.exec(content)) !== null) {
+                commentsLen += m[0].replace(/^([^\/]*)\//, '/').length;
+            }
+
+            const hashRe = /(^|\n)\s*#.*$/gm;
+            while ((m = hashRe.exec(content)) !== null) {
+                commentsLen += m[0].length - (m[1] ? m[1].length : 0);
+            }
+
+            commentsLen = Math.max(0, Math.min(commentsLen, content.length));
+            const nonCommentLen = content.length - commentsLen;
+            return nonCommentLen + commentWeight * commentsLen;
+        } catch (e) {
+            return content.length;
+        }
     }
 
     /**

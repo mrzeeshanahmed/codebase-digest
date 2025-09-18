@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { Diagnostics } from '../utils/diagnostics';
+import { logger } from './logger';
 import { GitignoreService } from './gitignoreService';
 import { FileScanner } from './fileScanner';
 import { ContentProcessor } from './contentProcessor';
@@ -7,7 +7,6 @@ import { TokenAnalyzer } from './tokenAnalyzer';
 // Optionally import CacheService, Metrics if present
 
 export interface ServicesBundle {
-    diagnostics: Diagnostics;
     gitignoreService: GitignoreService;
     fileScanner: FileScanner;
     contentProcessor: ContentProcessor;
@@ -28,14 +27,12 @@ export class WorkspaceManager {
     }
 
     private createBundle(folder: vscode.WorkspaceFolder): ServicesBundle {
-        const diagnostics = new Diagnostics('info');
         const gitignoreService = new GitignoreService();
-        const fileScanner = new FileScanner(gitignoreService, diagnostics);
+        const fileScanner = new FileScanner(gitignoreService);
         const contentProcessor = new ContentProcessor();
         const tokenAnalyzer = new TokenAnalyzer();
         // Optionally instantiate cacheService, metrics here
         return {
-            diagnostics,
             gitignoreService,
             fileScanner,
             contentProcessor,

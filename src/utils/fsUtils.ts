@@ -125,4 +125,27 @@ export class FSUtils {
             return '';
         }
     }
+
+    static createFileNode(
+        absPath: string,
+        relPath: string,
+        name: string,
+        type: 'file' | 'directory' | 'symlink',
+        stat: fs.Stats,
+        depth: number,
+        children?: import('../types/interfaces').FileNode[]
+    ): import('../types/interfaces').FileNode {
+        return {
+            path: absPath,
+            relPath,
+            name,
+            type,
+            size: stat.size,
+            mtime: stat.mtime,
+            depth,
+            isSelected: false,
+            isBinary: false,
+            children,
+        };
+    }
 }

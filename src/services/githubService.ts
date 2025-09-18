@@ -5,7 +5,7 @@ import * as os from 'os';
 // Track created temp dirs for session-scoped cleanup
 const _createdTmpDirs: string[] = [];
 import { internalErrors, interactiveMessages } from '../utils';
-import { logErrorToChannel } from '../utils/errorHandler';
+import { logger } from './logger';
 import { spawnGitPromise, safeFetch } from '../utils/procRedact';
 import { scrubTokens } from '../utils/redaction';
 // (no-op) additional logging helper imported where needed
@@ -281,77 +281,30 @@ export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?
         } catch (e) { /* best-effort, ignore */ }
     }
     let env: any = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
-    // Optional output channel and buffered chunk writer for streaming git output
-    // If an external onChunk callback is provided we will call it for each
-    // stdout/stderr chunk and avoid creating a second internal OutputChannel
-    let outChannel: vscode.OutputChannel | undefined;
-    // Buffer and timer for coalescing small writes
-    let writeBuffer = '';
-    let flushTimer: NodeJS.Timeout | undefined;
-    const FLUSH_MS_DEFAULT = 150;
-    let flushMs = FLUSH_MS_DEFAULT;
-    // Configurable UX: show channel when starting, and close on complete
-    let showOnStart = true;
-    let closeOnComplete = false;
-    try {
-        outChannel = vscode.window.createOutputChannel('Code Ingest');
-        try {
-            const cfg = vscode.workspace && typeof vscode.workspace.getConfiguration === 'function' ? vscode.workspace.getConfiguration('codebaseDigest') : null;
-            if (cfg && typeof cfg.get === 'function') {
-                const s = cfg.get('showIngestOutputChannel', true);
-                const c = cfg.get('closeIngestOutputOnComplete', false);
-                const fm = cfg.get('ingestOutputFlushMs', FLUSH_MS_DEFAULT);
-                showOnStart = typeof s === 'boolean' ? s : true;
-                closeOnComplete = typeof c === 'boolean' ? c : false;
-                flushMs = typeof fm === 'number' && fm >= 20 ? fm : FLUSH_MS_DEFAULT;
-            }
-        } catch (_) { /* ignore config read errors */ }
-    } catch (_) { outChannel = undefined; }
-
-    const scheduleFlush = () => {
-        try {
-            if (flushTimer) { return; }
-            flushTimer = setTimeout(() => {
-                try {
-                    if (outChannel && writeBuffer.length > 0) {
-                        outChannel.append(writeBuffer);
-                    }
-                } catch (_) { /* ignore */ }
-                writeBuffer = '';
-                if (flushTimer) { clearTimeout(flushTimer); flushTimer = undefined; }
-            }, flushMs) as unknown as NodeJS.Timeout;
-        } catch (_) { /* ignore */ }
-    };
 
     // Build a composed chunk writer. If an external onChunk callback was
     // provided by the caller, call it for each chunk. When no external
-    // callback is present, fall back to writing into our local OutputChannel.
+    // callback is present, fall back to writing into our logger.
     const chunkWriter = (chunk: { stream: 'stdout' | 'stderr'; data: string }) => {
         try {
             // If caller provided a callback, prefer delivering raw chunk
-            // (caller may scrub or format it). If not, scrub and buffer-write.
+            // (caller may scrub or format it). If not, scrub and log.
             if (typeof onChunk === 'function') {
                 try { onChunk(chunk); } catch (_) { /* swallow external callback errors */ }
                 return;
             }
             const text = scrubTokens(chunk.data || '');
-            // Coalesce into buffer and schedule a flush
-            writeBuffer += text;
-            scheduleFlush();
+            // Don't log empty lines
+            if (text.trim()) {
+                logger.info(text);
+            }
         } catch (_) { /* ignore logging errors */ }
     };
 
     // Optionally show the channel at start and write a start line
     const startTime = Date.now();
-    const writeStartLine = () => {
-        try {
-            if (outChannel && showOnStart) {
-                outChannel.appendLine(`=== Ingest started: ${new Date(startTime).toISOString()} - ${owner}/${repo} ===`);
-            }
-        } catch (_) { /* ignore */ }
-    };
-    try { if (outChannel && showOnStart) { outChannel.show(true); } } catch (_) { /* ignore */ }
-    writeStartLine();
+    logger.info(`=== Ingest started: ${new Date(startTime).toISOString()} - ${owner}/${repo} ===`);
+    logger.show();
     // Helper to write askpass script into `dir` and set env vars accordingly
     // Write askpass helper into a separate temp dir (not the clone target) so the
     // clone target stays empty. Only create the helper when we have a token.
@@ -511,13 +464,8 @@ export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?
     } catch (err) {
         // On any failure, if we created the dir here, attempt best-effort cleanup before propagating
         // Write a failure line with duration
-        try {
-            const dur = Date.now() - startTime;
-            if (outChannel) {
-                outChannel.appendLine(`=== Ingest FAILED after ${dur} ms ===`);
-                try { if (err && String(err)) { outChannel.appendLine(scrubTokens(String(err))); } } catch (_) { /* ignore */ }
-            }
-        } catch (_) { /* ignore */ }
+        const dur = Date.now() - startTime;
+        logger.error(`=== Ingest FAILED after ${dur} ms ===`, err);
         try {
             if (createdHere && fs.existsSync(dir)) { await cleanup(dir); }
         } catch (ce) {
@@ -561,21 +509,9 @@ export async function partialClone(ownerRepo: string, shaOrRef: string, subpath?
     try {
         if (askpassDir && fs.existsSync(askpassDir)) { fs.rmSync(askpassDir, { recursive: true, force: true }); }
     } catch (_) { /* ignore */ }
-    // Write completion line and flush buffer
-    try {
-        const dur = Date.now() - startTime;
-        if (outChannel) {
-            outChannel.appendLine(`=== Ingest completed: ${new Date().toISOString()} (duration ${dur} ms) ===`);
-        }
-    } catch (_) { /* ignore */ }
-    // Flush any remaining buffered output and optionally close the channel
-    try {
-        if (flushTimer) { clearTimeout(flushTimer); flushTimer = undefined; }
-        if (outChannel && writeBuffer.length > 0) { outChannel.append(writeBuffer); writeBuffer = ''; }
-        if (outChannel && closeOnComplete) {
-            try { outChannel.hide(); } catch (_) { /* ignore */ }
-        }
-    } catch (_) { /* ignore */ }
+    // Write completion line
+    const dur = Date.now() - startTime;
+    logger.info(`=== Ingest completed: ${new Date().toISOString()} (duration ${dur} ms) ===`);
 
     return dir;
 }
@@ -634,26 +570,8 @@ export async function ingestRemoteRepo(urlOrSlug: string, options?: { ref?: { ta
             throw err;
         }
 
-        // Prepare an output channel and chunk callback so clone progress is streamed
-        // into the `Code Ingest` channel to provide user feedback during long ops.
-        let outChannel: vscode.OutputChannel | undefined;
-        try {
-            outChannel = vscode.window.createOutputChannel('Code Ingest');
-            outChannel.show(true);
-            outChannel.appendLine(`=== Cloning ${ownerRepo} @ ${sha} ===`);
-        } catch (_) { outChannel = undefined; }
-
-        const onChunk = (chunk: { stream: 'stdout' | 'stderr'; data: string }) => {
-            try {
-                const text = scrubTokens(chunk.data || '');
-                if (outChannel) {
-                    outChannel.append(text);
-                }
-            } catch (_) { /* ignore logging errors */ }
-        };
-
         // Perform partial clone into the caller-provided tmpDir
-        localPath = await partialClone(ownerRepo, sha, options?.subpath, tmpDir, undefined, token, onChunk);
+        localPath = await partialClone(ownerRepo, sha, options?.subpath, tmpDir, undefined, token);
 
         // If includeSubmodules, run git submodule update --init --recursive
         if (options?.includeSubmodules) {
@@ -682,7 +600,7 @@ export async function ingestRemoteRepo(urlOrSlug: string, options?: { ref?: { ta
                 try {
                     await cleanup(tmpDir);
                 } catch (cleanupErr) {
-                    try { logErrorToChannel(cleanupErr, `Failed to cleanup temporary dir ${tmpDir}`); } catch (e) { try { console.error('cleanup reporting failed', e); } catch {} }
+                    logger.error(`Failed to cleanup temporary dir ${tmpDir}`, cleanupErr);
                 }
             }
         } catch (e) {

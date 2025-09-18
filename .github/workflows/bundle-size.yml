@@ -11,15 +11,14 @@ on:
         description: 'If true, fail the job when bundle exceeds threshold'
         required: false
         default: 'false'
+      bundle_size_threshold:
+        description: 'Bundle size threshold in bytes'
+        required: false
+        default: '1048576'
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    # Job-level env so the bundle check logic is evaluated once per job.
-    env:
-      # Default threshold can be overridden by repository secrets or workflow inputs
-      BUNDLE_SIZE_THRESHOLD: ${{ secrets.BUNDLE_SIZE_THRESHOLD != '' && secrets.BUNDLE_SIZE_THRESHOLD || 1048576 }}
-
     steps:
       - uses: actions/checkout@v4
       - name: Use Node.js
@@ -27,11 +26,22 @@ jobs:
         with:
           node-version: '18'
           cache: 'npm'
-      - name: Normalize CI env flags
-        # Write a stable 'true' / 'false' string into GITHUB_ENV so the Node script can do an
-        # explicit string comparison. This avoids subtle expression differences across runners.
+      - name: Set bundle size threshold
         run: |
-          echo "BUNDLE_FAIL_ON_EXCEED=$([[ '${{ github.event_name }}' == 'workflow_dispatch' && '${{ github.event.inputs.fail_on_exceed }}' == 'true' ]] || [[ '${{ github.event_name }}' == 'push' && ( '${{ github.ref }}' == 'refs/heads/main' || '${{ github.ref }}' == 'refs/heads/master' ) ]] && echo true || echo false)" >> $GITHUB_ENV
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "BUNDLE_SIZE_THRESHOLD=${{ github.event.inputs.bundle_size_threshold }}" >> $GITHUB_ENV
+          else
+            echo "BUNDLE_SIZE_THRESHOLD=${{ secrets.BUNDLE_SIZE_THRESHOLD || 1048576 }}" >> $GITHUB_ENV
+          fi
+      - name: Set failure mode
+        run: |
+          FAIL_ON_EXCEED="false"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ github.event.inputs.fail_on_exceed }}" == "true" ]]; then
+            FAIL_ON_EXCEED="true"
+          elif [[ "${{ github.event_name }}" == "push" && ("${{ github.ref }}" == "refs/heads/main" || "${{ github.ref }}" == "refs/heads/master") ]]; then
+            FAIL_ON_EXCEED="true"
+          fi
+          echo "BUNDLE_FAIL_ON_EXCEED=${FAIL_ON_EXCEED}" >> $GITHUB_ENV
       - name: Install dependencies
         run: |
           npm ci --ignore-scripts

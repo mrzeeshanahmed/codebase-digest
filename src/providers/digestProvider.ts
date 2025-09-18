@@ -23,7 +23,7 @@ import { redactSecrets } from '../utils/redactSecrets';
 // Prefer importing interactive helpers via the utils barrel (interactiveMessages)
 // to avoid accidentally using a similarly-named non-interactive helper.
 import { internalErrors } from '../utils';
-import { handleError, logErrorToChannel } from '../utils/errorHandler';
+import { logger } from '../services/logger';
 import { emitProgress } from './eventBus';
 import { broadcastGenerationResult } from './codebasePanel';
 import { getMutex } from '../utils/asyncLock';
@@ -56,7 +56,6 @@ export async function generateDigest(
     let services: import('../services/workspaceManager').ServicesBundle | undefined;
     let config: DigestConfig;
     let runtimeConfig: DigestConfig;
-    let diagnostics: any;
     let cacheService: CacheService;
     let digestGenerator: DigestGenerator | undefined;
     let tokenModel: string | undefined;
@@ -72,15 +71,14 @@ export async function generateDigest(
         services = workspaceManager.getBundleForFolder(workspaceFolder);
         if (!services) {
             // Log and show error consistently, then broadcast to any webviews
-            internalErrors.logUserError('No services found for workspace folder.', workspaceFolder.uri.fsPath);
-            try { broadcastGenerationResult({ error: 'No services found for workspace folder.' }, workspacePath); } catch (e) { try { console.warn('digestProvider: broadcastGenerationResult failed', e); } catch {} }
+            logger.showUserError('No services found for workspace folder.', new Error(`No services for ${workspaceFolder.uri.fsPath}`));
+            try { broadcastGenerationResult({ error: 'No services found for workspace folder.' }, workspacePath); } catch (e) { logger.warn('digestProvider: broadcastGenerationResult failed', e); }
             return;
         }
         // Read workspace configuration via centralized ConfigurationService (validated/coerced)
-        config = ConfigurationService.getWorkspaceConfig(workspaceFolder, services.diagnostics);
+        config = ConfigurationService.getWorkspaceConfig(workspaceFolder);
         // runtimeConfig merges saved workspace settings with transient overrides for this run only
         runtimeConfig = Object.assign({}, config, overrides || {});
-        diagnostics = services.diagnostics;
     cacheService = (services.cacheService as CacheService) || new CacheService();
         digestGenerator = new DigestGenerator(services.contentProcessor, services.tokenAnalyzer);
         // Prepare token model and divisor overrides from config
@@ -100,10 +98,10 @@ export async function generateDigest(
                     await cleanupRemoteTmp(remoteTmpDir);
                 }
                 const details = String(err);
-                diagnostics?.error && diagnostics.error('Remote repo ingest failed: ' + details);
+                logger.error('Remote repo ingest failed: ' + details, err);
                 // Centralized error handling: log, diagnostics, and show user message
-                try { await handleError(err, 'Remote repo ingest failed.', { diagnostics, showUser: true, userMessage: 'Remote repo ingest failed.' }); } catch (_) { /* ignore */ }
-                try { broadcastGenerationResult({ error: 'Remote repo ingest failed.' }, workspacePath); } catch (e) { try { console.warn('digestProvider: broadcastGenerationResult failed', e); } catch {} }
+                await logger.showUserError('Remote repo ingest failed.', err);
+                try { broadcastGenerationResult({ error: 'Remote repo ingest failed.' }, workspacePath); } catch (e) { logger.warn('digestProvider: broadcastGenerationResult failed', e); }
                 return;
             }
         } else {
@@ -114,7 +112,7 @@ export async function generateDigest(
                     { label: 'Cancel', value: 'cancel' }
                 ], { placeHolder: 'No files selected. What would you like to do?' });
                 if (!pick || pick.value === 'cancel') {
-                    internalErrors.logUserWarning('Digest generation cancelled: no files selected.');
+                    logger.warn('Digest generation cancelled: no files selected.');
                     try { broadcastGenerationResult({ error: 'Digest generation cancelled: no files selected.' }, workspacePath); } catch (e) { /* swallow */ }
                     return;
                 }
@@ -125,7 +123,7 @@ export async function generateDigest(
             }
             files = treeProvider ? treeProvider.getSelectedFiles() : [];
             if (!files || files.length === 0) {
-                internalErrors.logUserWarning('Digest generation cancelled: no files selected.');
+                logger.warn('Digest generation cancelled: no files selected.');
                 try { broadcastGenerationResult({ error: 'Digest generation cancelled: no files selected.' }, workspacePath); } catch (e) { /* swallow */ }
                 return;
             }
@@ -133,7 +131,7 @@ export async function generateDigest(
     } catch (err) {
         // Unexpected error during pre-lock checks: ensure remote tmp cleanup and surface error
         try { if (remoteTmpDir) { await cleanupRemoteTmp(remoteTmpDir); } } catch (e) { /* swallow */ }
-        try { await handleError(err, 'Digest generation pre-check failed.', { showUser: true, userMessage: 'Digest generation failed during initial checks.' }); } catch (e) { /* ignore */ }
+        await logger.showUserError('Digest generation failed during initial checks.', err);
         try { broadcastGenerationResult({ error: 'Digest generation failed during initial checks.' }, workspacePath); } catch (e) { /* swallow */ }
         return;
     }
@@ -180,7 +178,7 @@ export async function generateDigest(
                     { label: 'Cancel', value: 'cancel' }
                 ], { placeHolder: 'Cached digest found. What would you like to do?' });
                 if (!pick || pick.value === 'cancel') {
-                    internalErrors.logUserWarning('Digest generation cancelled.');
+                    logger.warn('Digest generation cancelled.');
                     try { broadcastGenerationResult({ error: 'Digest generation cancelled.' }, workspacePath); } catch (e) { /* swallow */ }
                     return;
                 }
@@ -198,13 +196,13 @@ export async function generateDigest(
                         // Ensure top-level redactionApplied mirrors cached metadata so UI code
                         // that inspects `res.redactionApplied` finds the flag.
                         try { cachedResult.redactionApplied = !!(cachedResult?.metadata?.redactionApplied); } catch (e) { cachedResult.redactionApplied = false; }
-                        try { broadcastGenerationResult(cachedResult, workspacePath); } catch (e) { try { console.warn('digestProvider: broadcastGenerationResult failed (cached)', e); } catch {} }
+                        try { broadcastGenerationResult(cachedResult, workspacePath); } catch (e) { logger.warn('digestProvider: broadcastGenerationResult failed (cached)', e); }
                     } catch (e) { /* ignore */ }
                     return cached;
                 }
             }
         } catch (e) {
-            diagnostics.warn('Cache error: ' + String(e));
+            logger.warn('Cache error: ' + String(e));
         }
     }
     // Step 4: generate digest
@@ -222,8 +220,8 @@ export async function generateDigest(
     } catch (err: any) {
         // If generation was canceled via the event bus, ensure partial artifacts are removed and inform the user
         const details = String(err || 'Generation failed');
-    try { diagnostics && diagnostics.error && diagnostics.error('Generation failed or canceled: ' + details); } catch (e) {}
-    try { await handleError(err, 'Digest generation failed or canceled.', { diagnostics, showUser: true, userMessage: 'Digest generation failed or canceled.' }); } catch (e) {}
+        logger.error('Generation failed or canceled: ' + details, err);
+        await logger.showUserError('Digest generation failed or canceled.', err);
         // If cache files were partially written, attempt to remove them to avoid leaving stale artifacts
         try {
             if (fs.existsSync(cacheOutPath)) { await fsp.unlink(cacheOutPath).catch(() => {}); }
@@ -294,7 +292,7 @@ export async function generateDigest(
             try { metrics.log(); } catch (e) { /* swallow logging errors */ }
         }
     } catch (e) {
-        diagnostics.warn('Failed to append performance metrics: ' + String(e));
+        logger.warn('Failed to append performance metrics: ' + String(e));
     }
     // Step 5: write output - the DigestGenerator already applied redaction and set redactionApplied
     const outContent = digest.content;
@@ -345,7 +343,7 @@ export async function generateDigest(
                 throw e;
             }
         } catch (e) {
-            diagnostics.warn('Cache write error: ' + String(e));
+            logger.warn('Cache write error: ' + String(e));
         }
     }
     // Step 8: cleanup remote tmp dir
@@ -407,7 +405,7 @@ export async function generateDigest(
         try {
             broadcastGenerationResult(finalResult, workspaceFolder.uri.fsPath);
         } catch (e) {
-            try { diagnostics.warn && diagnostics.warn('Failed to broadcast generation result'); } catch {}
+            logger.warn('Failed to broadcast generation result', e);
         }
 
         return finalResult;

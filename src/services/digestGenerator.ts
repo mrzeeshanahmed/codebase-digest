@@ -12,11 +12,13 @@ import * as vscode from 'vscode';
 import { emitProgress } from '../providers/eventBus';
 import { redactSecrets } from '../utils/redactSecrets';
 import { Formatters } from '../utils/formatters';
+import { UIPrompter, VscodeUIPrompter } from '../utils/ui';
 
 
 export class DigestGenerator {
     public contentProcessor: ContentProcessor;
     private tokenAnalyzer: TokenAnalyzer;
+    private prompter: UIPrompter;
     // Lazily-created shared OutputChannel for all instances to avoid UI spam
     private static _errorChannel: vscode.OutputChannel | null = null;
     // Accessor to get or create the shared OutputChannel. Use this instead of
@@ -43,9 +45,10 @@ export class DigestGenerator {
     }
     // Per-config runtime state to avoid mutating possibly frozen config objects
     private runtimeState: WeakMap<DigestConfig, { _overrides?: Record<string, unknown>, _warnedThresholds?: Record<string, boolean> }> = new WeakMap();
-    constructor(contentProcessor: ContentProcessor, tokenAnalyzer: TokenAnalyzer) {
+    constructor(contentProcessor: ContentProcessor, tokenAnalyzer: TokenAnalyzer, prompter?: UIPrompter) {
     this.contentProcessor = contentProcessor;
     this.tokenAnalyzer = tokenAnalyzer;
+    this.prompter = prompter || new VscodeUIPrompter();
     }
     async generate(
         files: FileNode[],
@@ -257,19 +260,12 @@ export class DigestGenerator {
                         if (!warned) {
                             state._warnedThresholds = { ...(state._warnedThresholds || {}), tokens: true };
                             this.runtimeState.set(config, state);
-                            if (!process.env.JEST_WORKER_ID) {
-                                const pick = await vscode.window.showQuickPick([
-                                    { label: 'Override once and continue', id: 'override' },
-                                    { label: 'Cancel generation', id: 'cancel' }
-                                ], { placeHolder: `Estimated tokens ${(usage * 100).toFixed(0)}% of limit. Choose an action.`, ignoreFocusOut: true });
-                                if (pick && pick.id === 'override') {
-                                    state._overrides = { ...(state._overrides || {}), allowTokensOnce: true };
-                                    this.runtimeState.set(config, state);
-                                } else {
-                                    throw new Error('Cancelled');
-                                }
+                            const override = await this.prompter.promptForTokenOverride(usage);
+                            if (override) {
+                                state._overrides = { ...(state._overrides || {}), allowTokensOnce: true };
+                                this.runtimeState.set(config, state);
                             } else {
-                                // In tests, just append a warning; runtimeState already updated
+                                throw new Error('Cancelled');
                             }
                         }
                     }

@@ -2,8 +2,15 @@ import { FileScanner, flattenTree } from '../services/fileScanner';
 import { DigestConfig } from '../types/interfaces';
 import * as fs from 'fs';
 import * as path from 'path';
+import { UIPrompter } from '../utils/ui';
 
 describe('FileScanner.scanRoot', () => {
+    const mockPrompter: UIPrompter = {
+        promptForTokenOverride: jest.fn().mockResolvedValue(true),
+        promptForSizeOverride: jest.fn().mockResolvedValue(true),
+        promptForFileCountOverride: jest.fn().mockResolvedValue(true),
+      };
+
     const testDir = path.join(__dirname, 'tmp_scan_test');
     beforeAll(() => {
         if (!fs.existsSync(testDir)) { fs.mkdirSync(testDir); }
@@ -27,13 +34,12 @@ describe('FileScanner.scanRoot', () => {
             maxFileSize: 1000,
             maxFiles: 10,
             maxTotalSizeBytes: 10000,
-            maxDirectoryDepth: 5
+            maxDirectoryDepth: 5,
+            respectGitignore: true,
         } as any;
         const GitignoreService = require('../services/gitignoreService').GitignoreService;
-        const Diagnostics = require('../utils/diagnostics').Diagnostics;
         const gitignoreService = new GitignoreService();
-        const diagnostics = new Diagnostics('info');
-        const scanner = new FileScanner(gitignoreService, diagnostics);
+        const scanner = new FileScanner(gitignoreService, mockPrompter);
     const filesArr = await scanner.scanRoot(testDir, cfg);
     const files = flattenTree(filesArr).map(f => f.relPath).sort();
         expect(files).toContain('file1.txt');
@@ -47,13 +53,12 @@ describe('FileScanner.scanRoot', () => {
             maxFileSize: 1, // triggers file size warning
             maxFiles: 1,    // triggers file count warning
             maxTotalSizeBytes: 2, // trigger total size warning reliably
-            maxDirectoryDepth: 0  // triggers depth warning
+            maxDirectoryDepth: 0,  // triggers depth warning
+            respectGitignore: true,
         } as any;
         const GitignoreService = require('../services/gitignoreService').GitignoreService;
-        const Diagnostics = require('../utils/diagnostics').Diagnostics;
         const gitignoreService = new GitignoreService();
-        const diagnostics = new Diagnostics('info');
-        const scanner = new FileScanner(gitignoreService, diagnostics);
+        const scanner = new FileScanner(gitignoreService, mockPrompter);
         await scanner.scanRoot(testDir, cfg);
         const stats = scanner.lastStats;
         expect(stats?.warnings.some(w => /file size/i.test(w))).toBe(true);
@@ -76,13 +81,12 @@ describe('FileScanner.scanRoot', () => {
             maxTotalSizeBytes: 100000,
             maxDirectoryDepth: 5,
             includePatterns: [],
-            excludePatterns: ['**/*.log', '!nested/ignoreme.log']
+            excludePatterns: ['**/*.log', '!nested/ignoreme.log'],
+            respectGitignore: true,
         } as any;
         const GitignoreService = require('../services/gitignoreService').GitignoreService;
-        const Diagnostics = require('../utils/diagnostics').Diagnostics;
         const gitignoreService = new GitignoreService();
-        const diagnostics = new Diagnostics('info');
-        const scanner = new FileScanner(gitignoreService, diagnostics);
+        const scanner = new FileScanner(gitignoreService, mockPrompter);
 
         // Provide explicit negations method if available on service
         if (typeof (gitignoreService as any).listExplicitNegations === 'function') {
@@ -95,5 +99,32 @@ describe('FileScanner.scanRoot', () => {
         expect(files).toContain('nested/keep.txt');
         // Since excludePatterns include **/*.log, ignoreme.log should be excluded
         expect(files).not.toContain('nested/ignoreme.log');
+    });
+
+    it('includes a file within a gitignored directory if specified in includePatterns', async () => {
+        // Setup: subdirC is gitignored, but subdirC/include.txt is in includePatterns
+        const subdirC = path.join(testDir, 'subdirC');
+        if (!fs.existsSync(subdirC)) { fs.mkdirSync(subdirC); }
+        fs.writeFileSync(path.join(subdirC, 'include.txt'), 'INCLUDE');
+        fs.writeFileSync(path.join(subdirC, 'another.txt'), 'EXCLUDE');
+        fs.appendFileSync(path.join(testDir, '.gitignore'), '\nsubdirC/\n');
+
+        const cfg: DigestConfig = {
+            maxFileSize: 1000,
+            maxFiles: 10,
+            maxTotalSizeBytes: 10000,
+            maxDirectoryDepth: 5,
+            respectGitignore: true,
+            includePatterns: ['**/include.txt'],
+            excludePatterns: [],
+        } as any;
+        const GitignoreService = require('../services/gitignoreService').GitignoreService;
+        const gitignoreService = new GitignoreService();
+        const scanner = new FileScanner(gitignoreService, mockPrompter);
+        const filesArr = await scanner.scanRoot(testDir, cfg);
+        const files = flattenTree(filesArr).map(f => f.relPath).sort();
+
+        expect(files).toContain('subdirC/include.txt');
+        expect(files).not.toContain('subdirC/another.txt');
     });
 });

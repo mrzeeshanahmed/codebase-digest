@@ -126,3 +126,9 @@ export interface DigestResult {
     redactionApplied?: boolean;
     
 }
+
+export interface UIPrompter {
+    promptForTokenOverride(usage: number): Promise<boolean>;
+    promptForSizeOverride(usage: number): Promise<boolean>;
+    promptForFileCountOverride(usage: number): Promise<boolean>;
+}

@@ -31,10 +31,10 @@ export class ConfigurationService {
 
         const snapshot: Partial<DigestConfig & Record<string, unknown>> = {
             maxFileSize: getter('maxFileSize', 10485760),
-            maxFiles: getter('maxFiles', 25000),
+            maxFiles: getter('maxFiles', 1000),
             maxTotalSizeBytes: getter('maxTotalSizeBytes', 536870912),
             maxDirectoryDepth: getter('maxDirectoryDepth', 20),
-            tokenLimit: getter('tokenLimit', 32000),
+            tokenLimit: getter('tokenLimit', 16000),
             outputFormat: getter('outputFormat', 'markdown'),
             binaryFilePolicy: getter('binaryFilePolicy', undefined as any),
             contextLimit: getter('contextLimit', 0),

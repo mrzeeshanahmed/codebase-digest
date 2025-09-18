@@ -146,11 +146,24 @@
 
         // generation result -> show toast or errors
         if (st.lastGenerationResult !== last.lastGenerationResult) {
-          try {
-            const res = st.lastGenerationResult || {};
-            if (res.redactionApplied) { try { showToast && showToast('Output contained redacted content (masked). Toggle "Show redacted" in Settings to reveal.', 'warn', 6000); } catch (e) {} }
-            if (res && res.error) { try { showToast && showToast(String(res.error), 'warn', 6000); } catch (e) {} }
-          } catch (e) {}
+            try {
+                const res = st.lastGenerationResult || {};
+                if (res.redactionApplied) { try { showToast && showToast('Output contained redacted content (masked). Toggle "Show redacted" in Settings to reveal.', 'warn', 6000); } catch (e) {} }
+                if (res && res.error) {
+                    try { showToast && showToast(String(res.error), 'warn', 6000); } catch (e) {}
+                } else if (res && res.success && res.result) {
+                    const resultsContainer = document.getElementById('results-container');
+                    const resultsContent = document.getElementById('results-content');
+                    if (resultsContainer && resultsContent) {
+                        resultsContent.textContent = res.result;
+                        resultsContainer.hidden = false;
+                        const dashboard = document.getElementById('dashboard');
+                        if (dashboard) {
+                            dashboard.hidden = true;
+                        }
+                    }
+                }
+            } catch (e) {}
         }
 
         // pending persisted selection: if present and tree has files, post selection
@@ -172,4 +185,78 @@
   }
 
   init();
+
+    // Progress handling
+    const progressContainer = () => (typeof nodes !== 'undefined' && nodes.progressContainer) || document.getElementById('progress-container');
+    const progressBar = () => (typeof nodes !== 'undefined' && nodes.progressBar) || document.getElementById('progress-bar');
+
+    function handleProgress(e) {
+        if (!e) { return; }
+        const container = progressContainer();
+        const bar = progressBar();
+        if (!container || !bar) { return; }
+        // Also update inline progress stats for generation as well as scan
+            try {
+                const progressStats = document.querySelector('.progress-stats');
+                if (progressStats) {
+                const pParts = [];
+                if (typeof e.totalFiles === 'number') { pParts.push(`${e.totalFiles} files`); }
+                if (typeof e.totalSize === 'number') { pParts.push(formatBytes(e.totalSize)); }
+                if (typeof e.tokenEstimate === 'number') { pParts.push(`~${Math.round(e.tokenEstimate)} tokens`); }
+                progressStats.textContent = pParts.join(' · ');
+            }
+        } catch (ex) {
+            // swallow
+        }
+        if (e.mode === 'start') {
+            if (e.determinate) {
+                container.classList.remove('indeterminate');
+                bar.style.width = (e.percent || 0) + '%';
+                bar.setAttribute('aria-valuenow', String(Math.round(e.percent || 0)));
+                // Accessible text for assistive tech
+                try { container.setAttribute('aria-busy', 'true'); } catch (ex) {}
+                try { bar.setAttribute('aria-valuetext', `${Math.round(e.percent || 0)}%`); } catch (ex) {}
+                try { const s = document.getElementById('progress-status'); if (s) { s.textContent = `Progress ${Math.round(e.percent || 0)}%`; } } catch (ex) {}
+            } else {
+                container.classList.add('indeterminate');
+                bar.style.width = '40%';
+                bar.removeAttribute('aria-valuenow');
+                try { container.setAttribute('aria-busy', 'true'); } catch (ex) {}
+                try { bar.removeAttribute('aria-valuetext'); } catch (ex) {}
+                try { const s = document.getElementById('progress-status'); if (s) { s.textContent = e.message || 'Working'; } } catch (ex) {}
+            }
+            showToast(e.message || (e.op + ' started'));
+            // If a write operation starts, reveal the Cancel write affordance
+            try { if (e.op === 'write') { const cw = (typeof nodes !== 'undefined' && nodes.cancelWriteBtn) || document.getElementById('btn-cancel-write'); if (cw) { cw.hidden = false; cw.removeAttribute('aria-hidden'); } } } catch (ex) {}
+        } else if (e.mode === 'progress') {
+            container.classList.remove('indeterminate');
+            bar.style.width = (e.percent || 0) + '%';
+            bar.setAttribute('aria-valuenow', String(Math.round(e.percent || 0)));
+            try { bar.setAttribute('aria-valuetext', `${Math.round(e.percent || 0)}%`); } catch (ex) {}
+            try { const s = document.getElementById('progress-status'); if (s) { s.textContent = `Progress ${Math.round(e.percent || 0)}%`; } } catch (ex) {}
+        } else if (e.mode === 'end') {
+            container.classList.remove('indeterminate');
+            bar.style.width = '100%';
+            bar.setAttribute('aria-valuenow', '100');
+            try { bar.setAttribute('aria-valuetext', 'Complete'); } catch (ex) {}
+            try { const s = document.getElementById('progress-status'); if (s) { s.textContent = 'Complete'; } } catch (ex) {}
+            setTimeout(() => { bar.style.width = '0%'; }, 600);
+            showToast(e.message || (e.op + ' finished'), 'success');
+            // hide cancel affordance when write ends
+            try { if (e.op === 'write') { const cw = (typeof nodes !== 'undefined' && nodes.cancelWriteBtn) || document.getElementById('btn-cancel-write'); if (cw) { cw.hidden = true; cw.setAttribute('aria-hidden', 'true'); } } } catch (ex) {}
+        }
+        // Clear busy when no longer active (end or if determinate but percent at 100)
+        try {
+            if (e.mode === 'end' || (e.determinate && Number(e.percent) === 100)) { const c = progressContainer(); if (c) { c.setAttribute('aria-busy', 'false'); } }
+        } catch (ex) {}
+    }
+
+    let lastProgress = null;
+    ensureStore().subscribe((st) => {
+        if (st.progress && st.progress !== lastProgress) {
+            handleProgress(st.progress);
+            lastProgress = st.progress;
+        }
+    });
+
 })();

@@ -12,6 +12,10 @@ out-tools
 /node_modules/
 /.vscode-test/
 *.partial
+stats.json
+depcheck-report.json
+depcheck.json
+topdeps.json
 
 # Editor and OS
 .vscode/

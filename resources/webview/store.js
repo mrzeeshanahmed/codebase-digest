@@ -85,6 +85,7 @@
     ingestPreview: null,
     previewDelta: null,
     previewState: null,
+    progress: null,
 
     toasts: [],
     errors: [],
@@ -117,6 +118,8 @@
     setPreviewDelta: (delta) => set(() => ({ previewDelta: delta })),
 
     setPreviewState: (stateObj) => set(() => ({ previewState: stateObj })),
+
+    setProgress: (progress) => set(() => ({ progress: progress })),
 
     addToast: (toast) => set((s) => {
       const id = Date.now() + Math.floor(Math.random() * 1000);

@@ -3,8 +3,15 @@ import { ContentProcessor } from '../services/contentProcessor';
 import { TokenAnalyzer } from '../services/tokenAnalyzer';
 import { Formatters } from '../utils/formatters';
 import { DigestConfig } from '../types/interfaces';
+import { UIPrompter } from '../utils/ui';
 
 describe('DigestGenerator', () => {
+  const mockPrompter: UIPrompter = {
+    promptForTokenOverride: jest.fn().mockResolvedValue(true),
+    promptForSizeOverride: jest.fn().mockResolvedValue(true),
+    promptForFileCountOverride: jest.fn().mockResolvedValue(true),
+  };
+
   const mockContent = {
     'file1.txt': 'Hello world',
     'file2.md': '# Title\nBody',
@@ -29,7 +36,7 @@ describe('DigestGenerator', () => {
     getFileContent: jest.fn(async (path, ext, cfg) => ({ content: (mockContent as any)[path.split('/abs/')[1]], isBinary: false })),
     } as unknown as ContentProcessor;
   const mockTokenAnalyzer = { estimate: (body: string) => (body ? body.length : 0) } as any;
-  const generator = new DigestGenerator(contentProcessor as any, mockTokenAnalyzer as any);
+  const generator = new DigestGenerator(contentProcessor as any, mockTokenAnalyzer as any, mockPrompter);
     const result = await generator.generate(mockFiles as any, config as any, [], 'markdown' as any);
     expect(result.chunks).toBeDefined();
     expect(result.chunks!.length).toBe(3);
@@ -61,7 +68,7 @@ describe('DigestGenerator', () => {
       })
     };
   const mockTokenAnalyzer2 = { estimate: (body: string) => (body ? body.length : 0) } as any;
-  const generator = new DigestGenerator(contentProcessor as any, mockTokenAnalyzer2 as any);
+  const generator = new DigestGenerator(contentProcessor as any, mockTokenAnalyzer2 as any, mockPrompter);
     const result = await generator.generate(mockFiles as any, config as any, [pluginHandler as any], 'markdown' as any);
   // ext may be passed with or without a leading dot depending on implementation; accept either
   expect((pluginHandler as any).fileHandler).toHaveBeenCalledWith(mockFiles[0], expect.stringMatching(/\.?txt$/), config);

@@ -5,9 +5,8 @@ import { onProgress } from './eventBus';
 import { onState } from './eventBus';
 import { setWebviewHtml, wireWebviewMessages } from './webviewHelpers';
 import { ConfigurationService } from '../services/configurationService';
-import { Diagnostics } from '../utils/diagnostics';
+import { logger } from '../services/logger';
 import { WebviewCommands, WebviewCommand } from '../types/webview';
-const diagnostics = new Diagnostics('debug', 'Code Ingest');
 
 // Small typed payload shapes sent to the webview. Keep these minimal and
 // only include primitives and small arrays to avoid sending large or sensitive
@@ -99,7 +98,7 @@ export class CodebaseDigestPanel {
         });
     this.setHtml(this.panel.webview);
     // Send current configuration to webview immediately so settings UI is populated
-    try { this.postConfig(); } catch (e) { try { const em = e && typeof e === 'object' ? String(((e as Record<string, unknown>)['stack'] || (e as Record<string, unknown>)['message']) ?? e) : String(e); diagnostics.error('postConfig failed', em); } catch {} }
+    try { this.postConfig(); } catch (e) { logger.error('postConfig failed', e as Error); }
         // Wire message routing via shared helper so panel and view remain consistent
     wireWebviewMessages(this.panel.webview, this.treeProvider, this.folderPath, async (changes: Record<string, unknown>) => {
             await this.applyConfigChanges(changes);
@@ -113,74 +112,79 @@ export class CodebaseDigestPanel {
                 if (!t) { return; }
                 // Map webview-level command names to VS Code commands
                 if (t === (WebviewCommands && (WebviewCommands as any).refreshTree) || t === 'refreshTree') {
-                    try { vscode.commands.executeCommand('codebaseDigest.refreshTree'); } catch (err) { try { diagnostics.warn('executeCommand refreshTree failed', err); } catch {} }
+                    try { vscode.commands.executeCommand('codebaseDigest.refreshTree'); } catch (err) { logger.warn('executeCommand refreshTree failed', err as Error); }
                 }
             } catch (e) { /* swallow */ }
         });
-        this.panel.onDidDispose(() => { try { panelMsgDisp.dispose(); } catch (e) { /* ignore */ } });
+
+        // Wire preview updates: post compact deltas to keep stats live without full re-render
+        const debouncedPostDelta = debounce(() => this.postPreviewDelta(), 200);
+        this.treeProvider.setPreviewUpdater(() => debouncedPostDelta());
+        // Forward progress events to the webview
+        const disposeProgress = onProgress(e => {
+            if (this.panel) {
+                try {
+                    const rawOp = (e && typeof e === 'object') ? (e as Record<string, unknown>)['op'] : undefined;
+                    const rawMode = (e && typeof e === 'object') ? (e as Record<string, unknown>)['mode'] : undefined;
+                    const evt = { op: typeof rawOp === 'string' ? rawOp : undefined, mode: typeof rawMode === 'string' ? rawMode : undefined };
+                    const payload: ProgressEventPayload = { type: WebviewCommands.progress, event: evt };
+                    this.panel.webview.postMessage(payload);
+                } catch (err) { logger.warn('postMessage progress failed', err as Error); }
+            }
+        });
+        // Forward state events (full preview/state payloads) to panels and sidebar views
+        const disposeState = onState(payload => {
+            try {
+                // Post to panel if present and folder matches (or not provided)
+                if (this.panel && this.panel.webview && typeof this.panel.webview.postMessage === 'function') {
+                    try { this.panel.webview.postMessage({ type: WebviewCommands.state, state: payload.state }); } catch (e) { logger.warn('post state to panel failed', e as Error); }
+                }
+                // Post to any active sidebar views matching folderPath
+                for (const [vw, vwFolder] of activeViews.entries()) {
+                    try {
+                        if (!payload.folderPath || payload.folderPath === vwFolder) {
+                            vw.webview.postMessage({ type: WebviewCommands.state, state: payload.state });
+                        }
+                    } catch (e) { /* ignore per-view errors */ }
+                }
+            } catch (e) { /* swallow */ }
+        });
+        // Post an immediate preview delta when scans start or end so chips update promptly
+        const scanProgressDisp = onProgress((ev: unknown) => {
+            try {
+                // Only update preview chips when a scan completes (end) to avoid noisy updates on start
+                if (ev && typeof ev === 'object') {
+                    const op = (ev as Record<string, unknown>)['op'];
+                    const mode = (ev as Record<string, unknown>)['mode'];
+                    if (op === 'scan' && mode === 'end') {
+                        try { this.postPreviewDelta(); } catch (inner) { logger.warn('postPreviewDelta failed', inner as Error); }
+                    }
+                }
+            } catch (ex) { logger.error('scanProgress dispatch failed', ex as Error); }
+        });
+
+        // Send initial full state only if a scan has already populated data; otherwise wait for scan completion to avoid empty first-paint
+        try {
+            const previewNow = this.treeProvider.getPreviewData && typeof this.treeProvider.getPreviewData === 'function' ? this.treeProvider.getPreviewData() : null;
+            if (previewNow && typeof previewNow.totalFiles === 'number' && previewNow.totalFiles > 0) {
+                try { this.postPreviewState(); } catch (e) { logger.warn('postPreviewState failed', e as Error); }
+            }
+        } catch (e) { logger.warn('getting previewNow failed', e as Error); }
+        // Periodic heartbeat to refresh stats every 5s
+        this.previewInterval = setInterval(() => this.postPreviewDelta(), 5000);
+
         this.panel.onDidDispose(() => {
             this.panel = undefined;
             panels.delete(this.folderPath);
+            panelMsgDisp.dispose();
+            disposeProgress();
+            scanProgressDisp.dispose();
+            disposeState();
+            if (this.previewInterval) {
+                clearInterval(this.previewInterval);
+                this.previewInterval = undefined;
+            }
         });
-
-    // Wire preview updates: post compact deltas to keep stats live without full re-render
-    const debouncedPostDelta = debounce(() => this.postPreviewDelta(), 200);
-    this.treeProvider.setPreviewUpdater(() => debouncedPostDelta());
-    // Forward progress events to the webview
-    const disposeProgress = onProgress(e => {
-                if (this.panel) {
-            try {
-                const rawOp = (e && typeof e === 'object') ? (e as Record<string, unknown>)['op'] : undefined;
-                const rawMode = (e && typeof e === 'object') ? (e as Record<string, unknown>)['mode'] : undefined;
-                const evt = { op: typeof rawOp === 'string' ? rawOp : undefined, mode: typeof rawMode === 'string' ? rawMode : undefined };
-                const payload: ProgressEventPayload = { type: WebviewCommands.progress, event: evt };
-                this.panel.webview.postMessage(payload);
-            } catch (err) { try { diagnostics.warn('postMessage progress failed', err); } catch {} }
-        }
-    });
-    // Forward state events (full preview/state payloads) to panels and sidebar views
-    const disposeState = onState(payload => {
-        try {
-            // Post to panel if present and folder matches (or not provided)
-            if (this.panel && this.panel.webview && typeof this.panel.webview.postMessage === 'function') {
-                try { this.panel.webview.postMessage({ type: WebviewCommands.state, state: payload.state }); } catch (e) { try { diagnostics.warn('post state to panel failed', e); } catch {} }
-            }
-            // Post to any active sidebar views matching folderPath
-            for (const [vw, vwFolder] of activeViews.entries()) {
-                try {
-                    if (!payload.folderPath || payload.folderPath === vwFolder) {
-                        vw.webview.postMessage({ type: WebviewCommands.state, state: payload.state });
-                    }
-                } catch (e) { /* ignore per-view errors */ }
-            }
-        } catch (e) { /* swallow */ }
-    });
-    // Post an immediate preview delta when scans start or end so chips update promptly
-    const scanProgressDisp = onProgress((ev: unknown) => {
-                try {
-            // Only update preview chips when a scan completes (end) to avoid noisy updates on start
-                if (ev && typeof ev === 'object') {
-                const op = (ev as Record<string, unknown>)['op'];
-                const mode = (ev as Record<string, unknown>)['mode'];
-                if (op === 'scan' && mode === 'end') {
-                    try { this.postPreviewDelta(); } catch (inner) { try { diagnostics.warn('postPreviewDelta failed', inner); } catch {} }
-                }
-            }
-        } catch (ex) { try { diagnostics.error('scanProgress dispatch failed', ex); } catch {} }
-    });
-    // Send initial full state only if a scan has already populated data; otherwise wait for scan completion to avoid empty first-paint
-    try {
-        const previewNow = this.treeProvider.getPreviewData && typeof this.treeProvider.getPreviewData === 'function' ? this.treeProvider.getPreviewData() : null;
-        if (previewNow && typeof previewNow.totalFiles === 'number' && previewNow.totalFiles > 0) {
-            try { this.postPreviewState(); } catch (e) { try { diagnostics.warn('postPreviewState failed', e); } catch {} }
-        }
-    } catch (e) { try { diagnostics.warn('getting previewNow failed', e); } catch {} }
-    // Periodic heartbeat to refresh stats every 5s
-    this.previewInterval = setInterval(() => this.postPreviewDelta(), 5000);
-    this.panel.onDidDispose(() => { try { if (this.previewInterval) { try { clearInterval(this.previewInterval as unknown as ReturnType<typeof setInterval>); } catch {} this.previewInterval = undefined; } } catch (e) { try { diagnostics.warn('clearing previewInterval failed', e); } catch {} } });
-    this.panel.onDidDispose(() => { try { disposeProgress(); } catch (e) { try { diagnostics.warn('disposeProgress failed', e); } catch {} } });
-    this.panel.onDidDispose(() => { try { scanProgressDisp(); } catch (e) { try { diagnostics.warn('scanProgressDisp failed', e); } catch {} } });
-    this.panel.onDidDispose(() => { try { disposeState(); } catch (e) { try { diagnostics.warn('disposeState failed', e); } catch {} } });
     }
 
         private async postConfig() {
@@ -188,8 +192,6 @@ export class CodebaseDigestPanel {
             // Use ConfigurationService to get validated snapshot for reads
             try {
                 const cfgSnapshot = ConfigurationService.getWorkspaceConfig(vscode.Uri.file(this.folderPath), diagnostics);
-                const thresholdsDefault = { maxFiles: 25000, maxTotalSizeBytes: 536870912, tokenLimit: 32000 };
-                const thresholds = (cfgSnapshot as any).thresholds || {};
                 const payload = {
                     type: WebviewCommands.config,
                     folderPath: this.folderPath,
@@ -203,14 +205,14 @@ export class CodebaseDigestPanel {
                         maxFiles: cfgSnapshot.maxFiles,
                         maxTotalSizeBytes: cfgSnapshot.maxTotalSizeBytes,
                         tokenLimit: cfgSnapshot.tokenLimit,
-                        thresholds: Object.assign({}, thresholdsDefault, thresholds),
+                        thresholds: (cfgSnapshot as any).thresholds || {},
                         showRedacted: cfgSnapshot.showRedacted,
                         redactionPatterns: cfgSnapshot.redactionPatterns,
                         redactionPlaceholder: cfgSnapshot.redactionPlaceholder
                     }
                 };
                 this.panel.webview.postMessage(payload);
-            } catch (e) { try { diagnostics.warn('postConfig failed (snapshot)', e); } catch {} }
+            } catch (e) { logger.warn('postConfig failed (snapshot)', e as Error); }
         }
 
         private async applyConfigChanges(changes: Record<string, any>) {
@@ -232,7 +234,7 @@ export class CodebaseDigestPanel {
                 }
             }
             // After applying changes, push updated config back to the webview so UI stays in sync.
-            try { await this.postConfig(); } catch (e) { try { diagnostics.warn('postConfig after applyConfigChanges failed', e); } catch {} }
+            try { await this.postConfig(); } catch (e) { logger.warn('postConfig after applyConfigChanges failed', e as Error); }
         }
 
     private postPreviewState() {
@@ -290,7 +292,7 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
     try {
         const tpRec = treeProvider as unknown as { workspaceRoot?: unknown };
         const wp = tpRec && typeof tpRec.workspaceRoot === 'string' ? tpRec.workspaceRoot : undefined;
-        console.log('[codebase-digest] registerCodebaseView called for', wp);
+        logger.info(`registerCodebaseView called for ${wp}`);
     } catch (e) {}
     // If a provider was already registered previously, dispose it so we can re-register with a new treeProvider.
     if (registeredDisposable) {
@@ -310,8 +312,6 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
             try {
                 const folder = typeof tpRec.workspaceRoot === 'string' ? String(tpRec.workspaceRoot) : '';
                 const snapshot = ConfigurationService.getWorkspaceConfig(vscode.Uri.file(folder));
-                const thresholdsDefault = { maxFiles: 25000, maxTotalSizeBytes: 536870912, tokenLimit: 32000 };
-                const thresholds = (snapshot as any).thresholds || {};
                 const payload = {
                     type: WebviewCommands.config,
                     folderPath: folder,
@@ -325,7 +325,7 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                         maxFiles: snapshot.maxFiles,
                         maxTotalSizeBytes: snapshot.maxTotalSizeBytes,
                         tokenLimit: snapshot.tokenLimit,
-                        thresholds: Object.assign({}, thresholdsDefault, thresholds),
+                        thresholds: (snapshot as any).thresholds || {},
                         showRedacted: snapshot.showRedacted,
                         redactionPatterns: snapshot.redactionPatterns || [],
                         redactionPlaceholder: snapshot.redactionPlaceholder || '[REDACTED]'
@@ -338,7 +338,7 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                 try {
                     const advertised = typeof tpRec.workspaceRoot === 'string' ? String(tpRec.workspaceRoot) : '';
                     activeViews.set(webviewView, advertised);
-                    try { console.debug('[codebase-digest] resolveWebviewView active view tracked for', advertised); } catch (e) {}
+                    logger.debug(`resolveWebviewView active view tracked for ${advertised}`);
                 } catch (e) {}
 
             // Use shared wiring helper for sidebar messages as well
@@ -372,7 +372,7 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                         maxFiles: snapshot.maxFiles,
                         maxTotalSizeBytes: snapshot.maxTotalSizeBytes,
                         tokenLimit: snapshot.tokenLimit,
-                        thresholds: Object.assign({}, { maxFiles: 25000, maxTotalSizeBytes: 536870912, tokenLimit: 32000 }, (snapshot as any).thresholds || {}),
+                        thresholds: (snapshot as any).thresholds || {},
                         showRedacted: snapshot.showRedacted,
                         redactionPatterns: snapshot.redactionPatterns || [],
                         redactionPlaceholder: snapshot.redactionPlaceholder || '[REDACTED]'
@@ -382,7 +382,7 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                 // on getState, send current preview
                 try {
                     const preview = treeProvider.getPreviewData();
-                    try { console.debug('[codebase-digest] resolveWebviewView posting state (onGetState):', preview && typeof preview.totalFiles === 'number' ? { totalFiles: preview.totalFiles, selectedCount: preview.selectedCount } : preview); } catch (e) {}
+                    logger.debug('resolveWebviewView posting state (onGetState):', preview && typeof preview.totalFiles === 'number' ? { totalFiles: preview.totalFiles, selectedCount: preview.selectedCount } : preview);
                     const statePayload: StatePayload = { type: WebviewCommands.state, state: preview };
                     webviewView.webview.postMessage(statePayload);
                 } catch (e) { /* ignore */ }
@@ -394,14 +394,12 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                         const t = (msg && (msg.type || msg.actionType || msg.command)) ? (msg.type || msg.actionType || msg.command) : undefined;
                         if (!t) { return; }
                         if (t === (WebviewCommands && (WebviewCommands as any).refreshTree) || t === 'refreshTree') {
-                            try { vscode.commands.executeCommand('codebaseDigest.refreshTree'); } catch (err) { try { diagnostics.warn('executeCommand refreshTree failed', err); } catch {} }
+                            try { vscode.commands.executeCommand('codebaseDigest.refreshTree'); } catch (err) { logger.warn('executeCommand refreshTree failed', err as Error); }
                         }
                     } catch (e) { /* ignore */ }
                 });
-                webviewView.onDidDispose(() => { try { sidebarMsgDisp.dispose(); } catch (e) { /* ignore */ } });
 
-            // Forward progress events to the sidebar webview with light throttling to avoid UI jank
-            ((): void => {
+                // Forward progress events to the sidebar webview with light throttling to avoid UI jank
                 let lastSent = 0;
                 let pending: ReturnType<typeof setTimeout> | null = null;
                 let lastEvent: unknown = null;
@@ -413,7 +411,7 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                         const evt = { op: typeof rawOp === 'string' ? rawOp : undefined, mode: typeof rawMode === 'string' ? rawMode : undefined };
                         const payload: ProgressEventPayload = { type: WebviewCommands.progress, event: evt };
                         webviewView.webview.postMessage(payload);
-                    } catch (e) { try { console.warn('codebasePanel: post progress failed', e); } catch {} }
+                    } catch (e) { logger.warn('codebasePanel: post progress failed', e as Error); }
                 };
                 const disposeProgress = onProgress((ev: unknown) => {
                     const now = Date.now();
@@ -432,17 +430,11 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                         }, delay);
                     }
                 });
-                // Ensure disposal when the view is closed
-                webviewView.onDidDispose(() => {
-                    try { disposeProgress(); } catch (e) { try { console.warn('codebasePanel: disposeProgress failed', e); } catch {} }
-                    if (pending) { clearTimeout(pending); pending = null; }
-                });
-            })();
 
-            // send an immediate preview delta so chips populate quickly on reveal
+                // send an immediate preview delta so chips populate quickly on reveal
                 try {
                     const preview = treeProvider.getPreviewData();
-                    try { console.debug('[codebase-digest] resolveWebviewView posting immediate previewDelta:', preview && typeof preview.totalFiles === 'number' ? { totalFiles: preview.totalFiles, selectedCount: preview.selectedCount } : preview); } catch (e) {}
+                    logger.debug('resolveWebviewView posting immediate previewDelta:', preview && typeof preview.totalFiles === 'number' ? { totalFiles: preview.totalFiles, selectedCount: preview.selectedCount } : preview);
                     const delta: PreviewDeltaPayload['delta'] = {
                         selectedCount: typeof preview.selectedCount === 'number' ? preview.selectedCount : undefined,
                         totalFiles: typeof preview.totalFiles === 'number' ? preview.totalFiles : undefined,
@@ -454,40 +446,36 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                     };
                     const payload: PreviewDeltaPayload = { type: WebviewCommands.previewDelta, delta } as PreviewDeltaPayload;
                     webviewView.webview.postMessage(payload);
-                } catch (e) { try { console.warn('codebasePanel: post previewDelta failed', e); } catch {} }
+                } catch (e) { logger.warn('codebasePanel: post previewDelta failed', e as Error); }
 
-            // Hook into treeProvider progress to post preview deltas when scans start/end
-            const scanProgressDisp = onProgress((ev: unknown) => {
-                try {
-                    if (ev && typeof ev === 'object') {
-                        const op = (ev as Record<string, unknown>)['op'];
-                        const mode = (ev as Record<string, unknown>)['mode'];
-                        if (op === 'scan' && mode === 'end') {
-                            try {
-                                const preview = treeProvider.getPreviewData();
-                                const delta: PreviewDeltaPayload['delta'] = {
-                                    selectedCount: typeof preview.selectedCount === 'number' ? preview.selectedCount : undefined,
-                                    totalFiles: typeof preview.totalFiles === 'number' ? preview.totalFiles : undefined,
-                                    selectedSize: typeof preview.selectedSize === 'number' ? preview.selectedSize : undefined,
-                                    tokenEstimate: typeof preview.tokenEstimate === 'number' ? preview.tokenEstimate : undefined,
-                                    contextLimit: typeof preview.contextLimit === 'number' ? preview.contextLimit : undefined,
-                                    fileTree: preview.fileTree,
-                                    selectedPaths: Array.isArray(preview.selectedPaths) ? (preview.selectedPaths as unknown[]).map((p: unknown) => String(p)) : []
-                                };
-                                const payload: PreviewDeltaPayload = { type: WebviewCommands.previewDelta, delta } as PreviewDeltaPayload;
-                                webviewView.webview.postMessage(payload);
-                            } catch (inner) { /* ignore */ }
+                // Hook into treeProvider progress to post preview deltas when scans start/end
+                const scanProgressDisp = onProgress((ev: unknown) => {
+                    try {
+                        if (ev && typeof ev === 'object') {
+                            const op = (ev as Record<string, unknown>)['op'];
+                            const mode = (ev as Record<string, unknown>)['mode'];
+                            if (op === 'scan' && mode === 'end') {
+                                try {
+                                    const preview = treeProvider.getPreviewData();
+                                    const delta: PreviewDeltaPayload['delta'] = {
+                                        selectedCount: typeof preview.selectedCount === 'number' ? preview.selectedCount : undefined,
+                                        totalFiles: typeof preview.totalFiles === 'number' ? preview.totalFiles : undefined,
+                                        selectedSize: typeof preview.selectedSize === 'number' ? preview.selectedSize : undefined,
+                                        tokenEstimate: typeof preview.tokenEstimate === 'number' ? preview.tokenEstimate : undefined,
+                                        contextLimit: typeof preview.contextLimit === 'number' ? preview.contextLimit : undefined,
+                                        fileTree: preview.fileTree,
+                                        selectedPaths: Array.isArray(preview.selectedPaths) ? (preview.selectedPaths as unknown[]).map((p: unknown) => String(p)) : []
+                                    };
+                                    const payload: PreviewDeltaPayload = { type: WebviewCommands.previewDelta, delta } as PreviewDeltaPayload;
+                                    webviewView.webview.postMessage(payload);
+                                } catch (inner) { /* ignore */ }
+                            }
                         }
-                    }
-                } catch (ex) { /* ignore */ }
-            });
+                    } catch (ex) { /* ignore */ }
+                });
 
-            // Provide periodic preview deltas. Keep a handle so we can clear it when the webview
-            // is re-resolved/revealed to avoid duplicate intervals.
-            let sidebarInterval: ReturnType<typeof setInterval> | undefined;
-            const startSidebarInterval = () => {
-                if (sidebarInterval) { try { clearInterval(sidebarInterval as unknown as ReturnType<typeof setInterval>); } catch {} sidebarInterval = undefined; }
-                sidebarInterval = setInterval(() => {
+                // Provide periodic preview deltas.
+                const sidebarInterval = setInterval(() => {
                     try {
                         const preview = treeProvider.getPreviewData();
                         const delta: PreviewDeltaPayload['delta'] = {
@@ -503,23 +491,25 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                         webviewView.webview.postMessage(payload);
                     } catch (e) { /* ignore */ }
                 }, 5000);
-            };
-            // Register disposal handler first so it is guaranteed to run if the view
-            // is disposed very quickly after being resolved. This prevents the
-            // interval from continuing when the dispose handler might not yet be
-            // registered due to ordering.
-            webviewView.onDidDispose(() => { try { if (sidebarInterval) { try { clearInterval(sidebarInterval as unknown as ReturnType<typeof setInterval>); } catch {} sidebarInterval = undefined; } } catch (e) {} });
-            startSidebarInterval();
-            webviewView.onDidDispose(() => { try { scanProgressDisp(); } catch (e) {} });
-            webviewView.onDidDispose(() => { try { activeViews.delete(webviewView); } catch (e) {} });
-        }
+
+                webviewView.onDidDispose(() => {
+                    sidebarMsgDisp.dispose();
+                    disposeProgress();
+                    scanProgressDisp.dispose();
+                    clearInterval(sidebarInterval);
+                    if (pending) {
+                        clearTimeout(pending);
+                    }
+                    activeViews.delete(webviewView);
+                });
+            }
     };
     try {
         registeredDisposable = vscode.window.registerWebviewViewProvider('codebaseDigestDashboard', provider, { webviewOptions: { retainContextWhenHidden: true } });
         context.subscriptions.push(registeredDisposable);
-        console.log('[codebase-digest] webview view provider registered for codebaseDigestDashboard');
+        logger.info('webview view provider registered for codebaseDigestDashboard');
     } catch (err) {
-        console.error('[codebase-digest] failed to register webview view provider', err);
+        logger.error('failed to register webview view provider', err as Error);
         throw err;
     }
     // registration tracked via registeredDisposable
@@ -536,7 +526,7 @@ export function broadcastGenerationResult(result: any, folderPath?: string) {
     const workspaceFolders = vscode.workspace.workspaceFolders || [];
     const ambiguousMultiRoot = !inferred && workspaceFolders.length > 1;
     if (ambiguousMultiRoot) {
-        try { diagnostics.warn('broadcastGenerationResult skipped: ambiguous target folder in multi-root workspace; pass folderPath to broadcastGenerationResult'); } catch (e) {}
+        logger.warn('broadcastGenerationResult skipped: ambiguous target folder in multi-root workspace; pass folderPath to broadcastGenerationResult');
         return;
     }
 

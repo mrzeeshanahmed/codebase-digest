@@ -1,27 +1,7 @@
-// If a store is provided globally (from store.js), reuse it. Otherwise, define a tiny create()
-// helper as a fallback for older deployments.
 const vscode = acquireVsCodeApi();
-if (typeof window !== 'undefined' && window.store) {
-    // prefer the preloaded store; expose getState/setState/subscribe helpers
-    var store = window.store;
-} else {
-    // Minimal vanilla store helper compatible with a tiny subset of zustand's API
-    function create(fn) {
-        let state = {};
-        const listeners = new Set();
-        const set = (updater) => {
-            const next = typeof updater === 'function' ? updater(state) : Object.assign({}, state, updater);
-            state = next;
-            listeners.forEach(l => { try { l(state); } catch (e) {} });
-        };
-        const getState = () => state;
-        const subscribe = (l) => { listeners.add(l); return () => listeners.delete(l); };
-        const api = fn((patch) => set((s) => Object.assign({}, s, patch)), getState, { set, subscribe });
-        return Object.assign(api || {}, { setState: (patch) => set(patch), getState, subscribe });
-    }
-
-    // local store will be created below (kept as before)
-}
+const store = window.store;
+let isUnloading = false;
+let getStateTimeout;
 // track the current folder path (populated from incoming state/config)
 let currentFolderPath = null;
 // transient override for next generation only
@@ -52,41 +32,6 @@ let interactionTimeout = null;
 let pendingIncomingTree = null;
 let pendingIncomingSelectedPaths = null;
 
-// Zustand-like store for centralizing file tree + selection state in the webview.
-// We expose a small action surface so UI code and message handlers can call
-// intentful actions rather than mutating transient variables directly.
-const store = create((set) => ({
-    // core state
-    fileTree: {},
-    selectedPaths: [],
-    expandedPaths: [],
-    paused: false,
-    pendingPersistedSelection: null,
-    pendingPersistedFocusIndex: undefined,
-    // actions: intentful APIs for updating state
-    setState: (patch) => set((s) => Object.assign({}, s, patch)),
-    setFileTree: (tree, selectedPaths) => set((s) => Object.assign({}, s, { fileTree: tree || {}, selectedPaths: Array.isArray(selectedPaths) ? selectedPaths.slice() : (s.selectedPaths || []) })),
-    setSelection: (paths) => set(() => ({ selectedPaths: Array.isArray(paths) ? paths.slice() : [] })),
-    clearSelection: () => set(() => ({ selectedPaths: [] })),
-    // collectLeaves is declared below and referenced here to avoid inlining
-    selectAllFiles: () => set((s) => ({ selectedPaths: collectLeaves(s.fileTree) })),
-    togglePause: (p) => set(() => ({ paused: typeof p === 'undefined' ? !(store.getState().paused) : !!p })),
-    setExpandedPaths: (arr) => set(() => ({ expandedPaths: Array.isArray(arr) ? arr.slice() : [] })),
-    setPendingPersistedSelection: (sel, idx) => set(() => ({ pendingPersistedSelection: sel || null, pendingPersistedFocusIndex: typeof idx === 'number' ? idx : undefined }))
-}));
-
-// Helper used by the store action selectAllFiles to collect leaf file paths
-function collectLeaves(node, prefix = '') {
-    const out = [];
-    if (!node || typeof node !== 'object') { return out; }
-    for (const k of Object.keys(node)) {
-        const n = node[k];
-        const full = n && n.path ? n.path : `${prefix}${k}`;
-        if (n && n.__isFile) { out.push(full); }
-        else { out.push(...collectLeaves(n, `${full}/`)); }
-    }
-    return out;
-}
 
 // Initialize local mirrors from store and subscribe to updates to keep the UI
 // and local transient mirrors in sync. We intentionally keep a small set of
@@ -188,12 +133,20 @@ function decodeFromDataAttribute(v) {
     }
 }
 
+/**
+ * @param {string} actionType
+ * @param {object} [payload]
+ */
 function postAction(actionType, payload) {
     const base = Object.assign({ type: 'action', actionType }, payload || {});
     if (currentFolderPath) { base.folderPath = currentFolderPath; }
     try { vscode.postMessage(sanitizePayload(base)); } catch (e) { console.warn('postAction postMessage failed', e); }
 }
 
+/**
+ * @param {string} action
+ * @param {object} [payload]
+ */
 function postConfig(action, payload) {
     const base = Object.assign({ type: 'config', action }, payload || {});
     if (currentFolderPath) { base.folderPath = currentFolderPath; }
@@ -679,32 +632,38 @@ const MODEL_CONTEXT_MAP = Object.freeze({
     // 'o1': 0,
 });
 
+import { getHandler } from './commandRegistry.js';
+import './handlers/configHandler.js';
+import './handlers/generationResultHandler.js';
+import './handlers/ingestErrorHandler.js';
+import './handlers/ingestPreviewHandler.js';
+import './handlers/previewDeltaHandler.js';
+import './handlers/progressHandler.js';
+import './handlers/remoteRepoLoadedHandler.js';
+import './handlers/restoredStateHandler.js';
+import './handlers/stateHandler.js';
+import './handlers/treeDataHandler.js';
+
 // Lightweight message router: forward a few key message types to the UI functions
-window.addEventListener('message', event => {
+const messageHandler = event => {
     const msg = event.data;
-    try {
-        // Prefer a handler registered under the centralized command name map when present.
-        // This allows migrating literal strings to a single source of truth while remaining
-        // backwards compatible with the existing registry maps.
-        const cmdName = (window.__commandNames && msg && msg.type && window.__commandNames[msg.type]) ? window.__commandNames[msg.type] : (msg && msg.type);
-        if (cmdName && window.__commandRegistry && typeof window.__commandRegistry[cmdName] === 'function') {
-            try { window.__commandRegistry[cmdName](msg); } catch (e) { console.warn('commandRegistry handler error', e); }
-            return;
+    if (!msg || !msg.type) {
+        return;
+    }
+
+    const handler = getHandler(msg.type);
+    if (handler) {
+        try {
+            handler(msg);
+        } catch (e) {
+            console.warn(`Error in handler for ${msg.type}:`, e);
         }
-        // Fallback: if no registry entry found by mapped name, try legacy direct lookup using msg.type
-        if (msg && msg.type && window.__commandRegistry && typeof window.__commandRegistry[msg.type] === 'function') {
-            try { window.__commandRegistry[msg.type](msg); } catch (e) { console.warn('commandRegistry handler error (legacy)', e); }
-            return;
-        }
-    } catch (e) { /* swallow dispatch errors and fall back to legacy handling below */ }
-    // Legacy inline handlers have been moved to modular handler files under
-    // resources/webview/handlers and are registered via the command registry.
-    // If a message reaches this point it is unhandled by the registry and may
-    // represent a rare legacy case. For now, just log it for debugging.
-    try {
-        console.debug && console.debug('[codebase-digest][webview] unhandled message type:', msg && msg.type);
-    } catch (e) {}
-});
+    } else {
+        console.debug && console.debug('[codebase-digest][webview] unhandled message type:', msg.type);
+    }
+};
+
+window.addEventListener('message', messageHandler);
 
 function renderPreviewDelta(delta) {
     const statsTarget = nodes.stats || document.getElementById('stats');
@@ -801,70 +760,6 @@ function renderPreviewDelta(delta) {
     }
 }
 
-// Progress & toast helpers
-const progressContainer = () => nodes.progressContainer || document.getElementById('progress-container');
-const progressBar = () => nodes.progressBar || document.getElementById('progress-bar');
-function handleProgress(e) {
-    if (!e) { return; }
-    const container = progressContainer();
-    const bar = progressBar();
-    if (!container || !bar) { return; }
-    // Also update inline progress stats for generation as well as scan
-        try {
-            const progressStats = document.querySelector('.progress-stats');
-            if (progressStats) {
-            const pParts = [];
-            if (typeof e.totalFiles === 'number') { pParts.push(`${e.totalFiles} files`); }
-            if (typeof e.totalSize === 'number') { pParts.push(formatBytes(e.totalSize)); }
-            if (typeof e.tokenEstimate === 'number') { pParts.push(`~${Math.round(e.tokenEstimate)} tokens`); }
-            progressStats.textContent = pParts.join(' · ');
-        }
-    } catch (ex) {
-        // swallow
-    }
-    if (e.mode === 'start') {
-        if (e.determinate) {
-            container.classList.remove('indeterminate');
-            bar.style.width = (e.percent || 0) + '%';
-            bar.setAttribute('aria-valuenow', String(Math.round(e.percent || 0)));
-            // Accessible text for assistive tech
-            try { container.setAttribute('aria-busy', 'true'); } catch (ex) {}
-            try { bar.setAttribute('aria-valuetext', `${Math.round(e.percent || 0)}%`); } catch (ex) {}
-            try { const s = document.getElementById('progress-status'); if (s) { s.textContent = `Progress ${Math.round(e.percent || 0)}%`; } } catch (ex) {}
-        } else {
-            container.classList.add('indeterminate');
-            bar.style.width = '40%';
-            bar.removeAttribute('aria-valuenow');
-            try { container.setAttribute('aria-busy', 'true'); } catch (ex) {}
-            try { bar.removeAttribute('aria-valuetext'); } catch (ex) {}
-            try { const s = document.getElementById('progress-status'); if (s) { s.textContent = e.message || 'Working'; } } catch (ex) {}
-        }
-        showToast(e.message || (e.op + ' started'));
-        // If a write operation starts, reveal the Cancel write affordance
-    try { if (e.op === 'write') { const cw = nodes.cancelWriteBtn || document.getElementById('btn-cancel-write'); if (cw) { cw.hidden = false; cw.removeAttribute('aria-hidden'); } } } catch (ex) {}
-    } else if (e.mode === 'progress') {
-        container.classList.remove('indeterminate');
-        bar.style.width = (e.percent || 0) + '%';
-        bar.setAttribute('aria-valuenow', String(Math.round(e.percent || 0)));
-    try { bar.setAttribute('aria-valuetext', `${Math.round(e.percent || 0)}%`); } catch (ex) {}
-    try { const s = document.getElementById('progress-status'); if (s) { s.textContent = `Progress ${Math.round(e.percent || 0)}%`; } } catch (ex) {}
-    } else if (e.mode === 'end') {
-        container.classList.remove('indeterminate');
-        bar.style.width = '100%';
-        bar.setAttribute('aria-valuenow', '100');
-    try { bar.setAttribute('aria-valuetext', 'Complete'); } catch (ex) {}
-    try { const s = document.getElementById('progress-status'); if (s) { s.textContent = 'Complete'; } } catch (ex) {}
-        setTimeout(() => { bar.style.width = '0%'; }, 600);
-        showToast(e.message || (e.op + ' finished'), 'success');
-    // hide cancel affordance when write ends
-    try { if (e.op === 'write') { const cw = nodes.cancelWriteBtn || document.getElementById('btn-cancel-write'); if (cw) { cw.hidden = true; cw.setAttribute('aria-hidden', 'true'); } } } catch (ex) {}
-    }
-    // Clear busy when no longer active (end or if determinate but percent at 100)
-    try {
-        if (e.mode === 'end' || (e.determinate && Number(e.percent) === 100)) { const c = progressContainer(); if (c) { c.setAttribute('aria-busy', 'false'); } }
-    } catch (ex) {}
-}
-
 // Pause/Resume UI wiring
 const pauseBtn = () => nodes.pauseBtn || document.getElementById('btn-pause-resume');
 function updatePauseButton() {
@@ -909,15 +804,6 @@ function handleScanStats(e) {
     }
 }
 
-// augment handleProgress to also call handleScanStats
-const origHandleProgress = handleProgress;
-function handleProgressWrapper(e) {
-    origHandleProgress(e);
-    handleScanStats(e);
-}
-// replace handler reference used by message listener
-window.__handleProgress = handleProgressWrapper;
-
 function showToast(msg, kind='info', ttl=4000) {
     const root = document.getElementById('toast-root');
     if (!root) { return; }
@@ -929,22 +815,28 @@ function showToast(msg, kind='info', ttl=4000) {
     setTimeout(() => { t.remove(); }, ttl);
 }
 
+let originalGenerateButtonHTML = {};
+
 // Request initial state
 window.onload = function() {
     try { console.debug && console.debug('[codebase-digest][webview] window.onload: requesting state'); } catch (e) {}
+    document.querySelectorAll('[data-action="generateDigest"]').forEach((btn, i) => {
+        originalGenerateButtonHTML[i] = btn.innerHTML;
+    });
     vscode.postMessage({ type: 'getState' });
     // If no state arrives quickly (race with host), retry a couple of times to ensure provider responds
     let retries = 0;
     const retryGetState = () => {
+        if (isUnloading) return;
         try {
             retries += 1;
             if (retries > 5) { return; }
             try { console.debug && console.debug('[codebase-digest][webview] retrying getState attempt', retries); } catch (e) {}
             vscode.postMessage({ type: 'getState' });
-            setTimeout(retryGetState, 400 * retries);
+            getStateTimeout = setTimeout(retryGetState, 400 * retries);
         } catch (e) { /* swallow */ }
     };
-    setTimeout(() => { retryGetState(); }, 300);
+    getStateTimeout = setTimeout(() => { retryGetState(); }, 300);
     // Populate node cache for frequently used elements
     try {
         nodes.toolbar = document.getElementById('toolbar');
@@ -1199,15 +1091,9 @@ window.onload = function() {
             // default simple command
             // include transient override when generating
                     if (action === 'generateDigest') {
-                        // If the user toggled the transient "Disable redaction for this run" button,
-                        // the webview includes a one-shot overrides object which signals the
-                        // extension to bypass redaction for this generation only. We then immediately
-                        // clear the transient flag so it cannot be reused accidentally.
                         const payload = {};
                         if (overrideDisableRedaction) {
                             payload.overrides = { showRedacted: true };
-                            // mark that we used an override for this in-flight generation; do NOT
-                            // clear the UI immediately — only clear on success, and restore on error.
                             pendingOverrideUsed = true;
                         }
                         postAction(action, payload);
@@ -1297,6 +1183,29 @@ window.onload = function() {
     // Toggle handlers for the preset menu button and menu items
     const presetBtn = document.getElementById('preset-btn');
     const presetMenu = document.getElementById('preset-menu');
+
+    if (presetMenu) {
+        // If other code mutates `hidden` directly, keep aria-hidden in sync.
+        const obs = new MutationObserver(mutations => {
+            for (const m of mutations) {
+                if (m.attributeName === 'hidden') {
+                    if (presetMenu.hasAttribute('hidden')) {
+                        if (presetMenu.getAttribute('aria-hidden') !== 'true') {
+                            presetMenu.setAttribute('aria-hidden', 'true');
+                        }
+                        presetBtn && presetBtn.setAttribute('aria-expanded', 'false');
+                    } else {
+                        if (presetMenu.getAttribute('aria-hidden') !== 'false') {
+                            presetMenu.setAttribute('aria-hidden', 'false');
+                        }
+                        presetBtn && presetBtn.setAttribute('aria-expanded', 'true');
+                    }
+                }
+            }
+        });
+        obs.observe(presetMenu, { attributes: true, attributeFilter: ['hidden'] });
+    }
+
     function openPresetMenu() {
         if (!presetBtn || !presetMenu) { return; }
         presetBtn.setAttribute('aria-expanded', 'true');
@@ -1484,6 +1393,25 @@ window.onload = function() {
             } catch (e) { /* swallow */ }
         }
     });
+
+    const backBtn = document.getElementById('back-to-dashboard');
+    if (backBtn) {
+        backBtn.addEventListener('click', () => {
+            const resultsContainer = document.getElementById('results-container');
+            if (resultsContainer) resultsContainer.hidden = true;
+            const dashboard = document.getElementById('dashboard');
+            if (dashboard) dashboard.hidden = false;
+            store.setViewState('idle');
+        });
+    }
+
+    window.addEventListener('beforeunload', () => {
+        isUnloading = true;
+        if (getStateTimeout) {
+            clearTimeout(getStateTimeout);
+        }
+        window.removeEventListener('message', messageHandler);
+    });
 };
 
 function populateSettings(settings) {
@@ -1563,13 +1491,12 @@ function populateSettings(settings) {
     const maxTotalSizeRange = document.getElementById('maxTotalSizeRange');
     const tokenLimitNumber = document.getElementById('tokenLimitNumber');
     const tokenLimitRange = document.getElementById('tokenLimitRange');
-    const defaults = { maxFiles: 25000, maxTotalSizeBytes: 536870912, tokenLimit: 32000 };
     // thresholds may be provided normalized (flat) or as thresholds object
     const cfgThresholds = settings.thresholds || {};
-    const maxFilesVal = (typeof settings.maxFiles !== 'undefined') ? settings.maxFiles : (cfgThresholds.maxFiles || defaults.maxFiles);
+    const maxFilesVal = (typeof settings.maxFiles !== 'undefined') ? settings.maxFiles : (cfgThresholds.maxFiles);
     // maxTotalSizeVal is stored in bytes in settings; convert to MB for UI
-    const maxTotalSizeVal = (typeof settings.maxTotalSizeBytes !== 'undefined') ? settings.maxTotalSizeBytes : (cfgThresholds.maxTotalSizeBytes || defaults.maxTotalSizeBytes);
-    const tokenLimitVal = (typeof settings.tokenLimit !== 'undefined') ? settings.tokenLimit : (cfgThresholds.tokenLimit || defaults.tokenLimit);
+    const maxTotalSizeVal = (typeof settings.maxTotalSizeBytes !== 'undefined') ? settings.maxTotalSizeBytes : (cfgThresholds.maxTotalSizeBytes);
+    const tokenLimitVal = (typeof settings.tokenLimit !== 'undefined') ? settings.tokenLimit : (cfgThresholds.tokenLimit);
     if (maxFilesNumber) { maxFilesNumber.value = String(maxFilesVal); }
     if (maxFilesRange) { maxFilesRange.value = String(Math.max(100, Math.min(50000, maxFilesVal))); }
     // Display the number input in MB for user clarity

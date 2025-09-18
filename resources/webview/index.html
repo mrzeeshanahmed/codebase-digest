@@ -79,81 +79,6 @@
         </div>
         </div>
 
-        <script>
-            // Keep preset menu `hidden` and `aria-hidden` attributes consistent.
-            // Some existing handlers toggle only `hidden` — observe and normalize.
-            (function() {
-                const btn = document.getElementById('preset-btn');
-                const menu = document.getElementById('preset-menu');
-                if (!menu) return;
-
-                // Normalize initial state
-                if (menu.hasAttribute('hidden')) {
-                    menu.setAttribute('aria-hidden', 'true');
-                } else {
-                    menu.setAttribute('aria-hidden', 'false');
-                }
-
-                // Toggle function used by this file to open/close the menu.
-                function togglePresetMenu() {
-                    if (menu.hasAttribute('hidden')) {
-                        menu.removeAttribute('hidden');
-                        menu.setAttribute('aria-hidden', 'false');
-                        btn && btn.setAttribute('aria-expanded', 'true');
-                    } else {
-                        menu.setAttribute('hidden', '');
-                        menu.setAttribute('aria-hidden', 'true');
-                        btn && btn.setAttribute('aria-expanded', 'false');
-                    }
-                }
-
-                // Click handler for the preset button — prefer this toggle to ensure consistency
-                if (btn) {
-                    btn.addEventListener('click', (e) => {
-                        e.preventDefault();
-                        togglePresetMenu();
-                    });
-                }
-
-                // If other code mutates `hidden` directly, keep aria-hidden in sync.
-                const obs = new MutationObserver(mutations => {
-                    for (const m of mutations) {
-                        if (m.attributeName === 'hidden') {
-                            if (menu.hasAttribute('hidden')) {
-                                if (menu.getAttribute('aria-hidden') !== 'true') {
-                                    menu.setAttribute('aria-hidden', 'true');
-                                }
-                                btn && btn.setAttribute('aria-expanded', 'false');
-                            } else {
-                                if (menu.getAttribute('aria-hidden') !== 'false') {
-                                    menu.setAttribute('aria-hidden', 'false');
-                                }
-                                btn && btn.setAttribute('aria-expanded', 'true');
-                            }
-                        }
-                    }
-                });
-
-                obs.observe(menu, { attributes: true, attributeFilter: ['hidden'] });
-
-                // Close menu on escape or click outside for accessibility
-                document.addEventListener('keydown', (ev) => {
-                    if (ev.key === 'Escape' && !menu.hasAttribute('hidden')) {
-                        menu.setAttribute('hidden', '');
-                        menu.setAttribute('aria-hidden', 'true');
-                        btn && btn.setAttribute('aria-expanded', 'false');
-                    }
-                });
-
-                document.addEventListener('click', (ev) => {
-                    if (!menu.contains(ev.target) && ev.target !== btn && !menu.hasAttribute('hidden')) {
-                        menu.setAttribute('hidden', '');
-                        menu.setAttribute('aria-hidden', 'true');
-                        btn && btn.setAttribute('aria-expanded', 'false');
-                    }
-                });
-            })();
-        </script>
         <div class="action-bar">
              <button id="btn-refresh" class="secondary" type="button" data-action="refresh" title="Refresh File List">
                 <svg class="icon"><use href="#icon-refresh"></use></svg>
@@ -324,6 +249,16 @@
         <button id="btn-cancel-write" type="button" data-action="cancelWrite"></button>
         <button id="btn-token-count" type="button" data-action="tokenCount"></button>
     <!-- redaction toggle moved to visible header for discoverability -->
+    </div>
+
+    <div id="results-container" class="container" hidden>
+        <header class="main-header">
+            <h1>Generation Result</h1>
+        </header>
+        <div class="action-bar">
+            <button id="back-to-dashboard" class="primary">Back to File Selection</button>
+        </div>
+        <pre id="results-content" class="results-box"></pre>
     </div>
 
     <script src="./store.js"></script>

@@ -16,6 +16,20 @@ export type WebviewCommand =
 // Optionally export a const enum-like map for convenience when constructing
 // messages in TypeScript code. Using a plain object allows runtime access
 // and keeps the set minimal.
+export interface WebviewActionPayload {
+    type: 'action';
+    actionType: string;
+    folderPath?: string;
+    [key: string]: any;
+}
+
+export interface WebviewConfigPayload {
+    type: 'config';
+    action: string;
+    folderPath?: string;
+    [key: string]: any;
+}
+
 export const WebviewCommands = {
   state: 'state' as WebviewCommand,
   previewDelta: 'previewDelta' as WebviewCommand,
