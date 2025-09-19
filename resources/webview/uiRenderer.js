@@ -55,7 +55,20 @@
   // Designed to be safe in JSDOM (no throw when elements are missing) and to replace
   // small inline scripts formerly embedded directly in index.html.
 
-  function safe(fn) { return function(){ try { return fn.apply(null, arguments); } catch (e) { console && console.warn && console.warn('uiRenderer error', e); } }; }
+  // Use shared logger module for webview logging and provide a small adapter
+  var logger = null;
+  try { if (typeof require === 'function') { logger = require('./logger'); } } catch (e) { /* best-effort */ }
+  function _webviewLog(level /*, ...args */) {
+    try {
+      const args = Array.prototype.slice.call(arguments, 1);
+      if (logger && typeof logger[level] === 'function') {
+        try { logger[level].apply(logger, args); return; } catch (e) { /* fallthrough */ }
+      }
+      try { const c = console || {}; if (c[level]) { c[level].apply(c, args); } else if (c.log) { c.log.apply(c, args); } } catch (e) {}
+    } catch (e) {}
+  }
+  // webview log helper removed in favor of shared logger; safe fallback to console
+  function safe(fn) { return function(){ try { return fn.apply(null, arguments); } catch (e) { try { if (logger && typeof logger.warn === 'function') { logger.warn('uiRenderer error', e); } else if (typeof console !== 'undefined' && console.warn) { console.warn('uiRenderer error', e); } } catch (err) {} } }; }
 
   function getNode(id) { try { return (typeof window !== 'undefined' && window.__CBD_NODES__ && typeof window.__CBD_NODES__.getById === 'function') ? window.__CBD_NODES__.getById(id) : (typeof document !== 'undefined' ? document.getElementById(id) : null); } catch (e) { return null; } }
 
@@ -657,9 +670,9 @@
           if (st.previewDelta !== last.previewDelta) { renderPreviewDelta(st.previewDelta || {}); }
           // toasts/errors are surfaced by subscribers.js normally; keep compatibility
           last = Object.assign({}, st);
-        } catch (e) { console && console.warn && console.warn('uiRenderer subscriber failed', e); }
+  } catch (e) { try { if (logger && typeof logger.warn === 'function') { logger.warn('uiRenderer subscriber failed', e); } else if (console && console.warn) { console.warn('uiRenderer subscriber failed', e); } } catch (err) {} }
       });
-    } catch (e) { console && console.warn && console.warn('uiRenderer init failed', e); }
+  } catch (e) { try { _webviewLog('warn', 'uiRenderer init failed', e); } catch (err) {} }
   }
 
   // Auto-init on load

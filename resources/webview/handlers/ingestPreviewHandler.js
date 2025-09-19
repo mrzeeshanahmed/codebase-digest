@@ -1,8 +1,10 @@
 var ingestPreviewHandler;
-;(function () {
-  'use strict';
-  if (typeof window === 'undefined') { return; }
+"use strict";
 
+const logger = require('../logger');
+
+;(function () {
+  if (typeof window === 'undefined') { return; }
   /**
    * Handle `ingestPreview` messages containing a richer preview payload used
    * by the ingest modal or preview panel.
@@ -28,7 +30,7 @@ var ingestPreviewHandler;
           try { window.store.setPreview(payload); } catch (e) { const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/ingestPreviewHandler.js', function: 'setPreview' }); }
         }
       } catch (e) { const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/ingestPreviewHandler.js', context: 'store apply' }); }
-    } catch (e) { console.warn('ingestPreviewHandler error', e); }
+  } catch (e) { try { logger.warn('ingestPreviewHandler error', e); } catch (err) {} }
   };
 
   var cmd = (window.COMMANDS && window.COMMANDS.ingestPreview) ? window.COMMANDS.ingestPreview : (window.__commandNames && window.__commandNames.ingestPreview) ? window.__commandNames.ingestPreview : 'ingestPreview';

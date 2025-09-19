@@ -16,6 +16,7 @@ import { TokenAnalyzer } from './services/tokenAnalyzer';
 import * as vscode from 'vscode';
 import { safeExecuteCommand } from './utils/safeExecuteCommand';
 import { ensureZustandReferenced } from './utils/ensureZustandUsed';
+import logger from './utils/logger';
 
 
 import { CodebaseDigestTreeProvider } from './providers/treeDataProvider';
@@ -76,7 +77,16 @@ function stringifyErr(err: unknown): string {
 }
 
 export function activate(context: vscode.ExtensionContext) {
-try { console.log('[codebase-digest] activate() called'); } catch (e) { try { console.debug('extension.activate log failed', e); } catch {} }
+try { logger.info('activate() called'); } catch (e) { try { logger.debug('extension.activate log failed', e); } catch {} }
+// Configure logger debug flag from workspace/user configuration
+try {
+	try {
+		const cfg = vscode.workspace.getConfiguration('codebaseDigest');
+		const level = cfg.get('performanceLogLevel', 'info');
+		const debugEnabled = String(level) === 'debug';
+		try { logger.configureLogger({ debugEnabled }); } catch (e) {}
+	} catch (e) {}
+} catch (e) {}
 	// Ensure optional runtime references are exercised so depcheck/packagers mark packages as used
 	try { ensureZustandReferenced(); } catch (e) {}
 	// Surface any uncaught promise rejections or exceptions during extension runtime
@@ -283,6 +293,22 @@ try { console.log('[codebase-digest] activate() called'); } catch (e) { try { co
 			try {
 				// Only react to changes under the codebaseDigest section
 				if (!e.affectsConfiguration('codebaseDigest')) { return; }
+				// If performanceLogLevel changed, update logger debug flag
+				try {
+					if (e.affectsConfiguration('codebaseDigest.performanceLogLevel')) {
+						const newCfg = vscode.workspace.getConfiguration('codebaseDigest');
+						const level = newCfg.get('performanceLogLevel', 'info');
+						const debugEnabled = String(level) === 'debug';
+						try { logger.configureLogger({ debugEnabled }); } catch (ee) {}
+						// Also propagate to any already-open webviews so their webview-side logger toggles
+						try {
+							const mod = require('./providers/codebasePanel');
+							if (mod && typeof mod.refreshActiveViews === 'function') {
+								try { mod.refreshActiveViews(undefined, { settings: { debugEnabled } }); } catch (ee) {}
+							}
+						} catch (ee) {}
+					}
+				} catch (ee) {}
 				// Recompute a minimal preview state payload and broadcast to active views
 				// so they can update UI (e.g., token chips, output format and tree options)
 				try {

@@ -16,6 +16,7 @@ import { minimatch } from 'minimatch';
 import * as path from 'path';
 import { ConfigurationService } from '../services/configurationService';
 import { WebviewCommands } from '../types/webview';
+import { isRecord, hasProp, isNumber, isFunction } from '../utils/typeGuards';
 
 export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileNode>, vscode.Disposable {
     private expandState: ExpandState;
@@ -186,15 +187,15 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
                     try { this.debounceTimers.delete(key); } catch (e) { /* swallow */ }
                 }
             }, 250);
-            try { if (t && typeof (t as any).unref === 'function') { try { (t as any).unref(); } catch (e) {} } } catch (e) {}
+            try { if (t && typeof (t as unknown as { unref?: unknown }).unref === 'function') { try { (t as unknown as { unref?: Function }).unref!(); } catch (e) {} } } catch (e) {}
             this.debounceTimers.set(key, t as ReturnType<typeof setTimeout>);
         };
         // Create a small debounced refresh so rapid watcher storms don't trigger
         // many immediate full workspace scans. Use a short delay to remain
         // responsive but avoid thrashing the worker. Read delay from centralized service.
-        try {
+            try {
             const cfg = ConfigurationService.getWorkspaceConfig(this.workspaceFolder, this.diagnostics);
-            const debounceMs = typeof (cfg as any).watcherDebounceMs === 'number' && (cfg as any).watcherDebounceMs >= 0 ? (cfg as any).watcherDebounceMs : 300;
+            const debounceMs = isRecord(cfg) && hasProp(cfg, 'watcherDebounceMs') && isNumber((cfg as Record<string, unknown>)['watcherDebounceMs']) && ((cfg as Record<string, unknown>)['watcherDebounceMs'] as number) >= 0 ? ((cfg as Record<string, unknown>)['watcherDebounceMs'] as number) : 300;
             this.debouncedRefresh = debounce(() => {
                 try { this.refresh(); } catch (e) { /* swallow */ }
             }, debounceMs);
@@ -476,9 +477,9 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
                 // Allow tuning via workspace settings. If settings are not present,
                 // fall back to reasonable defaults defined above.
                 const wsCfg = ConfigurationService.getWorkspaceConfig(this.workspaceFolder, this.diagnostics);
-                const maxPending = typeof (wsCfg as any).maxPendingHydrations === 'number' ? (wsCfg as any).maxPendingHydrations : CodebaseDigestTreeProvider.DEFAULT_MAX_PENDING_HYDRATIONS;
-                const batchSize = typeof (wsCfg as any).pendingHydrationBatchSize === 'number' ? (wsCfg as any).pendingHydrationBatchSize : CodebaseDigestTreeProvider.DEFAULT_PENDING_BATCH_SIZE;
-                const batchDelay = typeof (wsCfg as any).pendingHydrationBatchDelayMs === 'number' ? (wsCfg as any).pendingHydrationBatchDelayMs : CodebaseDigestTreeProvider.DEFAULT_PENDING_BATCH_DELAY_MS;
+                const maxPending = isRecord(wsCfg) && hasProp(wsCfg, 'maxPendingHydrations') && isNumber((wsCfg as Record<string, unknown>)['maxPendingHydrations']) ? (wsCfg as Record<string, unknown>)['maxPendingHydrations'] as number : CodebaseDigestTreeProvider.DEFAULT_MAX_PENDING_HYDRATIONS;
+                const batchSize = isRecord(wsCfg) && hasProp(wsCfg, 'pendingHydrationBatchSize') && isNumber((wsCfg as Record<string, unknown>)['pendingHydrationBatchSize']) ? (wsCfg as Record<string, unknown>)['pendingHydrationBatchSize'] as number : CodebaseDigestTreeProvider.DEFAULT_PENDING_BATCH_SIZE;
+                const batchDelay = isRecord(wsCfg) && hasProp(wsCfg, 'pendingHydrationBatchDelayMs') && isNumber((wsCfg as Record<string, unknown>)['pendingHydrationBatchDelayMs']) ? (wsCfg as Record<string, unknown>)['pendingHydrationBatchDelayMs'] as number : CodebaseDigestTreeProvider.DEFAULT_PENDING_BATCH_DELAY_MS;
 
                 // Lightweight telemetry hook: prefer an explicitly injected metrics service, otherwise fall back to Diagnostics logging.
                 let metricsSvc: unknown = this.metrics;
@@ -532,13 +533,13 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
                         // and to let further watcher events be coalesced into the next scan.
                         // Schedule a short deferred full refresh. Track the timer so
                         // it can be cleared if the provider is disposed before it fires.
-                        try {
+                            try {
                             this.pendingFullRefreshTimer = setTimeout(() => {
                                 try { if (this.debouncedRefresh) { this.debouncedRefresh(); } } catch (e) { /* swallow */ }
                                 // Clear reference after run
                                 try { this.pendingFullRefreshTimer = null; } catch (e) { /* ignore */ }
                             }, 50);
-                            try { if (this.pendingFullRefreshTimer && typeof (this.pendingFullRefreshTimer as any).unref === 'function') { try { (this.pendingFullRefreshTimer as any).unref(); } catch (e) {} } } catch (e) {}
+                            try { if (this.pendingFullRefreshTimer && isFunction((this.pendingFullRefreshTimer as unknown as { unref?: unknown }).unref)) { try { (this.pendingFullRefreshTimer as unknown as { unref?: Function }).unref!(); } catch (e) {} } } catch (e) {}
                         } catch (e) { /* swallow scheduling errors */ }
         // Clear any scheduled full-refresh timer
         try {
@@ -1028,7 +1029,11 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
                             const parentNode = findNode(this.rootNodes);
                             if (parentNode && parentNode.children) {
                                 // locate the loadMore index
-                                const lmIndex = parentNode.children.findIndex(c => CodebaseDigestTreeProvider.isVirtualFileNode(c) && (c as any).virtualType === 'loadMore');
+                                const lmIndex = parentNode.children.findIndex(c => {
+                                    if (!CodebaseDigestTreeProvider.isVirtualFileNode(c)) { return false; }
+                                    const crec = c as unknown as Record<string, unknown>;
+                                    return typeof crec.virtualType === 'string' && crec.virtualType === 'loadMore';
+                                });
                                 const insertAt = lmIndex >= 0 ? lmIndex : parentNode.children.length;
                                 const newChildren = res.items;
                                 // normalize depth based on parent
@@ -1038,10 +1043,20 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
                                 const remaining = res.total - (nextIndex + newChildren.length);
                                 if (remaining > 0) {
                                     const newNext = nextIndex + newChildren.length;
-                                    const lm = parentNode.children.find(c => CodebaseDigestTreeProvider.isVirtualFileNode(c) && (c as any).virtualType === 'loadMore');
-                                    if (lm) { (lm as any).nextIndex = newNext; (lm as any).pageSize = pageSize; }
+                                    const lm = parentNode.children.find(c => {
+                                        if (!CodebaseDigestTreeProvider.isVirtualFileNode(c)) { return false; }
+                                        const crec = c as unknown as Record<string, unknown>;
+                                        return typeof crec.virtualType === 'string' && crec.virtualType === 'loadMore';
+                                    });
+                                    if (lm) {
+                                        try { const lrec = lm as unknown as Record<string, unknown>; lrec['nextIndex'] = newNext; lrec['pageSize'] = pageSize; } catch (e) { /* ignore */ }
+                                    }
                                 } else {
-                                    const lmPos = parentNode.children.findIndex(c => CodebaseDigestTreeProvider.isVirtualFileNode(c) && (c as any).virtualType === 'loadMore');
+                                    const lmPos = parentNode.children.findIndex(c => {
+                                        if (!CodebaseDigestTreeProvider.isVirtualFileNode(c)) { return false; }
+                                        const crec = c as unknown as Record<string, unknown>;
+                                        return typeof crec.virtualType === 'string' && crec.virtualType === 'loadMore';
+                                    });
                                     if (lmPos >= 0) { parentNode.children.splice(lmPos, 1); }
                                 }
                                 this.directoryCache.set(parentNode.path, parentNode.children);
@@ -1077,11 +1092,20 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
                     const relRelease = await m.lock();
                     try {
                         // Use shallow one-level scan with pagination for responsiveness
-                        const pageSize = Math.max(1, (config && typeof (config as any).directoryPageSize === 'number') ? (config as any).directoryPageSize : 200);
+                        // Read directoryPageSize defensively from config using runtime guards
+                        let pageSize = 200;
+                        try {
+                            if (isRecord(config) && hasProp(config, 'directoryPageSize') && isNumber((config as Record<string, unknown>)['directoryPageSize'])) {
+                                pageSize = Math.max(1, (config as Record<string, unknown>)['directoryPageSize'] as number);
+                            }
+                        } catch (e) {
+                            pageSize = 200;
+                        }
                         const res = await this.fileScanner.scanDirectoryShallow(element.path, config, this.scanToken || undefined, 0, pageSize);
                         const children = res.items;
                         // if there are more items than pageSize, append a virtual Load more node
                         if (res.total > children.length) {
+                            // Create a typed loadMore node without unsafe casts
                             const loadMore: FileNode & { virtualType: 'loadMore'; parentPath?: string; nextIndex?: number; pageSize?: number } = {
                                 type: 'file',
                                 name: 'Load more...',
@@ -1093,7 +1117,7 @@ export class CodebaseDigestTreeProvider implements vscode.TreeDataProvider<FileN
                                 parentPath: element.path,
                                 nextIndex: children.length,
                                 pageSize
-                            } as any;
+                            };
                             children.push(loadMore as FileNode);
                         }
                         // set depths

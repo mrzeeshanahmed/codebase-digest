@@ -1,10 +1,12 @@
 "use strict";
 
+const logger = require('../logger');
+
 function generationResultHandler(msg) {
   try {
     const res = msg && msg.result ? msg.result : {};
     // Store generation result metadata so subscribers can show toasts / update UI
-    try { if (typeof window !== 'undefined' && window.store && typeof window.store.setState === 'function') { window.store.setState({ lastGenerationResult: res }); } } catch (e) { console.warn('generationResultHandler: store.setState failed', e); }
+  try { if (typeof window !== 'undefined' && window.store && typeof window.store.setState === 'function') { window.store.setState({ lastGenerationResult: res }); } } catch (e) { try { logger.warn('generationResultHandler: store.setState failed', e); } catch (err) {} }
     // Track errors via store so subscribers can display toasts / update UI
     try {
       if (res && res.error && window.store && typeof window.store.addError === 'function') {
@@ -18,7 +20,7 @@ function generationResultHandler(msg) {
         window.store.setState({ lastGenerationResult: res });
       }
   } catch (e) { const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/generationResultHandler.js', function: 'setState' }); }
-  } catch (e) { const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/generationResultHandler.js' }); }
+  } catch (e) { try { logger.warn('generationResultHandler error', e); } catch (_) {} const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/generationResultHandler.js' }); }
 }
 
 const cmd = (typeof window !== 'undefined' && window.COMMANDS && window.COMMANDS.generationResult) ? window.COMMANDS.generationResult : (typeof window !== 'undefined' && window.__commandNames && window.__commandNames.generationResult) ? window.__commandNames.generationResult : 'generationResult';

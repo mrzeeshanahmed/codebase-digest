@@ -2,6 +2,8 @@
   'use strict';
   if (typeof window === 'undefined') { return; }
 
+  const logger = require('../logger');
+
   /**
    * Handle `progress` events describing long-running operations.
    *
@@ -18,13 +20,13 @@
     try {
       if (!msg) { return; }
       const e = msg && msg.event ? msg.event : null;
-      try { if (typeof window !== 'undefined' && window.store && typeof window.store.setLoading === 'function' && e && e.op) { window.store.setLoading(e.op, e.mode !== 'end'); } } catch (err) { console.warn('progressHandler: store.setLoading failed', err); }
+  try { if (typeof window !== 'undefined' && window.store && typeof window.store.setLoading === 'function' && e && e.op) { window.store.setLoading(e.op, e.mode !== 'end'); } } catch (err) { try { if (typeof window !== 'undefined' && window.__cbd_logger && typeof window.__cbd_logger.warn === 'function') { window.__cbd_logger.warn('progressHandler: store.setLoading failed', err); } else { console && console.warn && console.warn('progressHandler: store.setLoading failed', err); } } catch (e) {} }
   // Prefer store-driven updates. Keep legacy immediate hook as non-essential.
   // Prefer store-driven updates only. Legacy immediate UI hook removed so
   // handlers remain side-effect free and the renderer/subscribers react to
   // store changes to update the DOM. If immediate UI feedback is required,
   // the uiRenderer should subscribe to store or expose its own API.
-    } catch (err) { console.warn('progressHandler error', err); }
+  } catch (err) { try { logger.warn('progressHandler error', err); } catch (e) {} }
   }
 
   var cmd = (window.COMMANDS && window.COMMANDS.progress) ? window.COMMANDS.progress : (window.__commandNames && window.__commandNames.progress) ? window.__commandNames.progress : 'progress';

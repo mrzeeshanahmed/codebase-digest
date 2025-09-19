@@ -7,7 +7,9 @@ import { setWebviewHtml, wireWebviewMessages } from './webviewHelpers';
 import { ConfigurationService } from '../services/configurationService';
 import { debounce } from '../utils/debounce';
 import { Diagnostics } from '../utils/diagnostics';
+import logger from '../utils/logger';
 import { WebviewCommands, WebviewCommand } from '../types/webview';
+import { isRecord, isStringArray, hasProp, isNumber } from '../utils/typeGuards';
 const diagnostics = new Diagnostics('debug', 'Code Ingest');
 
 // Small typed payload shapes sent to the webview. Keep these minimal and
@@ -113,9 +115,10 @@ export class CodebaseDigestPanel {
                 const t = (msg && (msg.type || msg.actionType || msg.command)) ? (msg.type || msg.actionType || msg.command) : undefined;
                 if (!t) { return; }
                 // Map webview-level command names to VS Code commands
-                if (t === (WebviewCommands && (WebviewCommands as any).refreshTree) || t === 'refreshTree') {
-                    try { vscode.commands.executeCommand('codebaseDigest.refreshTree'); } catch (err) { try { diagnostics.warn('executeCommand refreshTree failed', err); } catch {} }
-                }
+                try {
+                    const refreshCmd = (WebviewCommands && (WebviewCommands as unknown) && (WebviewCommands as any).refreshTree) ? (WebviewCommands as any).refreshTree : 'refreshTree';
+                    if (t === refreshCmd || t === 'refreshTree') { try { vscode.commands.executeCommand('codebaseDigest.refreshTree'); } catch (err) { try { diagnostics.warn('executeCommand refreshTree failed', err); } catch {} } }
+                } catch (e) { /* swallow */ }
             } catch (e) { /* swallow */ }
         });
         this.panel.onDidDispose(() => { try { panelMsgDisp.dispose(); } catch (e) { /* ignore */ } });
@@ -130,7 +133,12 @@ export class CodebaseDigestPanel {
     // Ensure we cancel the debounced updater when the panel is disposed to
     // avoid leaving a pending timeout that retains closures.
     this.panel.onDidDispose(() => {
-        try { if ((debouncedPostDelta as any) && typeof (debouncedPostDelta as any).cancel === 'function') { try { (debouncedPostDelta as any).cancel(); } catch (e) { } } } catch (e) { }
+        try {
+            const dp = debouncedPostDelta as unknown as { cancel?: unknown };
+            if (dp && typeof dp === 'object' && typeof dp.cancel === 'function') {
+                try { (dp.cancel as Function)(); } catch (e) { /* ignore */ }
+            }
+        } catch (e) { }
         try { this.treeProvider.setPreviewUpdater(() => {}); } catch (e) { }
     });
     // Forward progress events to the webview
@@ -184,7 +192,7 @@ export class CodebaseDigestPanel {
     } catch (e) { try { diagnostics.warn('getting previewNow failed', e); } catch {} }
     // Periodic heartbeat to refresh stats every 5s
     const __cbd_preview_interval = setInterval(() => this.postPreviewDelta(), 5000);
-    try { if (__cbd_preview_interval && typeof (__cbd_preview_interval as any).unref === 'function') { try { (__cbd_preview_interval as any).unref(); } catch (e) {} } } catch (e) {}
+    try { if (__cbd_preview_interval && typeof ( (__cbd_preview_interval as unknown as { unref?: unknown }).unref) === 'function') { try { ((__cbd_preview_interval as unknown as { unref?: Function }).unref!()); } catch (e) {} } } catch (e) {}
     this.previewInterval = __cbd_preview_interval as unknown as ReturnType<typeof setInterval>;
     this.panel.onDidDispose(() => { try { if (this.previewInterval) { try { clearInterval(this.previewInterval as unknown as ReturnType<typeof setInterval>); } catch {} this.previewInterval = undefined; } } catch (e) { try { diagnostics.warn('clearing previewInterval failed', e); } catch {} } });
     this.panel.onDidDispose(() => { try { disposeProgress(); } catch (e) { try { diagnostics.warn('disposeProgress failed', e); } catch {} } });
@@ -198,26 +206,31 @@ export class CodebaseDigestPanel {
             try {
                 const cfgSnapshot = ConfigurationService.getWorkspaceConfig(vscode.Uri.file(this.folderPath), diagnostics);
                 const thresholdsDefault = { maxFiles: 25000, maxTotalSizeBytes: 536870912, tokenLimit: 32000 };
-                const thresholds = (cfgSnapshot as any).thresholds || {};
-                const payload = {
-                    type: WebviewCommands.config,
-                    folderPath: this.folderPath,
-                    settings: {
-                        respectGitignore: cfgSnapshot.respectGitignore,
-                        presets: Array.isArray((cfgSnapshot as any).presets) ? (cfgSnapshot as any).presets : [],
-                        filterPresets: Array.isArray((cfgSnapshot as any).filterPresets) ? (cfgSnapshot as any).filterPresets : [],
-                        outputFormat: cfgSnapshot.outputFormat,
-                        tokenModel: cfgSnapshot.tokenModel,
-                        binaryFilePolicy: cfgSnapshot.binaryFilePolicy,
-                        maxFiles: cfgSnapshot.maxFiles,
-                        maxTotalSizeBytes: cfgSnapshot.maxTotalSizeBytes,
-                        tokenLimit: cfgSnapshot.tokenLimit,
-                        thresholds: Object.assign({}, thresholdsDefault, thresholds),
-                        showRedacted: cfgSnapshot.showRedacted,
-                        redactionPatterns: cfgSnapshot.redactionPatterns,
-                        redactionPlaceholder: cfgSnapshot.redactionPlaceholder
-                    }
+                const thresholds = isRecord(cfgSnapshot) && hasProp(cfgSnapshot, 'thresholds') ? (cfgSnapshot as Record<string, unknown>)['thresholds'] as Record<string, unknown> : {};
+                const cfgRec = isRecord(cfgSnapshot) ? cfgSnapshot as Record<string, unknown> : {};
+                const presets = isStringArray(cfgRec['presets']) ? cfgRec['presets'] as string[] : [];
+                const filterPresets = isStringArray(cfgRec['filterPresets']) ? cfgRec['filterPresets'] as string[] : [];
+                const settings: Record<string, unknown> = {
+                    presets,
+                    filterPresets,
+                    thresholds: Object.assign({}, thresholdsDefault, thresholds),
                 };
+                if (typeof cfgRec['respectGitignore'] === 'boolean') { settings['respectGitignore'] = cfgRec['respectGitignore']; }
+                if (typeof cfgRec['outputFormat'] === 'string') { settings['outputFormat'] = cfgRec['outputFormat']; }
+                if (typeof cfgRec['tokenModel'] === 'string') { settings['tokenModel'] = cfgRec['tokenModel']; }
+                if (typeof cfgRec['binaryFilePolicy'] === 'string') { settings['binaryFilePolicy'] = cfgRec['binaryFilePolicy']; }
+                if (isNumber(cfgRec['maxFiles'])) { settings['maxFiles'] = cfgRec['maxFiles'] as number; }
+                if (isNumber(cfgRec['maxTotalSizeBytes'])) { settings['maxTotalSizeBytes'] = cfgRec['maxTotalSizeBytes'] as number; }
+                if (isNumber(cfgRec['tokenLimit'])) { settings['tokenLimit'] = cfgRec['tokenLimit'] as number; }
+                if (typeof cfgRec['showRedacted'] === 'boolean') { settings['showRedacted'] = cfgRec['showRedacted']; }
+                if (Array.isArray(cfgRec['redactionPatterns'])) { settings['redactionPatterns'] = cfgRec['redactionPatterns']; }
+                settings['redactionPlaceholder'] = typeof cfgRec['redactionPlaceholder'] === 'string' ? cfgRec['redactionPlaceholder'] : undefined;
+                const payload: { type: WebviewCommand; folderPath: string; settings: Record<string, unknown> } = { type: WebviewCommands.config, folderPath: this.folderPath, settings };
+                try {
+                    const perf = ConfigurationService.getWorkspaceConfig(vscode.Uri.file(this.folderPath));
+                    const perfRec = isRecord(perf) ? perf as Record<string, unknown> : {};
+                    settings['debugEnabled'] = perfRec['performanceLogLevel'] === 'debug';
+                } catch (e) { /* ignore */ }
                 this.panel.webview.postMessage(payload);
             } catch (e) { try { diagnostics.warn('postConfig failed (snapshot)', e); } catch {} }
         }
@@ -289,7 +302,7 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
     try {
         const tpRec = treeProvider as unknown as { workspaceRoot?: unknown };
         const wp = tpRec && typeof tpRec.workspaceRoot === 'string' ? tpRec.workspaceRoot : undefined;
-        console.log('[codebase-digest] registerCodebaseView called for', wp);
+        try { logger.info('registerCodebaseView called for', wp); } catch (e) {}
     } catch (e) {}
     // If a provider was already registered previously, dispose it so we can re-register with a new treeProvider.
     if (registeredDisposable) {
@@ -310,34 +323,33 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                 const folder = typeof tpRec.workspaceRoot === 'string' ? String(tpRec.workspaceRoot) : '';
                 const snapshot = ConfigurationService.getWorkspaceConfig(vscode.Uri.file(folder));
                 const thresholdsDefault = { maxFiles: 25000, maxTotalSizeBytes: 536870912, tokenLimit: 32000 };
-                const thresholds = (snapshot as any).thresholds || {};
-                const payload = {
-                    type: WebviewCommands.config,
-                    folderPath: folder,
-                    settings: {
-                        respectGitignore: snapshot.respectGitignore,
-                        presets: (snapshot as any).presets || [],
-                        filterPresets: (snapshot as any).filterPresets || [],
-                        outputFormat: snapshot.outputFormat,
-                        tokenModel: snapshot.tokenModel,
-                        binaryFilePolicy: snapshot.binaryFilePolicy,
-                        maxFiles: snapshot.maxFiles,
-                        maxTotalSizeBytes: snapshot.maxTotalSizeBytes,
-                        tokenLimit: snapshot.tokenLimit,
-                        thresholds: Object.assign({}, thresholdsDefault, thresholds),
-                        showRedacted: snapshot.showRedacted,
-                        redactionPatterns: snapshot.redactionPatterns || [],
-                        redactionPlaceholder: snapshot.redactionPlaceholder || '[REDACTED]'
-                    }
+                const snapRec = isRecord(snapshot) ? snapshot as Record<string, unknown> : {};
+                const thresholds = isRecord(snapRec['thresholds']) ? (snapRec['thresholds'] as Record<string, unknown>) : {};
+                const presets = isStringArray(snapRec['presets']) ? snapRec['presets'] as string[] : [];
+                const filterPresets = isStringArray(snapRec['filterPresets']) ? snapRec['filterPresets'] as string[] : [];
+                const settings: Record<string, unknown> = {
+                    presets,
+                    filterPresets,
+                    thresholds: Object.assign({}, thresholdsDefault, thresholds || {}),
                 };
-                webviewView.webview.postMessage(payload);
+                if (typeof snapRec['respectGitignore'] === 'boolean') { settings['respectGitignore'] = snapRec['respectGitignore']; }
+                if (typeof snapRec['outputFormat'] === 'string') { settings['outputFormat'] = snapRec['outputFormat']; }
+                if (typeof snapRec['tokenModel'] === 'string') { settings['tokenModel'] = snapRec['tokenModel']; }
+                if (typeof snapRec['binaryFilePolicy'] === 'string') { settings['binaryFilePolicy'] = snapRec['binaryFilePolicy']; }
+                if (isNumber(snapRec['maxFiles'])) { settings['maxFiles'] = snapRec['maxFiles'] as number; }
+                if (isNumber(snapRec['maxTotalSizeBytes'])) { settings['maxTotalSizeBytes'] = snapRec['maxTotalSizeBytes'] as number; }
+                if (isNumber(snapRec['tokenLimit'])) { settings['tokenLimit'] = snapRec['tokenLimit'] as number; }
+                if (typeof snapRec['showRedacted'] === 'boolean') { settings['showRedacted'] = snapRec['showRedacted']; }
+                if (Array.isArray(snapRec['redactionPatterns'])) { settings['redactionPatterns'] = snapRec['redactionPatterns']; }
+                settings['redactionPlaceholder'] = typeof snapRec['redactionPlaceholder'] === 'string' ? snapRec['redactionPlaceholder'] : '[REDACTED]';
+                webviewView.webview.postMessage({ type: WebviewCommands.config, folderPath: folder, settings });
             } catch (e) { /* ignore */ }
 
             // track active view so we can broadcast messages to it later (store advertised folderPath)
                 try {
                     const advertised = typeof tpRec.workspaceRoot === 'string' ? String(tpRec.workspaceRoot) : '';
                     activeViews.set(webviewView, advertised);
-                    try { console.debug('[codebase-digest] resolveWebviewView active view tracked for', advertised); } catch (e) {}
+                    try { logger.debug('resolveWebviewView active view tracked for', advertised); } catch (e) {}
                 } catch (e) {}
 
             // Use shared wiring helper for sidebar messages as well
@@ -361,27 +373,31 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                 // After applying changes, read back a validated snapshot and post that to the webview
                 try {
                     const snapshot = ConfigurationService.getWorkspaceConfig(vscode.Uri.file(folder));
-                    webviewView.webview.postMessage({ type: WebviewCommands.config, folderPath: folder, settings: {
-                        respectGitignore: snapshot.respectGitignore,
-                        presets: (snapshot as any).presets || [],
-                        filterPresets: (snapshot as any).filterPresets || [],
-                        outputFormat: snapshot.outputFormat,
-                        tokenModel: snapshot.tokenModel,
-                        binaryFilePolicy: snapshot.binaryFilePolicy,
-                        maxFiles: snapshot.maxFiles,
-                        maxTotalSizeBytes: snapshot.maxTotalSizeBytes,
-                        tokenLimit: snapshot.tokenLimit,
-                        thresholds: Object.assign({}, { maxFiles: 25000, maxTotalSizeBytes: 536870912, tokenLimit: 32000 }, (snapshot as any).thresholds || {}),
-                        showRedacted: snapshot.showRedacted,
-                        redactionPatterns: snapshot.redactionPatterns || [],
-                        redactionPlaceholder: snapshot.redactionPlaceholder || '[REDACTED]'
-                    } });
+                    const snapRec = isRecord(snapshot) ? snapshot as Record<string, unknown> : {};
+                    const presets = isStringArray(snapRec['presets']) ? snapRec['presets'] as string[] : [];
+                    const filterPresets = isStringArray(snapRec['filterPresets']) ? snapRec['filterPresets'] as string[] : [];
+                    const settings: Record<string, unknown> = {
+                        presets,
+                        filterPresets,
+                        thresholds: Object.assign({}, { maxFiles: 25000, maxTotalSizeBytes: 536870912, tokenLimit: 32000 }, (isRecord(snapRec['thresholds']) ? snapRec['thresholds'] as Record<string, unknown> : {})),
+                    };
+                    if (typeof snapRec['respectGitignore'] === 'boolean') { settings['respectGitignore'] = snapRec['respectGitignore']; }
+                    if (typeof snapRec['outputFormat'] === 'string') { settings['outputFormat'] = snapRec['outputFormat']; }
+                    if (typeof snapRec['tokenModel'] === 'string') { settings['tokenModel'] = snapRec['tokenModel']; }
+                    if (typeof snapRec['binaryFilePolicy'] === 'string') { settings['binaryFilePolicy'] = snapRec['binaryFilePolicy']; }
+                    if (isNumber(snapRec['maxFiles'])) { settings['maxFiles'] = snapRec['maxFiles'] as number; }
+                    if (isNumber(snapRec['maxTotalSizeBytes'])) { settings['maxTotalSizeBytes'] = snapRec['maxTotalSizeBytes'] as number; }
+                    if (isNumber(snapRec['tokenLimit'])) { settings['tokenLimit'] = snapRec['tokenLimit'] as number; }
+                    if (typeof snapRec['showRedacted'] === 'boolean') { settings['showRedacted'] = snapRec['showRedacted']; }
+                    if (Array.isArray(snapRec['redactionPatterns'])) { settings['redactionPatterns'] = snapRec['redactionPatterns']; }
+                    settings['redactionPlaceholder'] = typeof snapRec['redactionPlaceholder'] === 'string' ? snapRec['redactionPlaceholder'] : '[REDACTED]';
+                    webviewView.webview.postMessage({ type: WebviewCommands.config, folderPath: folder, settings });
                 } catch (e) { /* ignore */ }
             }, () => {
                 // on getState, send current preview
                 try {
                     const preview = treeProvider.getPreviewData();
-                    try { console.debug('[codebase-digest] resolveWebviewView posting state (onGetState):', preview && typeof preview.totalFiles === 'number' ? { totalFiles: preview.totalFiles, selectedCount: preview.selectedCount } : preview); } catch (e) {}
+                    try { logger.debug('resolveWebviewView posting state (onGetState):', preview && typeof preview.totalFiles === 'number' ? { totalFiles: preview.totalFiles, selectedCount: preview.selectedCount } : preview); } catch (e) {}
                     const statePayload: StatePayload = { type: WebviewCommands.state, state: preview };
                     webviewView.webview.postMessage(statePayload);
                 } catch (e) { /* ignore */ }
@@ -392,9 +408,10 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                         if (!msg) { return; }
                         const t = (msg && (msg.type || msg.actionType || msg.command)) ? (msg.type || msg.actionType || msg.command) : undefined;
                         if (!t) { return; }
-                        if (t === (WebviewCommands && (WebviewCommands as any).refreshTree) || t === 'refreshTree') {
-                            try { vscode.commands.executeCommand('codebaseDigest.refreshTree'); } catch (err) { try { diagnostics.warn('executeCommand refreshTree failed', err); } catch {} }
-                        }
+                        try {
+                            const refreshCmd = (WebviewCommands && (WebviewCommands as unknown) && (WebviewCommands as any).refreshTree) ? (WebviewCommands as any).refreshTree : 'refreshTree';
+                            if (t === refreshCmd || t === 'refreshTree') { try { vscode.commands.executeCommand('codebaseDigest.refreshTree'); } catch (err) { try { diagnostics.warn('executeCommand refreshTree failed', err); } catch {} } }
+                        } catch (e) { /* swallow */ }
                     } catch (e) { /* ignore */ }
                 });
                 webviewView.onDidDispose(() => { try { sidebarMsgDisp.dispose(); } catch (e) { /* ignore */ } });
@@ -412,7 +429,7 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                         const evt = { op: typeof rawOp === 'string' ? rawOp : undefined, mode: typeof rawMode === 'string' ? rawMode : undefined };
                         const payload: ProgressEventPayload = { type: WebviewCommands.progress, event: evt };
                         webviewView.webview.postMessage(payload);
-                    } catch (e) { try { console.warn('codebasePanel: post progress failed', e); } catch {} }
+                    } catch (e) { try { logger.warn('codebasePanel: post progress failed', e); } catch {} }
                 };
                 const disposeProgress = onProgress((ev: unknown) => {
                     const now = Date.now();
@@ -429,12 +446,12 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                             pending = null;
                             if (lastEvent) { lastSent = Date.now(); send(lastEvent); lastEvent = null; }
                         }, delay);
-                        try { if (pending && typeof (pending as any).unref === 'function') { try { (pending as any).unref(); } catch (e) {} } } catch (e) {}
+                        try { if (pending && typeof ((pending as unknown as { unref?: unknown }).unref) === 'function') { try { ((pending as unknown as { unref?: Function }).unref!()); } catch (e) {} } } catch (e) {}
                     }
                 });
                 // Ensure disposal when the view is closed
                 webviewView.onDidDispose(() => {
-                    try { disposeProgress(); } catch (e) { try { console.warn('codebasePanel: disposeProgress failed', e); } catch {} }
+                    try { disposeProgress(); } catch (e) { try { logger.warn('codebasePanel: disposeProgress failed', e); } catch {} }
                     if (pending) { clearTimeout(pending); pending = null; }
                 });
             })();
@@ -442,7 +459,7 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
             // send an immediate preview delta so chips populate quickly on reveal
                 try {
                     const preview = treeProvider.getPreviewData();
-                    try { console.debug('[codebase-digest] resolveWebviewView posting immediate previewDelta:', preview && typeof preview.totalFiles === 'number' ? { totalFiles: preview.totalFiles, selectedCount: preview.selectedCount } : preview); } catch (e) {}
+                    try { logger.debug('resolveWebviewView posting immediate previewDelta:', preview && typeof preview.totalFiles === 'number' ? { totalFiles: preview.totalFiles, selectedCount: preview.selectedCount } : preview); } catch (e) {}
                     const delta: PreviewDeltaPayload['delta'] = {
                         selectedCount: typeof preview.selectedCount === 'number' ? preview.selectedCount : undefined,
                         totalFiles: typeof preview.totalFiles === 'number' ? preview.totalFiles : undefined,
@@ -454,7 +471,7 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                     };
                     const payload: PreviewDeltaPayload = { type: WebviewCommands.previewDelta, delta } as PreviewDeltaPayload;
                     webviewView.webview.postMessage(payload);
-                } catch (e) { try { console.warn('codebasePanel: post previewDelta failed', e); } catch {} }
+                } catch (e) { try { logger.warn('codebasePanel: post previewDelta failed', e); } catch {} }
 
             // Hook into treeProvider progress to post preview deltas when scans start/end
             const scanProgressDisp = onProgress((ev: unknown) => {
@@ -503,7 +520,7 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
                         webviewView.webview.postMessage(payload);
                     } catch (e) { /* ignore */ }
                 }, 5000);
-                try { if (__cbd_sidebar_interval && typeof (__cbd_sidebar_interval as any).unref === 'function') { try { (__cbd_sidebar_interval as any).unref(); } catch (e) {} } } catch (e) {}
+                try { if (__cbd_sidebar_interval && typeof ((__cbd_sidebar_interval as unknown as { unref?: unknown }).unref) === 'function') { try { ((__cbd_sidebar_interval as unknown as { unref?: Function }).unref!()); } catch (e) {} } } catch (e) {}
                 sidebarInterval = __cbd_sidebar_interval as unknown as ReturnType<typeof setInterval>;
             };
             // Register disposal handler first so it is guaranteed to run if the view
@@ -519,12 +536,39 @@ export function registerCodebaseView(context: vscode.ExtensionContext, extension
     try {
         registeredDisposable = vscode.window.registerWebviewViewProvider('codebaseDigestDashboard', provider, { webviewOptions: { retainContextWhenHidden: true } });
         context.subscriptions.push(registeredDisposable);
-        console.log('[codebase-digest] webview view provider registered for codebaseDigestDashboard');
+    try { logger.info('webview view provider registered for codebaseDigestDashboard'); } catch (e) {}
     } catch (err) {
-        console.error('[codebase-digest] failed to register webview view provider', err);
+    try { logger.error('failed to register webview view provider', err); } catch (e) {}
         throw err;
     }
     // registration tracked via registeredDisposable
+}
+
+// Allow external callers to refresh active views with new settings (e.g., debugEnabled)
+export function refreshActiveViews(folderPath?: string, payload?: { settings?: Record<string, unknown> }) {
+    try {
+        // Broadcast to panels
+        for (const [key, panel] of panels.entries()) {
+            try {
+                const pub = panel as unknown as { folderPath?: string; panel?: { webview?: { postMessage?: (p: unknown) => void } } };
+                const panelFolder = typeof pub.folderPath === 'string' ? pub.folderPath : key;
+                if (!folderPath || panelFolder === folderPath || key === folderPath) {
+                    const p = pub.panel;
+                    if (p && p.webview && typeof p.webview.postMessage === 'function') {
+                        try { p.webview.postMessage({ type: WebviewCommands.config, folderPath: panelFolder, settings: Object.assign({}, (payload && payload.settings) || {}) }); } catch (e) { /* ignore per-view errors */ }
+                    }
+                }
+            } catch (e) { /* ignore */ }
+        }
+        // Broadcast to active sidebar views
+        for (const [vw, vwFolder] of activeViews.entries()) {
+            try {
+                if (!folderPath || vwFolder === folderPath) {
+                    vw.webview.postMessage({ type: WebviewCommands.config, folderPath: vwFolder, settings: Object.assign({}, (payload && payload.settings) || {}) });
+                }
+            } catch (e) { /* ignore */ }
+        }
+    } catch (e) { /* swallow */ }
 }
 
 // Broadcast generation result to open panels and sidebar views so webview can show toasts (e.g., redactionApplied)

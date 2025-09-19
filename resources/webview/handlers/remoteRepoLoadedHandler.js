@@ -1,5 +1,7 @@
 "use strict";
 
+const logger = require('../logger');
+
 function remoteRepoLoadedHandler(msg) {
   try {
     const payload = msg && msg.payload ? msg.payload : {};
@@ -12,7 +14,7 @@ function remoteRepoLoadedHandler(msg) {
     } else {
   try { if (window.store && typeof window.store.addError === 'function') { try { window.store.addError('Failed to load repository'); } catch (e) { const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/remoteRepoLoadedHandler.js', function: 'addError' }); } } } catch (e) { const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/remoteRepoLoadedHandler.js', context: 'addError' }); }
     }
-  } catch (e) { const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/remoteRepoLoadedHandler.js' }); }
+  } catch (e) { try { logger.warn('remoteRepoLoadedHandler error', e); } catch (_) {} const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/remoteRepoLoadedHandler.js' }); }
 }
 
 const cmd = (typeof window !== 'undefined' && window.COMMANDS && window.COMMANDS.remoteRepoLoaded) ? window.COMMANDS.remoteRepoLoaded : (typeof window !== 'undefined' && window.__commandNames && window.__commandNames.remoteRepoLoaded) ? window.__commandNames.remoteRepoLoaded : 'remoteRepoLoaded';

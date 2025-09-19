@@ -1,6 +1,8 @@
 /* configHandler: register via centralized command registry and export handler */
 "use strict";
 
+const logger = require('../logger');
+
 function configHandler(msg) {
   try {
     try { if (typeof window !== 'undefined') { try { window.currentFolderPath = msg.folderPath || msg.workspaceFolder || window.currentFolderPath; } catch (e) { const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/configHandler.js', function: 'assign currentFolderPath' }); } } } catch (e) { const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/configHandler.js', context: 'window assignment' }); }
@@ -17,7 +19,10 @@ function configHandler(msg) {
   // Let subscribers or uiRenderer pick up the settings from the store and
   // update the UI. Avoid direct DOM mutation from handlers for easier testing.
   } catch (e) { const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/configHandler.js', context: 'presets parsing' }); }
-  } catch (e) { const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/configHandler.js' }); }
+  } catch (e) {
+    try { logger.warn('configHandler error', e); } catch (_) {}
+    const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/configHandler.js' });
+  }
 }
 
 // Determine command name defensively (works in node test env where window may be undefined)

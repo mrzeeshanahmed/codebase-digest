@@ -2,6 +2,7 @@ import { DigestConfig, TraversalStats, FileNode } from '../types/interfaces';
 import { Formatters } from '../utils/formatters';
 import { getAnalyzer, listAnalyzers, AnalyzerResult } from '../plugins/index';
 import { env, ExtensionMode } from 'vscode';
+import { isRecord } from '../utils/typeGuards';
 
 // Limit how many files we run analyzers on during summary generation to avoid heavy work
 const ANALYZER_SAMPLE_LIMIT = 20;
@@ -11,7 +12,7 @@ export async function buildSummary(cfg: DigestConfig, stats: TraversalStats, fil
     let base = formatters.buildSummary(cfg, stats, files, tokenEstimate, '', '', warnings);
 
     // Optionally enrich the summary with analyzer findings if enabled
-    if ((cfg as any).includeAnalysisSummary) {
+    if (isRecord(cfg) && (cfg as any).includeAnalysisSummary) {
         try {
             const langs = listAnalyzers();
             if (langs && langs.length > 0) {
@@ -37,9 +38,10 @@ export async function buildSummary(cfg: DigestConfig, stats: TraversalStats, fil
                     const lang = ext.replace('.', '');
                     const analyzer = getAnalyzer(lang);
                     if (!analyzer) { continue; }
-                    try {
+                        try {
                         // Lightweight call: do not pass file content (analyzers may choose to read it themselves).
-                        const res = await analyzer(f.path, ext, undefined) as AnalyzerResult;
+                        const resRaw = await analyzer(f.path, ext, undefined);
+                        const res = (resRaw && typeof resRaw === 'object' && 'summary' in (resRaw as Record<string, unknown>)) ? resRaw as AnalyzerResult : undefined;
                         if (res && typeof res.summary === 'string' && res.summary.length > 0) {
                             // Normalize whitespace and cap length to prevent large summaries from bloating the header
                             let s = res.summary.replace(/\s+/g, ' ').trim();

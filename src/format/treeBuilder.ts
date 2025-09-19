@@ -10,7 +10,7 @@ export function buildTreeLines(files: FileNode[], mode: 'minimal' | 'full' = 'fu
     const f = new Formatters();
     if (mode === 'minimal') {
         // Use the static helper which already implements truncation
-        return (Formatters as any).buildSelectedTreeLines(files, maxLines);
+        return Formatters.buildSelectedTreeLines(files, maxLines);
     }
     // Full tree: build full tree string and split into lines
     const full = f.buildTree(files, true) || '';

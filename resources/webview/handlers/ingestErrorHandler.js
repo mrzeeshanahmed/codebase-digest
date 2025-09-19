@@ -1,5 +1,7 @@
 "use strict";
 
+const logger = require('../logger');
+
 function ingestErrorHandler(msg) {
   try {
     // Push error into store; subscribers may show toast / update ingest UI
@@ -7,8 +9,9 @@ function ingestErrorHandler(msg) {
       if (typeof window !== 'undefined' && window.store && typeof window.store.addError === 'function') {
         try { window.store.addError(msg.error || 'Ingest failed'); } catch (e) { const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/ingestErrorHandler.js', function: 'addError' }); }
       }
-    } catch (e) { const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/ingestErrorHandler.js', context: 'store addError' }); }
-  } catch (e) { const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/ingestErrorHandler.js' }); }
+    } catch (e) { try { logger.warn('ingestErrorHandler store addError failed', e); } catch (_) {} const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/ingestErrorHandler.js', context: 'store addError' }); }
+  } catch (e) { try { logger.warn('ingestErrorHandler error', e); } catch (_) {} const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/ingestErrorHandler.js' }); }
+
 }
 
 const cmd = (typeof window !== 'undefined' && window.COMMANDS && window.COMMANDS.ingestError) ? window.COMMANDS.ingestError : (typeof window !== 'undefined' && window.__commandNames && window.__commandNames.ingestError) ? window.__commandNames.ingestError : 'ingestError';

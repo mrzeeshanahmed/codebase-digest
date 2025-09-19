@@ -249,13 +249,21 @@ function node(id) {
     return nodes[id] || (typeof document !== 'undefined' ? document.getElementById(id) : null);
 }
 
-// Centralized lightweight logger for webview diagnostics. Use sparingly to avoid
-// overwhelming the console in normal operation.
+// Centralized lightweight logger for webview diagnostics. Use the injected
+// webview logger when present (window.__cbd_logger), otherwise fall back to console.warn.
 function logWarn(context, err) {
-    try {
-        if (err) { console.warn('[Code Ingest][webview] ' + context, err); }
-        else { console.warn('[Code Ingest][webview] ' + context); }
-    } catch (e) { /* best-effort logging only */ }
+    try { _webviewLog('warn', context, err); } catch (e) { /* best-effort logging only */ }
+}
+
+// Small helper to access webview logger with defensive fallbacks for all levels.
+function _webviewLog(level, msg /*, ...args */) {
+    const args = Array.prototype.slice.call(arguments, 1);
+    const logger = (typeof window !== 'undefined' && window.__cbd_logger) ? window.__cbd_logger : null;
+    if (logger && typeof logger[level] === 'function') {
+        try { logger[level].apply(null, args); return; } catch (e) { /* fallthrough to console */ }
+    }
+    // console fallback
+    try { const c = console || {}; if (c[level]) { c[level].apply(c, args); } else if (c.log) { c.log.apply(c, args); } } catch (e) {}
 }
 
 // Encode/decode helpers for safely storing file paths in data-* attributes.
@@ -284,13 +292,13 @@ function decodeFromDataAttribute(v) {
 function postAction(actionType, payload) {
     const base = Object.assign({ type: 'action', actionType }, payload || {});
     if (currentFolderPath) { base.folderPath = currentFolderPath; }
-    try { vscode.postMessage(sanitizePayload(base)); } catch (e) { console.warn('postAction postMessage failed', e); }
+    try { vscode.postMessage(sanitizePayload(base)); } catch (e) { _webviewLog('warn', '[main] postAction postMessage failed', e); }
 }
 
 function postConfig(action, payload) {
     const base = Object.assign({ type: 'config', action }, payload || {});
     if (currentFolderPath) { base.folderPath = currentFolderPath; }
-    try { vscode.postMessage(sanitizePayload(base)); } catch (e) { console.warn('postConfig postMessage failed', e); }
+    try { vscode.postMessage(sanitizePayload(base)); } catch (e) { _webviewLog('warn', '[main] postConfig postMessage failed', e); }
 }
 
 // Sanitize payloads sent from the webview to the extension host
@@ -572,12 +580,12 @@ window.addEventListener('message', event => {
         // backwards compatible with the existing registry maps.
         const cmdName = (window.__commandNames && msg && msg.type && window.__commandNames[msg.type]) ? window.__commandNames[msg.type] : (msg && msg.type);
         if (cmdName && window.__commandRegistry && typeof window.__commandRegistry[cmdName] === 'function') {
-            try { window.__commandRegistry[cmdName](msg); } catch (e) { console.warn('commandRegistry handler error', e); }
+            try { window.__commandRegistry[cmdName](msg); } catch (e) { try { _webviewLog('warn', 'commandRegistry handler error', e); } catch (err) {} }
             return;
         }
         // Fallback: if no registry entry found by mapped name, try legacy direct lookup using msg.type
         if (msg && msg.type && window.__commandRegistry && typeof window.__commandRegistry[msg.type] === 'function') {
-            try { window.__commandRegistry[msg.type](msg); } catch (e) { console.warn('commandRegistry handler error (legacy)', e); }
+            try { window.__commandRegistry[msg.type](msg); } catch (e) { try { _webviewLog('warn', 'commandRegistry handler error (legacy)', e); } catch (err) {} }
             return;
         }
     } catch (e) { /* swallow dispatch errors and fall back to legacy handling below */ }
@@ -586,7 +594,7 @@ window.addEventListener('message', event => {
     // If a message reaches this point it is unhandled by the registry and may
     // represent a rare legacy case. For now, just log it for debugging.
     try {
-        console.debug && console.debug('[codebase-digest][webview] unhandled message type:', msg && msg.type);
+    try { _webviewLog('debug', '[codebase-digest][webview] unhandled message type:', msg && msg.type); } catch (e) {}
     } catch (e) {}
 });
 
@@ -836,7 +844,7 @@ function showToast(msg, kind='info', ttl=4000) {
 
 // Request initial state
 window.onload = function() {
-    try { console.debug && console.debug('[codebase-digest][webview] window.onload: requesting state'); } catch (e) {}
+    try { try { _webviewLog('debug', '[codebase-digest][webview] window.onload: requesting state'); } catch (e) {} } catch (e) {}
     vscode.postMessage({ type: 'getState' });
     // If no state arrives quickly (race with host), retry a couple of times to ensure provider responds
     let retries = 0;
@@ -844,7 +852,7 @@ window.onload = function() {
         try {
             retries += 1;
             if (retries > 5) { return; }
-            try { console.debug && console.debug('[codebase-digest][webview] retrying getState attempt', retries); } catch (e) {}
+            try { try { _webviewLog('debug', '[codebase-digest][webview] retrying getState attempt', retries); } catch (e) {} } catch (e) {}
             vscode.postMessage({ type: 'getState' });
             try { var __cbd_retry_inner_to = setTimeout(retryGetState, 400 * retries); _registerTimerHandle(__cbd_retry_inner_to); if (__cbd_retry_inner_to && typeof __cbd_retry_inner_to.unref === 'function') { try { __cbd_retry_inner_to.unref(); } catch (e) {} } } catch (e) {}
         } catch (e) { /* swallow */ }
@@ -882,7 +890,7 @@ window.onload = function() {
             btnRefresh.addEventListener('click', (ev) => {
                 try { ev.preventDefault(); ev.stopPropagation(); } catch (e) {}
                 // Use postAction so payload is sanitized and includes folderPath
-                try { postAction('refresh'); } catch (e) { console.warn('btn-refresh postAction failed', e); }
+                try { postAction('refresh'); } catch (e) { try { _webviewLog('warn', 'btn-refresh postAction failed', e); } catch (err) {} }
             });
         }
 
@@ -896,7 +904,7 @@ window.onload = function() {
                     payload.overrides = { showRedacted: true };
                     pendingOverrideUsed = true;
                 }
-                try { postAction('generateDigest', payload); } catch (e) { console.warn('generateDigest postAction failed', e); }
+                try { postAction('generateDigest', payload); } catch (e) { try { _webviewLog('warn', 'generateDigest postAction failed', e); } catch (err) {} }
             });
         }
         // Toolbar controls are handled by the delegated data-action listeners below.

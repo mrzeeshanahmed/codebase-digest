@@ -1,5 +1,7 @@
 "use strict";
 
+const logger = require('../logger');
+
 function stateHandler(msg) {
   try {
     const s = msg && msg.state ? msg.state : {};
@@ -20,7 +22,7 @@ function stateHandler(msg) {
     // Do not directly update UI from handlers. The renderer/subscribers should
     // react to store changes (including paused) and update the DOM. Keep
     // handlers side-effect free besides writing to the store for testability.
-  } catch (e) { console.warn('stateHandler error', e); }
+  } catch (e) { try { logger.warn('stateHandler error', e); } catch (err) {} }
 }
 
 const cmd = (typeof window !== 'undefined' && window.COMMANDS && window.COMMANDS.state) ? window.COMMANDS.state : (typeof window !== 'undefined' && window.__commandNames && window.__commandNames.state) ? window.__commandNames.state : 'state';

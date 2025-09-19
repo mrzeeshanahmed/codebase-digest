@@ -3,6 +3,8 @@ var treeDataHandler;
   'use strict';
   if (typeof window === 'undefined') { return; }
 
+  const logger = require('../logger');
+
   /**
    * Handler for updateTree command — updates the webview store's treeData
    * payload shape: { type: 'updateTree', tree: <tree data> }
@@ -11,9 +13,9 @@ var treeDataHandler;
     try {
       if (!msg) { return; }
       const payload = msg.payload || null;
-      try { if (typeof window !== 'undefined' && window.store && typeof window.store.setTreeData === 'function') { window.store.setTreeData(payload); } } catch (e) { console.warn('treeDataHandler: setTreeData failed', e); }
-      try { if (typeof window !== 'undefined' && window.store && typeof window.store.setLoading === 'function') { window.store.setLoading(false); } } catch (e) { console.warn('treeDataHandler: setLoading failed', e); }
-    } catch (e) { console.warn('treeDataHandler error', e); }
+  try { if (typeof window !== 'undefined' && window.store && typeof window.store.setTreeData === 'function') { window.store.setTreeData(payload); } } catch (e) { try { logger.warn('treeDataHandler: setTreeData failed', e); } catch (err) {} }
+  try { if (typeof window !== 'undefined' && window.store && typeof window.store.setLoading === 'function') { window.store.setLoading(false); } } catch (e) { try { logger.warn('treeDataHandler: setLoading failed', e); } catch (err) {} }
+  } catch (e) { try { logger.warn('treeDataHandler error', e); } catch (err) {} }
   };
 
   var cmd = (window.COMMANDS && window.COMMANDS.updateTree) ? window.COMMANDS.updateTree : (window.__commandNames && window.__commandNames.updateTree) ? window.__commandNames.updateTree : 'updateTree';

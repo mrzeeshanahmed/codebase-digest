@@ -26,11 +26,17 @@
   }
 
   const internal = window[INTERNAL_KEY];
+  // Small helper: prefer window.__cbd_logger but fall back to console.* safely
+  // Use shared webview logger when available, otherwise fallback to console
+  var _sharedLogger = null;
+  try { if (typeof require === 'function') { _sharedLogger = require('./logger'); } } catch (e) { /* best-effort */ }
 
   const logger = {
-    warn: (msg, ...args) => { try { console && console.warn && console.warn('[commandRegistry] ' + msg, ...args); } catch (e) {} },
-    error: (msg, ...args) => { try { console && console.error && console.error('[commandRegistry] ' + msg, ...args); } catch (e) {} }
+    warn: function () { try { if (_sharedLogger && typeof _sharedLogger.warn === 'function') { _sharedLogger.warn.apply(_sharedLogger, arguments); } else if (typeof console !== 'undefined' && console.warn) { console.warn.apply(console, arguments); } } catch (e) {} },
+    error: function () { try { if (_sharedLogger && typeof _sharedLogger.error === 'function') { _sharedLogger.error.apply(_sharedLogger, arguments); } else if (typeof console !== 'undefined' && console.error) { console.error.apply(console, arguments); } } catch (e) {} }
   };
+
+  // ...existing code...
 
   function ensureHandlersArray(name) {
     if (!internal.map.has(name)) { internal.map.set(name, []); }
@@ -237,7 +243,7 @@
           } catch (e) { /* ignore */ }
 
         } catch (e) {
-          try { console && console.warn && console.warn('[commandRegistry] window.registerCommand failed', e); } catch (ex) {}
+          try { logger.warn('[commandRegistry] window.registerCommand failed', e); } catch (ex) { try { console && console.warn && console.warn('[commandRegistry] window.registerCommand failed', e); } catch (_) {} }
         }
       };
     }

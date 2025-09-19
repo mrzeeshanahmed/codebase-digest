@@ -59,7 +59,21 @@
     return (window.store && typeof window.store.getState === 'function' && typeof window.store.subscribe === 'function') ? window.store : null;
   }
 
-  function safe(fn) { return function () { try { return fn.apply(null, arguments); } catch (e) { console.warn('subscriber safe handler error', e); } }; }
+  // Use shared logger module when available; fall back to console safely
+  var _sharedLogger = null;
+  try { if (typeof require === 'function') { _sharedLogger = require('./logger'); } } catch (e) { /* best-effort */ }
+
+  function _webviewLog(level /*, ...args */) {
+    try {
+      const args = Array.prototype.slice.call(arguments, 1);
+      if (_sharedLogger && typeof _sharedLogger[level] === 'function') {
+        try { _sharedLogger[level].apply(_sharedLogger, args); return; } catch (e) { /* fallthrough */ }
+      }
+      try { const c = console || {}; if (c[level]) { c[level].apply(c, args); } else if (c.log) { c.log.apply(c, args); } } catch (e) {}
+    } catch (e) {}
+  }
+
+  function safe(fn) { return function () { try { return fn.apply(null, arguments); } catch (e) { try { _webviewLog('warn', 'subscriber safe handler error', e); } catch (err) {} } }; }
 
   // Render helper: prefer centralized `window.__UI_RENDERER__` when present.
   // If not available, fall back to a minimal, safe DOM renderer.
@@ -106,7 +120,7 @@
           }
         }
       }
-    } catch (e) { console.warn('renderSidebarFromTreeData failed', e); }
+  } catch (e) { try { _webviewLog('warn', 'renderSidebarFromTreeData failed', e); } catch (err) {} }
   }
 
   // Subscribe once store exists; if not present yet, poll briefly
@@ -126,7 +140,7 @@
 
         // treeData -> render sidebar (host-provided serialized snapshot)
         if (st.treeData !== last.treeData) {
-          try { renderSidebarFromTreeData(st.treeData, st.selectedPaths); } catch (e) { console.warn('treeData subscriber failed', e); }
+            try { renderSidebarFromTreeData(st.treeData, st.selectedPaths); } catch (e) { try { _webviewLog('warn', 'treeData subscriber failed', e); } catch (err) {} }
         }
 
             // previewDelta -> renderPreviewDelta (let uiRenderer handle preview/progress if present)
@@ -239,8 +253,8 @@
 
         // snapshot last
         last = Object.assign({}, st);
-      } catch (e) { console.warn('store subscriber encountered error', e); }
-    }));
+  } catch (e) { try { _webviewLog('warn', 'store subscriber encountered error', e); } catch (err) {} }
+  }));
   }
 
   init();

@@ -1,5 +1,7 @@
 "use strict";
 
+const logger = require('../logger');
+
 function restoredStateHandler(msg) {
   try {
     const s = msg && msg.state ? msg.state : {};
@@ -11,7 +13,7 @@ function restoredStateHandler(msg) {
     if (s.focusIndex !== undefined && typeof s.focusIndex === 'number') {
   try { if (typeof window !== 'undefined' && window.store && typeof window.store.setPendingPersistedSelection === 'function') { try { window.store.setPendingPersistedSelection(null, s.focusIndex); } catch (e) { const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/restoredStateHandler.js', function: 'setPendingPersistedSelection (focusIndex)' }); } } } catch (e) { const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/restoredStateHandler.js', context: 'focusIndex branch' }); }
     }
-  } catch (e) { const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/restoredStateHandler.js' }); }
+  } catch (e) { try { logger.warn('restoredStateHandler error', e); } catch (_) {} const { reportError } = require('../utils/errorReporter'); reportError(e, { file: 'handlers/restoredStateHandler.js' }); }
 }
 
 const cmd = (typeof window !== 'undefined' && window.COMMANDS && window.COMMANDS.restoredState) ? window.COMMANDS.restoredState : (typeof window !== 'undefined' && window.__commandNames && window.__commandNames.restoredState) ? window.__commandNames.restoredState : 'restoredState';
